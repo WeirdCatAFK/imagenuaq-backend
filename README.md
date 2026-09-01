@@ -1,9 +1,6 @@
 # imagenuaq-backend
 
-Express 5 backend template, native ES modules (`"type": "module"`). Node >= 20.12.
-Postgres through [postgrejs](https://www.npmjs.com/package/postgrejs), schema through
-Prisma Migrate.
-
+Setup
 ```bash
 npm install
 cp .env.example .env          # set DATABASE_URL
@@ -38,15 +35,13 @@ throw `ApiError` directly instead of being wrapped.
 
 ## Database
 
-Two tools, one database, and they do not overlap:
-
 - **postgrejs** owns runtime queries. The pool is built in
   `access/primitives/database.js` and used only by `resources/query.js`. Reads pass
   `objectRows: true` — postgrejs returns arrays of values otherwise.
 - **Prisma Migrate** owns the schema. `prisma/schema.prisma` has no `generator client`
   block and `@prisma/client` is not installed, so Prisma never loads at runtime; it is
   a CLI that produces SQL files in `prisma/migrations/`. Since Prisma 7 the connection
-  URL lives in `prisma.config.js`, not in the schema — that file reads the same `.env`
+  URL lives in `prisma.config.js`, not in the schema that file reads the same `.env`
   via `process.loadEnvFile`, because the CLI is a separate process and does not inherit
   the `--env-file` the npm scripts pass to node.
 
