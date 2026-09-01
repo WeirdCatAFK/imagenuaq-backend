@@ -1,0 +1,23 @@
+// Schema owned by Prisma Migrate. Prisma is a migration tool here and nothing else —
+// queries run through postgrejs, so there is no `generator client` block and
+// @prisma/client is not installed.
+//
+//   npm run db:migrate -- --name what_changed   author + apply a migration
+//   npm run db:deploy                           apply pending migrations (CI, prod)
+//   npm run db:status                           what is applied, what is pending
+//
+// The connection URL lives in prisma.config.js, not here: since Prisma 7 the datasource
+// block carries only the provider.
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Models go here. Example:
+//
+// model Item {
+//   id          Int      @id @default(autoincrement())
+//   name        String
+//   description String   @default("")
+//   createdAt   DateTime @default(now())
+// }

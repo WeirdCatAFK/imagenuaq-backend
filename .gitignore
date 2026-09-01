@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+dist/
+.DS_Store
+
+# Prisma writes generated artifacts here; migrations themselves are committed.
+prisma/generated/
