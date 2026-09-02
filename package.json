@@ -11,6 +11,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env main.js",
     "dev": "node --watch --env-file-if-exists=.env main.js",
+    "genChartDB": "node --env-file-if-exists=.env scripts/genCDB.js",
     "migrate": "node --env-file-if-exists=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js",
     "migrate:new": "npm run migrate -- create -j sql",
     "migrate:up": "npm run migrate -- up",
