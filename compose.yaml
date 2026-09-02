@@ -1,0 +1,89 @@
+# Comments are provided throughout this file to help you get started.
+# If you need more help, visit the Docker Compose reference guide at
+# https://docs.docker.com/go/compose-spec-reference/
+
+# Here the instructions define your application as a service called "server".
+# This service is built from the Dockerfile in the current directory.
+# You can add other services your application may depend on here, such as a
+# database or a cache. For examples, see the Awesome Compose repository:
+# https://github.com/docker/awesome-compose
+services:
+  server:
+    build:
+      context: .
+      args:
+        # Only sets the EXPOSE/default; the runtime value comes from `environment` below.
+        PORT: ${PORT:-3000}
+    # Everything in .env reaches the container (DATABASE_URL, LOG_FORMAT, CORS_ORIGIN...).
+    # The image itself never gets it: .env is in .dockerignore, so it stays out of the
+    # build context and is injected only at run time.
+    env_file:
+      - .env
+    # `environment` wins over `env_file`, so these override what .env sets.
+    environment:
+      NODE_ENV: production
+      # PORT comes from the .env file in this directory (Compose loads it automatically),
+      # falling back to 3000. src/api.js reads it via process.env.PORT.
+      PORT: ${PORT:-3000}
+      # Override the app's `localhost` default so the container listens on all interfaces
+      # and the published port below actually reaches it.
+      HOST: 0.0.0.0
+      # Same override reason: the DATABASE_URL in .env points at localhost, which inside
+      # this container is the container itself. `db` is the service name below, resolved
+      # on the Compose network, and the port is the container's own 5432 regardless of
+      # what the database is published as on the host.
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-imagenuaq}
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
+    # Wait for the healthcheck, not just for the container to exist: Postgres accepts
+    # connections only after its init scripts finish, and main.js opens the pool at once.
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:${POSTGRES_VERSION:-18}-alpine
+    restart: unless-stopped
+    user: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-imagenuaq}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      # Postgres 18 declares its volume at /var/lib/postgresql (PGDATA is the versioned
+      # subdirectory below it), not the /var/lib/postgresql/data of earlier images.
+      - db-data:/var/lib/postgresql
+    # Published so host-side tooling can reach it: node-pg-migrate is a devDependency and
+    # is not installed in the server image, so `npm run migrate:up` runs from your machine
+    # against the DATABASE_URL in .env. Change POSTGRES_PORT if 5432 is already taken.
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-imagenuaq}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    # Its own variable, not POSTGRES_PORT: that one is already 5432 for the database,
+    # and reusing it would publish two services on the same host port. The container
+    # side is 80 because that is what pgadmin4 listens on internally.
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    # The service is called `db`, not `postgres`. Waiting on the healthcheck also means
+    # pgadmin does not come up pointing at a database that is not accepting connections.
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:
+  pgadmin-data:
+

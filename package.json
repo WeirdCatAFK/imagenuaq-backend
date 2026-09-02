@@ -2,7 +2,7 @@
   "name": "imagenuaq-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Express backend (ESM) template — postgrejs + Prisma Migrate",
+  "description": "Express backend (ESM) — postgrejs + node-pg-migrate",
   "type": "module",
   "main": "main.js",
   "engines": {
@@ -11,9 +11,12 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env main.js",
     "dev": "node --watch --env-file-if-exists=.env main.js",
-    "db:migrate": "prisma migrate dev",
-    "db:deploy": "prisma migrate deploy",
-    "db:status": "prisma migrate status"
+    "migrate": "node --env-file-if-exists=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js",
+    "migrate:new": "npm run migrate -- create -j sql",
+    "migrate:up": "npm run migrate -- up",
+    "migrate:down": "npm run migrate -- down",
+    "migrate:redo": "npm run migrate -- redo",
+    "migrate:status": "npm run migrate -- up --dry-run"
   },
   "dependencies": {
     "cors": "^2.8.6",
@@ -23,6 +26,7 @@
     "postgrejs": "^2.23.1"
   },
   "devDependencies": {
-    "prisma": "^7.10.0"
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.23.0"
   }
 }
