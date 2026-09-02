@@ -11,12 +11,15 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env main.js",
     "dev": "node --watch --env-file-if-exists=.env main.js",
-    "genChartDB": "node --env-file-if-exists=.env scripts/genCDB.js",
+    "dbml": "node --no-deprecation --env-file-if-exists=.env scripts/genDBML.js",
     "migrate": "node --env-file-if-exists=.env node_modules/node-pg-migrate/bin/node-pg-migrate.js",
     "migrate:new": "npm run migrate -- create -j sql",
     "migrate:up": "npm run migrate -- up",
+    "postmigrate:up": "npm run dbml",
     "migrate:down": "npm run migrate -- down",
+    "postmigrate:down": "npm run dbml",
     "migrate:redo": "npm run migrate -- redo",
+    "postmigrate:redo": "npm run dbml",
     "migrate:status": "npm run migrate -- up --dry-run"
   },
   "dependencies": {
@@ -27,6 +30,9 @@
     "postgrejs": "^2.23.1"
   },
   "devDependencies": {
+    "@dbml/connector": "^10.1.1",
+    "@dbml/core": "^10.1.1",
+    "@dbml/core-chartdb": "npm:@dbml/core@^3.14.1",
     "node-pg-migrate": "^9.0.0",
     "pg": "^8.23.0"
   }
