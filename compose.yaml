@@ -13,7 +13,7 @@ services:
       context: .
       args:
         # Only sets the EXPOSE/default; the runtime value comes from `environment` below.
-        PORT: ${PORT:-3000}
+        PORT: ${PORT:?set PORT in .env (see .env.example)}
     # Everything in .env reaches the container (DATABASE_URL, LOG_FORMAT, CORS_ORIGIN...).
     # The image itself never gets it: .env is in .dockerignore, so it stays out of the
     # build context and is injected only at run time.
@@ -23,8 +23,8 @@ services:
     environment:
       NODE_ENV: production
       # PORT comes from the .env file in this directory (Compose loads it automatically),
-      # falling back to 3000. src/api.js reads it via process.env.PORT.
-      PORT: ${PORT:-3000}
+      # src/api.js reads it via process.env.PORT.
+      PORT: ${PORT:?set PORT in .env (see .env.example)}
       # Override the app's `localhost` default so the container listens on all interfaces
       # and the published port below actually reaches it.
       HOST: 0.0.0.0
@@ -32,9 +32,9 @@ services:
       # this container is the container itself. `db` is the service name below, resolved
       # on the Compose network, and the port is the container's own 5432 regardless of
       # what the database is published as on the host.
-      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-imagenuaq}
+      DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
     ports:
-      - "${PORT:-3000}:${PORT:-3000}"
+      - "${PORT:?set PORT in .env (see .env.example)}:${PORT:?set PORT in .env (see .env.example)}"
     # Wait for the healthcheck, not just for the container to exist: Postgres accepts
     # connections only after its init scripts finish, and main.js opens the pool at once.
     depends_on:
@@ -42,13 +42,22 @@ services:
         condition: service_healthy
 
   db:
-    image: postgres:${POSTGRES_VERSION:-18}-alpine
+    image: postgres:${POSTGRES_VERSION:?set POSTGRES_VERSION in .env (see .env.example)}-alpine
     restart: unless-stopped
     user: postgres
+    # Nothing in this file has a `:-` default. A fallback lets a missing or misspelled
+    # variable resolve to something plausible and start anyway, which is how a wrong
+    # value goes unnoticed. `:?` makes Compose refuse and name the variable, so .env is
+    # the single source of truth for every value here.
+    #
+    # Caveat this does NOT cover: Postgres reads POSTGRES_USER/PASSWORD/DB only when it
+    # initialises an empty data directory. Once db-data exists, changing them in .env
+    # has no effect and the old credentials stay live. Use `docker compose down -v` to
+    # re-initialise, which also deletes the data.
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-imagenuaq}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
     volumes:
       # Postgres 18 declares its volume at /var/lib/postgresql (PGDATA is the versioned
       # subdirectory below it), not the /var/lib/postgresql/data of earlier images.
@@ -57,9 +66,14 @@ services:
     # is not installed in the server image, so `npm run migrate:up` runs from your machine
     # against the DATABASE_URL in .env. Change POSTGRES_PORT if 5432 is already taken.
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:?set POSTGRES_PORT in .env (see .env.example)}:5432"
+    # psql, not pg_isready: pg_isready only asks whether the postmaster is accepting
+    # connections, so it reports healthy even when POSTGRES_USER names a role that does
+    # not exist - which is exactly what happens when .env changes after db-data was
+    # initialised. Actually selecting as that role makes the mismatch fail here, instead
+    # of later and less clearly in the server container.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-imagenuaq}"]
+      test: ["CMD-SHELL", "psql -U ${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)} -d ${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)} -c 'select 1' > /dev/null"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -68,13 +82,13 @@ services:
     image: dpage/pgadmin4:latest
     restart: unless-stopped
     environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:?set PGADMIN_DEFAULT_EMAIL in .env (see .env.example)}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:?set PGADMIN_DEFAULT_PASSWORD in .env (see .env.example)}
     # Its own variable, not POSTGRES_PORT: that one is already 5432 for the database,
     # and reusing it would publish two services on the same host port. The container
     # side is 80 because that is what pgadmin4 listens on internally.
     ports:
-      - "${PGADMIN_PORT:-5050}:80"
+      - "${PGADMIN_PORT:?set PGADMIN_PORT in .env (see .env.example)}:80"
     volumes:
       - pgadmin-data:/var/lib/pgadmin
     # The service is called `db`, not `postgres`. Waiting on the healthcheck also means

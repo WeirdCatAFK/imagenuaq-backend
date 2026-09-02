@@ -6,8 +6,8 @@ When you're ready, start your application by running:
 Your application will be available at http://localhost:3000.
 
 The port is not hardcoded: Compose reads `PORT` from the `.env` file in this
-directory (falling back to `3000`) and uses it for both the published port and
-the `PORT` variable the app reads. Set `PORT=8080` in `.env` — or run
+directory and uses it for both the published port and the `PORT` variable the
+app reads. Set `PORT=8080` in `.env` — or run
 `PORT=8080 docker compose up --build` — and the app is served on that port
 instead. `HOST` is forced to `0.0.0.0` in the container so the published port
 reaches it; the app's own `localhost` default would only bind loopback.
@@ -15,21 +15,38 @@ reaches it; the app's own `localhost` default would only bind loopback.
 ### The database
 
 `compose.yaml` also starts a `postgres:18-alpine` service called `db`, created from
-`POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` in `.env` (defaults:
-`imagenuaq` / `postgres` / `postgres`). Data lives in the `db-data` named volume and
-survives `docker compose down`; `docker compose down -v` deletes it.
+`POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` in `.env`. **No variable in
+`compose.yaml` has a fallback value.** If one is unset or empty, Compose refuses to run
+and names it, rather than quietly starting with something plausible. `.env` is the only
+source of these values. Data lives in the `db-data` named volume and survives
+`docker compose down`; `docker compose down -v` deletes it.
+
+#### Changing the database credentials
+
+Postgres reads `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` **only when it
+initialises an empty data directory**. Once `db-data` exists, editing them in `.env` has
+no effect: Compose passes the new values into the container, the container ignores them,
+and the original credentials stay live. Changing them therefore means
+`docker compose down -v`, which deletes the data along with them — dump anything you
+want to keep first, and re-run `npm run migrate:up` afterwards.
+
+The healthcheck runs `psql -U $POSTGRES_USER -d $POSTGRES_DB -c 'select 1'` rather than
+`pg_isready`, precisely so this mismatch surfaces: `pg_isready` only asks whether the
+server accepts connections and reports healthy even when the configured role does not
+exist. With the query, the container goes `unhealthy` and the server — gated on
+`condition: service_healthy` — never starts against the wrong database.
 
 The server waits for the database's healthcheck before starting, and connects to it as
 `db:5432` on the Compose network — the `DATABASE_URL` in `.env` points at `localhost`,
 which inside a container is the container itself, so `compose.yaml` overrides it.
 
-The database is also published on the host as `${POSTGRES_PORT:-5432}` so your local
+The database is also published on the host as `${POSTGRES_PORT}` so your local
 tooling can reach it. That matters for migrations: node-pg-migrate is a devDependency and
 is not installed in the server image, so migrations run from your machine, not in the
 container:
 
 ```
-npm run migrate:new -- add_something   # create a .sql migration
+npm run migrate:new -- add-something   # create a .sql migration
 npm run migrate:up                     # apply pending
 npm run migrate:status                 # print the SQL without running it
 ```
