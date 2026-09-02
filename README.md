@@ -59,9 +59,9 @@ inside a **single transaction**, so a failure half way leaves nothing behind; an
 **advisory lock** stops two processes migrating at once; and `--check-order` refuses to
 run if someone commits a migration dated earlier than one already applied.
 
-Workflow: `npm run migrate:new -- add_something`, write the up and down SQL in the
-generated file, `npm run migrate:up`, commit the file, then write the queries that use
-it in `resources/query.js`.
+Workflow: `npm run migrate:new -- add-something` (spaces and underscores in the name are
+normalised to dashes), write the up and down SQL in the generated file, `npm run
+migrate:up`, commit the file, then write the queries that use it in `resources/query.js`.
 
 ### Schema diagrams
 
@@ -70,9 +70,9 @@ indexes, views, enums and check constraints, in the format
 [ChartDB](https://chart.weirdcat.uk/) imports. Load it there with **Import database ->
 PostgreSQL**, then paste the file into the query-output box.
 
-Regenerate it after every migration and commit it, so the diagram in the repo always
-matches the migrations that produced it. It is pretty-printed for exactly that reason —
-a schema change shows up as a readable diff.
+`chartdb.json` is gitignored: it is a generated view of whatever database you pointed at,
+not a source file. Regenerate it after a migration whenever you want the diagram refreshed.
+It is pretty-printed anyway, so diffing two dumps by hand stays readable.
 
 The query in `scripts/chartdb-metadata.sql` is ChartDB's own, copied from upstream and
 evaluated for plain PostgreSQL. Re-extract it rather than editing it by hand if the
