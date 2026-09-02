@@ -4,7 +4,8 @@ Setup
 ```bash
 npm install
 cp .env.example .env          # set DATABASE_URL
-npm run db:migrate            # apply migrations
+docker compose up -d db       # Postgres on the port in .env
+npm run migrate:up            # apply migrations
 npm run dev                   # node --watch
 ```
 
@@ -12,9 +13,7 @@ npm run dev                   # node --watch
 
 ```
 main.js                  entry point: opens the pool, starts the API, shuts both down
-prisma.config.js         Prisma CLI config: where the datasource URL lives (Prisma 7+)
-prisma/schema.prisma     the schema, owned by Prisma Migrate
-prisma/migrations/       generated; commit these
+migrations/              one file per schema change; commit these
 src/
   api.js                 Api class: builds the app, mounts ROUTERS under /api/, start/stop
   routes/                one file per resource, thin: parse the request, call orchestration
@@ -38,21 +37,29 @@ throw `ApiError` directly instead of being wrapped.
 - **postgrejs** owns runtime queries. The pool is built in
   `access/primitives/database.js` and used only by `resources/query.js`. Reads pass
   `objectRows: true` — postgrejs returns arrays of values otherwise.
-- **Prisma Migrate** owns the schema. `prisma/schema.prisma` has no `generator client`
-  block and `@prisma/client` is not installed, so Prisma never loads at runtime; it is
-  a CLI that produces SQL files in `prisma/migrations/`. Since Prisma 7 the connection
-  URL lives in `prisma.config.js`, not in the schema that file reads the same `.env`
-  via `process.loadEnvFile`, because the CLI is a separate process and does not inherit
-  the `--env-file` the npm scripts pass to node.
+- **node-pg-migrate** owns the schema. It is a devDependency and never loads at
+  runtime: a CLI that applies the files in `migrations/` and records what it applied in
+  a `pgmigrations` table. Migrations are plain SQL with `-- Up Migration` and
+  `-- Down Migration` markers, so what runs against the database is what you wrote.
+  There is no schema file to keep in sync — the migrations *are* the schema history,
+  and `DATAMODEL.md` is where the resulting model is described.
 
-| Command              | What it does                                       |
-| -------------------- | -------------------------------------------------- |
-| `npm run db:migrate` | Author + apply a migration from the schema (dev)   |
-| `npm run db:deploy`  | Apply pending migrations without authoring (CI/prod)|
-| `npm run db:status`  | Show applied and pending migrations                |
+| Command                  | What it does                                          |
+| ------------------------ | ----------------------------------------------------- |
+| `npm run migrate:new`    | Create a timestamped `.sql` migration in `migrations/` |
+| `npm run migrate:up`     | Apply every pending migration                          |
+| `npm run migrate:down`   | Roll back the last applied migration                   |
+| `npm run migrate:redo`   | Roll the last one back and re-apply it                 |
+| `npm run migrate:status` | Print the SQL that `migrate:up` would run, run nothing |
 
-Workflow: edit `prisma/schema.prisma`, run `npm run db:migrate -- --name what_changed`,
-commit the generated folder, then write the SQL that uses it in `resources/query.js`.
+Defaults worth knowing, all on unless you turn them off: every pending migration runs
+inside a **single transaction**, so a failure half way leaves nothing behind; an
+**advisory lock** stops two processes migrating at once; and `--check-order` refuses to
+run if someone commits a migration dated earlier than one already applied.
+
+Workflow: `npm run migrate:new -- add_something`, write the up and down SQL in the
+generated file, `npm run migrate:up`, commit the file, then write the queries that use
+it in `resources/query.js`.
 
 ## Endpoints
 
@@ -63,6 +70,6 @@ commit the generated folder, then write the SQL that uses it in `resources/query
 
 ## Adding a resource
 
-Model in `prisma/schema.prisma` + a migration, SQL in `access/resources/query.js`, rules
+A migration in `migrations/`, SQL in `access/resources/query.js`, rules
 in `access/orchestration/<name>.js`, a router in `routes/<name>.js`, then one line in the
 `ROUTERS` map in `src/api.js`.
