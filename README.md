@@ -14,6 +14,7 @@ npm run dev                   # node --watch
 ```
 main.js                  entry point: opens the pool, starts the API, shuts both down
 migrations/              one file per schema change; commit these
+scripts/genCDB.js        dumps the live schema as ChartDB metadata (npm run generateChartDB)
 src/
   api.js                 Api class: builds the app, mounts ROUTERS under /api/, start/stop
   routes/                one file per resource, thin: parse the request, call orchestration
@@ -51,15 +52,35 @@ throw `ApiError` directly instead of being wrapped.
 | `npm run migrate:down`   | Roll back the last applied migration                   |
 | `npm run migrate:redo`   | Roll the last one back and re-apply it                 |
 | `npm run migrate:status` | Print the SQL that `migrate:up` would run, run nothing |
+| `npm run generateChartDB` | Dump the schema to `chartdb.json` for ChartDB          |
 
 Defaults worth knowing, all on unless you turn them off: every pending migration runs
 inside a **single transaction**, so a failure half way leaves nothing behind; an
 **advisory lock** stops two processes migrating at once; and `--check-order` refuses to
 run if someone commits a migration dated earlier than one already applied.
 
-Workflow: `npm run migrate:new -- add_something`, write the up and down SQL in the
-generated file, `npm run migrate:up`, commit the file, then write the queries that use
-it in `resources/query.js`.
+Workflow: `npm run migrate:new -- add-something` (spaces and underscores in the name are
+normalised to dashes), write the up and down SQL in the generated file, `npm run
+migrate:up`, commit the file, then write the queries that use it in `resources/query.js`.
+
+### Schema diagrams
+
+`npm run generateChartDB` reads the live schema and writes `chartdb.json`: tables, columns, keys,
+indexes, views, enums and check constraints, in the format
+[ChartDB](https://chart.weirdcat.uk/) imports. Load it there with **Import database ->
+PostgreSQL**, then paste the file into the query-output box.
+
+`chartdb.json` is gitignored: it is a generated view of whatever database you pointed at,
+not a source file. Regenerate it after a migration whenever you want the diagram refreshed.
+It is pretty-printed anyway, so diffing two dumps by hand stays readable.
+
+The query in `scripts/chartdb-metadata.sql` is ChartDB's own, copied from upstream and
+evaluated for plain PostgreSQL. Re-extract it rather than editing it by hand if the
+import format ever changes.
+
+ChartDB is a static frontend: it keeps diagrams in the browser's IndexedDB and exposes
+no API, so the paste is manual by necessity and a `/diagrams/<id>` URL only opens in the
+browser that created it. Nothing here can push to the instance.
 
 ## Endpoints
 
