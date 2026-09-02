@@ -1,0 +1,187 @@
+Table "roles" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(50) [unique, not null, note: 'admin, area_lead, worker, finance']
+}
+
+Table "contract_types" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(200) [not null]
+  "annual_offdays" int4 [not null]
+}
+
+Table "event_types" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null, note: 'horario, proyecto, ausencia, festivo']
+  "label" varchar(200) [not null]
+}
+
+Table "event_collections" {
+  "id" int8 [pk, not null, increment]
+  "key" varchar(200) [unique, not null, note: 'horario_daniel, vacaciones_contrato_x']
+  "name" varchar(300) [not null]
+  "description" text
+}
+
+Table "areas" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(200) [not null]
+  "description" text
+  "lead_user_id" int8
+}
+
+Table "users" {
+  "id" int8 [pk, not null, increment]
+  "primary_area_id" int8
+  "schedule_id" int8
+  "contract_type_id" int8 [not null]
+  "role_id" int8 [not null]
+  "email" varchar(320) [unique, not null]
+  "full_name" varchar(200) [not null]
+  "birthday" date
+  "password_hash" varchar(500)
+  "avatar_url" text
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    primary_area_id [type: btree, name: "users_idx_users_primary_area_id"]
+    role_id [type: btree, name: "users_index_2"]
+  }
+}
+
+Table "area_members" {
+  "id" int8 [pk, not null, increment]
+  "area_id" int8 [not null]
+  "user_id" int8 [not null]
+  "is_area_leader" bool [not null]
+
+  Indexes {
+    (user_id, area_id) [type: btree, unique, name: "area_members_idx_area_members_user_id_area_id"]
+    area_id [type: btree, name: "area_members_idx_area_members_area_id"]
+  }
+}
+
+Table "days_off" {
+  "id" int8 [pk, not null, increment]
+  "user_id" int8 [not null]
+  "year" int4 [not null]
+  "allotted" int4 [not null]
+  "used" int4 [not null, default: 0]
+
+  Indexes {
+    (user_id, year) [type: btree, unique, name: "days_off_idx_leave_balances_user_id_year"]
+  }
+  Note: 'One row per user per year. No annual reset job needed.'
+}
+
+Table "events" {
+  "id" int8 [pk, not null, increment]
+  "event_type_id" int8 [not null]
+  "title" varchar(300) [not null]
+  "description" text
+  "all_day" bool [not null, default: false]
+  "starts_at" timestamptz [not null]
+  "ends_at" timestamptz [not null]
+  "timezone" text [not null, default: 'America/Mexico_City']
+  "rule" text [note: 'RFC 5545, e.g. FREQ=WEEKLY;BYDAY=MO,WE,FR;INTERVAL=1. NULL = single occurrence']
+  "recurrence_until" timestamptz
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    event_type_id [type: btree, name: "events_idx_events_event_type_id"]
+    (starts_at, ends_at) [type: btree, name: "events_idx_events_starts_at_ends_at"]
+  }
+  Note: 'starts_at/ends_at describe the FIRST occurrence. Recurring events are expanded at read time for the requested window.'
+}
+
+Table "event_participants" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "area_id" int8
+  "user_id" int8
+
+  Indexes {
+    (area_id, event_id) [type: btree, unique, name: "event_participants_uq_event_participants_area"]
+    (user_id, event_id) [type: btree, unique, name: "event_participants_uq_event_participants_user"]
+    event_id [type: btree, name: "event_participants_idx_event_participants_event_id"]
+  }
+  Note: '''Exactly one of user_id / area_id set. Area rows fan out to all members at query time.
+CHECK event_participants_one_target: num_nonnulls(area_id, user_id) = 1'''
+}
+
+Table "event_exceptions" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "original_start" timestamptz [not null, note: 'Identifies which occurrence this overrides']
+  "is_cancelled" bool [not null, default: false]
+  "starts_at" timestamptz
+  "ends_at" timestamptz
+
+  Indexes {
+    (event_id, original_start) [type: btree, unique, name: "idx_event_exceptions_event_id_original_start"]
+  }
+}
+
+Table "collection_events" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "collection_id" int8 [not null]
+
+  Indexes {
+    (collection_id, event_id) [type: btree, unique, name: "idx_collection_events_collection_id_event_id"]
+  }
+}
+
+Table "absence_details" {
+  "event_id" int8 [pk, not null]
+  "reason" text [not null]
+  "document_url" text
+  "approved_by" int8
+  "approved_at" timestamptz
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+}
+
+Table "logs" {
+  "id" int8 [pk, not null, increment]
+  "user_id" int8
+  "action_id" int8
+}
+
+Ref "fk_absence_details_approved_by_users_id":"users"."id" < "absence_details"."approved_by"
+
+Ref "fk_absence_details_event_id_events_id":"events"."id" < "absence_details"."event_id"
+
+Ref "fk_area_members_area_id_areas_id":"areas"."id" < "area_members"."area_id"
+
+Ref "fk_area_members_user_id_users_id":"users"."id" < "area_members"."user_id"
+
+Ref "fk_areas_lead_user_id_users_id":"users"."id" < "areas"."lead_user_id"
+
+Ref "fk_collection_events_collection_id_event_collections_id":"event_collections"."id" < "collection_events"."collection_id"
+
+Ref "fk_collection_events_event_id_events_id":"events"."id" < "collection_events"."event_id"
+
+Ref "fk_days_off_user_id_users_id":"users"."id" < "days_off"."user_id"
+
+Ref "fk_event_exceptions_event_id_events_id":"events"."id" < "event_exceptions"."event_id"
+
+Ref "fk_event_participants_area_id_areas_id":"areas"."id" < "event_participants"."area_id"
+
+Ref "fk_event_participants_event_id_events_id":"events"."id" < "event_participants"."event_id"
+
+Ref "fk_event_participants_user_id_users_id":"users"."id" < "event_participants"."user_id"
+
+Ref "fk_events_created_by_users_id":"users"."id" < "events"."created_by"
+
+Ref "fk_events_event_type_id_event_types_id":"event_types"."id" < "events"."event_type_id"
+
+Ref "fk_logs_user_id_users_id":"users"."id" < "logs"."user_id"
+
+Ref "fk_users_contract_type_id_contract_types_id":"contract_types"."id" < "users"."contract_type_id"
+
+Ref "fk_users_primary_area_id_areas_id":"areas"."id" < "users"."primary_area_id"
+
+Ref "fk_users_role_id_roles_id":"roles"."id" < "users"."role_id"
+
+Ref "fk_users_schedule_id_event_collections_id":"event_collections"."id" < "users"."schedule_id"

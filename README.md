@@ -14,7 +14,8 @@ npm run dev                   # node --watch
 ```
 main.js                  entry point: opens the pool, starts the API, shuts both down
 migrations/              one file per schema change; commit these
-scripts/genCDB.js        dumps the live schema as ChartDB metadata (npm run generateChartDB)
+dbml/                    one committed snapshot per migration, plus current.dbml
+scripts/genDBML.js       writes dbml/ from the live schema (npm run dbml)
 src/
   api.js                 Api class: builds the app, mounts ROUTERS under /api/, start/stop
   routes/                one file per resource, thin: parse the request, call orchestration
@@ -45,14 +46,14 @@ throw `ApiError` directly instead of being wrapped.
   There is no schema file to keep in sync — the migrations *are* the schema history,
   and `DATAMODEL.md` is where the resulting model is described.
 
-| Command                  | What it does                                          |
-| ------------------------ | ----------------------------------------------------- |
-| `npm run migrate:new`    | Create a timestamped `.sql` migration in `migrations/` |
-| `npm run migrate:up`     | Apply every pending migration                          |
-| `npm run migrate:down`   | Roll back the last applied migration                   |
-| `npm run migrate:redo`   | Roll the last one back and re-apply it                 |
-| `npm run migrate:status` | Print the SQL that `migrate:up` would run, run nothing |
-| `npm run generateChartDB` | Dump the schema to `chartdb.json` for ChartDB          |
+| Command                   | What it does                                           |
+| ------------------------- | ------------------------------------------------------ |
+| `npm run migrate:new`     | Create a timestamped `.sql` migration in `migrations/`  |
+| `npm run migrate:up`      | Apply every pending migration, then refresh the DBML    |
+| `npm run migrate:down`    | Roll back the last applied migration, then refresh it   |
+| `npm run migrate:redo`    | Roll the last one back and re-apply it                  |
+| `npm run migrate:status`  | Print the SQL that `migrate:up` would run, run nothing  |
+| `npm run dbml`            | Refresh `dbml/` by hand — the migrate commands call it  |
 
 Defaults worth knowing, all on unless you turn them off: every pending migration runs
 inside a **single transaction**, so a failure half way leaves nothing behind; an
@@ -63,24 +64,67 @@ Workflow: `npm run migrate:new -- add-something` (spaces and underscores in the 
 normalised to dashes), write the up and down SQL in the generated file, `npm run
 migrate:up`, commit the file, then write the queries that use it in `resources/query.js`.
 
-### Schema diagrams
+### Schema snapshots
 
-`npm run generateChartDB` reads the live schema and writes `chartdb.json`: tables, columns, keys,
-indexes, views, enums and check constraints, in the format
-[ChartDB](https://chart.weirdcat.uk/) imports. Load it there with **Import database ->
-PostgreSQL**, then paste the file into the query-output box.
+`migrate:up`, `:down` and `:redo` each run `npm run dbml` afterwards (npm `post` hooks, so
+they fire only when the migration actually succeeded). That reads the live schema and writes
+it twice:
 
-`chartdb.json` is gitignored: it is a generated view of whatever database you pointed at,
-not a source file. Regenerate it after a migration whenever you want the diagram refreshed.
-It is pretty-printed anyway, so diffing two dumps by hand stays readable.
+- **`dbml/<migration>.dbml`** — the schema as of that migration, sharing the basename of the
+  `.sql` that produced it. `migrations/1788369848184_initial-schema.sql` pairs with
+  `dbml/1788369848184_initial-schema.dbml`, and the two directories sort alike.
+- **`dbml/current.dbml`** — a copy of the newest one under a stable name, so ChartDB and any
+  bookmark always point at the latest schema.
 
-The query in `scripts/chartdb-metadata.sql` is ChartDB's own, copied from upstream and
-evaluated for plain PostgreSQL. Re-extract it rather than editing it by hand if the
-import format ever changes.
+The snapshot is [DBML](https://dbml.dbdiagram.io/): tables, columns, types, defaults, keys,
+indexes, foreign keys, and the `COMMENT ON` text as `Note:`. To see what a migration did to
+the schema, diff its snapshot against the one before it — no need to replay anything:
 
-ChartDB is a static frontend: it keeps diagrams in the browser's IndexedDB and exposes
-no API, so the paste is manual by necessity and a `/diagrams/<id>` URL only opens in the
-browser that created it. Nothing here can push to the instance.
+```bash
+git diff --no-index dbml/1788369848184_initial-schema.dbml dbml/1788380071225_update-wording-daysoff.dbml
+```
+
+The file the migration lands on is rewritten every time, so rolling back and re-applying is
+idempotent. If a snapshot already exists and does not match the live schema, the generator
+warns and overwrites: that means an already-applied migration was edited, or the database
+drifted from its own history.
+
+None of these files are edited by hand. They are read out of the database, so the next
+migration overwrites anything you write; the schema is changed in `migrations/` and nowhere
+else. Commit the snapshot alongside the migration and the schema change is reviewable in the
+PR. `.gitattributes` pins them to LF — they are compared byte for byte, and a CRLF rewrite
+would read as drift on every fresh clone.
+
+The snapshot drops `pgmigrations` on purpose — it is node-pg-migrate's ledger, not part of
+the data model. One thing DBML genuinely cannot express is a **partial** index: the
+`WHERE area_id IS NOT NULL` predicate on `event_participants`'s two unique indexes is lost,
+and they read as plain unique indexes.
+
+To view it: open [ChartDB](https://chart.weirdcat.uk/) and use **Import DBML** with
+`dbml/current.dbml`. ChartDB is a static frontend — it keeps diagrams in the browser's
+IndexedDB and exposes no API, so the import is manual by necessity and a `/diagrams/<id>`
+URL only opens in the browser that created it. Nothing here can push to the instance.
+
+Working loop: sketch the change in ChartDB, export DBML from it to read the shape you want,
+hand-write the migration SQL, `npm run migrate:up`. Nothing applies a diagram back to the
+database — the migration is always written by a person.
+
+#### Why the output is written for an older DBML
+
+We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects two things
+the newer renderer emits — a snapshot containing either is valid DBML that fails on import
+with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites both:
+
+- **`Checks { … }` blocks** become `CHECK <name>: <expression>` lines in the table's note, so
+  `event_participants`'s `num_nonnulls(area_id, user_id) = 1` is still on the diagram.
+- **`?<?` / `<?` relationship operators** become plain `<`. The `?` marks an optional side;
+  whether the column is nullable is already on the column as `not null`, so nothing is lost.
+
+The generator then parses its own output with `@dbml/core-chartdb` — an npm alias for the
+exact 3.14.1 ChartDB ships — and fails the migration instead of writing a file that will not
+import. If ChartDB upgrades its parser, bump that alias in `package.json`; if it starts
+emitting something else 3.14 cannot read, the error names the line and points at
+`downgradeForChartDB()`.
 
 ## Endpoints
 
