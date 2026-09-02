@@ -28,39 +28,59 @@ services:
       # Override the app's `localhost` default so the container listens on all interfaces
       # and the published port below actually reaches it.
       HOST: 0.0.0.0
+      # Same override reason: the DATABASE_URL in .env points at localhost, which inside
+      # this container is the container itself. `db` is the service name below, resolved
+      # on the Compose network, and the port is the container's own 5432 regardless of
+      # what the database is published as on the host.
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-imagenuaq}
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
+    # Wait for the healthcheck, not just for the container to exist: Postgres accepts
+    # connections only after its init scripts finish, and main.js opens the pool at once.
+    depends_on:
+      db:
+        condition: service_healthy
 
-# The commented out section below is an example of how to define a PostgreSQL
-# database that your application can use. `depends_on` tells Docker Compose to
-# start the database before your application. The `db-data` volume persists the
-# database data between container restarts. The `db-password` secret is used
-# to set the database password. You must create `db/password.txt` and add
-# a password of your choosing to it before running `docker-compose up`.
-#     depends_on:
-#       db:
-#         condition: service_healthy
-#   db:
-#     image: postgres
-#     restart: always
-#     user: postgres
-#     secrets:
-#       - db-password
-#     volumes:
-#       - db-data:/var/lib/postgresql/data
-#     environment:
-#       - POSTGRES_DB=example
-#       - POSTGRES_PASSWORD_FILE=/run/secrets/db-password
-#     expose:
-#       - 5432
-#     healthcheck:
-#       test: [ "CMD", "pg_isready" ]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-# volumes:
-#   db-data:
-# secrets:
-#   db-password:
-#     file: db/password.txt
+  db:
+    image: postgres:${POSTGRES_VERSION:-18}-alpine
+    restart: unless-stopped
+    user: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-imagenuaq}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      # Postgres 18 declares its volume at /var/lib/postgresql (PGDATA is the versioned
+      # subdirectory below it), not the /var/lib/postgresql/data of earlier images.
+      - db-data:/var/lib/postgresql
+    # Published so host-side tooling can reach it: node-pg-migrate is a devDependency and
+    # is not installed in the server image, so `npm run migrate:up` runs from your machine
+    # against the DATABASE_URL in .env. Change POSTGRES_PORT if 5432 is already taken.
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-imagenuaq}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+    # Its own variable, not POSTGRES_PORT: that one is already 5432 for the database,
+    # and reusing it would publish two services on the same host port. The container
+    # side is 80 because that is what pgadmin4 listens on internally.
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    # The service is called `db`, not `postgres`. Waiting on the healthcheck also means
+    # pgadmin does not come up pointing at a database that is not accepting connections.
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db-data:
 
