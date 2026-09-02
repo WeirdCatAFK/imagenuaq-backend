@@ -75,6 +75,8 @@ services:
     # side is 80 because that is what pgadmin4 listens on internally.
     ports:
       - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
     # The service is called `db`, not `postgres`. Waiting on the healthcheck also means
     # pgadmin does not come up pointing at a database that is not accepting connections.
     depends_on:
@@ -83,4 +85,5 @@ services:
 
 volumes:
   db-data:
+  pgadmin-data:
 

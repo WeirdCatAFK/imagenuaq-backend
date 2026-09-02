@@ -46,8 +46,9 @@ with `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` from `.env`, then regi
 server pointing at host `db`, port `5432` (the container's own port, not the published
 one, since pgAdmin connects over the Compose network).
 
-It stores its own configuration in the container, so registered servers are lost when
-the container is recreated. Add a volume for `/var/lib/pgadmin` if that becomes annoying.
+Its configuration — the login accounts and the servers you register — lives in the
+`pgadmin-data` volume, so both survive `docker compose down`. `docker compose down -v`
+drops it along with the database data, and you register the server again.
 
 ### Deploying your application to the cloud
 
