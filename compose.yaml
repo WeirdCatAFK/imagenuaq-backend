@@ -33,6 +33,17 @@ services:
       # on the Compose network, and the port is the container's own 5432 regardless of
       # what the database is published as on the host.
       DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
+      # Same override reason: the paths in .env are host paths, and each disk is
+      # bind-mounted below at /srv/storage/<label>. The labels are what storage_volumes
+      # holds and what must not drift; only the paths differ between host and container,
+      # which is exactly why the database stores the label and never the path.
+      STORAGE_VOLUMES: main:/srv/storage/main,cold:/srv/storage/cold
+    # Each disk keeps its own .imagenuaq-volume marker, so a mount that silently fails to
+    # come up makes the server refuse to start instead of filling the container's own
+    # filesystem with blobs it will later look for on a disk.
+    volumes:
+      - ${STORAGE_MAIN_PATH:?set STORAGE_MAIN_PATH in .env (see .env.example)}:/srv/storage/main
+      - ${STORAGE_COLD_PATH:?set STORAGE_COLD_PATH in .env (see .env.example)}:/srv/storage/cold
     ports:
       - "${PORT:?set PORT in .env (see .env.example)}:${PORT:?set PORT in .env (see .env.example)}"
     # Wait for the healthcheck, not just for the container to exist: Postgres accepts
