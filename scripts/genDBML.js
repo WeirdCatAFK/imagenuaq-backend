@@ -78,26 +78,55 @@ function dropLedger(schema) {
   return schema;
 }
 
-// We generate with @dbml/core 10, but ChartDB bundles 3.14 and its parser rejects two things
-// the newer renderer emits. Both are downgraded here rather than left for the import to choke
-// on, since a snapshot ChartDB will not open defeats the point of the format.
+// We generate with @dbml/core 10, but ChartDB bundles 3.14 and its parser rejects three
+// things the newer renderer emits. All are downgraded here rather than left for the import to
+// choke on, since a snapshot ChartDB will not open defeats the point of the format.
 //
 //   Checks { … }   a much later addition; 3.14 fails with "Expected schema name or type".
 //                  Folded into the table note, so the constraint is still visible.
+//   [check: …]     the same constraint over a single column, which the connector reports on
+//                  the column rather than the table; 3.14 reads the settings list and fails
+//                  with 'Expected "default:" … but "c" found'. Folded into the same note.
 //   ?<? / <?       optionality markers on relationships; 3.14 only knows < > - <>. The
 //                  endpoint relations are normalised to plain '*' / '1', which makes the
 //                  renderer emit `<`. Whether the FK column is nullable is already on the
 //                  column itself as `not null`, so nothing is actually lost.
 function downgradeForChartDB(schema) {
+  // Every CHECK ends up in its table's note, because 3.14 can express none of them. They
+  // reach us by two different routes, though: a constraint over several columns arrives in
+  // schema.checks and renders as a `Checks { … }` block, while a single-column one rides on
+  // the column in schema.tableConstraints and renders inline as `check:`. Both are rejected
+  // on import, so both are collected here and the sources emptied.
+  const notes = new Map();
+  const collect = (key, check) => {
+    if (!notes.has(key)) notes.set(key, []);
+    notes.get(key).push(`CHECK ${check.name}: ${check.expression}`);
+  };
+
   for (const [key, checks] of Object.entries(schema.checks ?? {})) {
+    for (const check of checks) collect(key, check);
+  }
+  schema.checks = {};
+
+  for (const [key, columns] of Object.entries(schema.tableConstraints ?? {})) {
+    for (const constraint of Object.values(columns)) {
+      if (!constraint.checks?.length) continue;
+      // Collected under the table, not the column: the note belongs to the table either
+      // way, and the constraint name already says which column it is about.
+      for (const check of constraint.checks) collect(key, check);
+      // pk and unique live on this same object and 3.14 understands both, so only the
+      // checks are cleared.
+      constraint.checks = [];
+    }
+  }
+
+  for (const [key, lines] of notes) {
     const [schemaName, tableName] = key.split('.');
     const table = schema.tables.find((t) => t.name === tableName && t.schemaName === schemaName);
     if (!table) continue;
-    const lines = checks.map((c) => `CHECK ${c.name}: ${c.expression}`);
     table.note ??= { value: '' };
     table.note.value = [table.note.value, ...lines].filter(Boolean).join('\n');
   }
-  schema.checks = {};
 
   for (const ref of schema.refs) {
     for (const endpoint of ref.endpoints) {

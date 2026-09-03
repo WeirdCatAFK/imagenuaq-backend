@@ -111,12 +111,16 @@ database — the migration is always written by a person.
 
 #### Why the output is written for an older DBML
 
-We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects two things
-the newer renderer emits — a snapshot containing either is valid DBML that fails on import
-with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites both:
+We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects three things
+the newer renderer emits — a snapshot containing any of them is valid DBML that fails on
+import with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites all three:
 
 - **`Checks { … }` blocks** become `CHECK <name>: <expression>` lines in the table's note, so
   `event_participants`'s `num_nonnulls(area_id, user_id) = 1` is still on the diagram.
+- **Inline `check:` column attributes** get the same treatment. A CHECK over one column takes
+  a different route out of the connector than a multi-column one — it arrives on the column in
+  `schema.tableConstraints` rather than in `schema.checks` — and renders inline, so both
+  sources are drained into the same note. `files`'s `hash ~ '^[0-9a-f]{64}$'` is one of these.
 - **`?<?` / `<?` relationship operators** become plain `<`. The `?` marks an optional side;
   whether the column is nullable is already on the column as `not null`, so nothing is lost.
 
@@ -144,12 +148,8 @@ without changing any path.
 Two levels of fanout because a flat directory reaches millions of entries, where
 `readdir`, rsync and backup tools all degrade. No filename on disk because one piece of content has many
 names — that is what dedup means — so writing one here would pick an arbitrary winner and
-create a second, disagreeing source of truth. The name belongs to the node row and comes
+create a second, disagreeing source of truth. The name belongs to the `files` row and comes
 back as `Content-Disposition`.
-
-`npm run storage:demo` exercises the whole surface against two scratch volumes under the
-OS temp directory; it needs no database and no real disks, and it is the shortest way to
-see how `putContent` is meant to be called.
 
 Four things worth knowing before building on it:
 
