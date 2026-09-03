@@ -1,6 +1,7 @@
 # imagenuaq-backend
 
 Setup
+
 ```bash
 npm install
 cp .env.example .env          # set DATABASE_URL
@@ -22,7 +23,7 @@ src/
   access/                everything that reads or writes data
     orchestration/       business rules per domain
     resources/query.js   the only module that writes SQL
-    primitives/          connection pool
+    primitives/          connection pool, content store
   middlewares/           notFound, errorHandler
   utils/ApiError.js      typed HTTP errors
 ```
@@ -46,14 +47,14 @@ throw `ApiError` directly instead of being wrapped.
   There is no schema file to keep in sync — the migrations *are* the schema history,
   and `DATAMODEL.md` is where the resulting model is described.
 
-| Command                   | What it does                                           |
-| ------------------------- | ------------------------------------------------------ |
-| `npm run migrate:new`     | Create a timestamped `.sql` migration in `migrations/`  |
-| `npm run migrate:up`      | Apply every pending migration, then refresh the DBML    |
-| `npm run migrate:down`    | Roll back the last applied migration, then refresh it   |
-| `npm run migrate:redo`    | Roll the last one back and re-apply it                  |
-| `npm run migrate:status`  | Print the SQL that `migrate:up` would run, run nothing  |
-| `npm run dbml`            | Refresh `dbml/` by hand — the migrate commands call it  |
+| Command                    | What it does                                              |
+| -------------------------- | --------------------------------------------------------- |
+| `npm run migrate:new`    | Create a timestamped`.sql` migration in `migrations/` |
+| `npm run migrate:up`     | Apply every pending migration, then refresh the DBML      |
+| `npm run migrate:down`   | Roll back the last applied migration, then refresh it     |
+| `npm run migrate:redo`   | Roll the last one back and re-apply it                    |
+| `npm run migrate:status` | Print the SQL that`migrate:up` would run, run nothing   |
+| `npm run dbml`           | Refresh`dbml/` by hand — the migrate commands call it  |
 
 Defaults worth knowing, all on unless you turn them off: every pending migration runs
 inside a **single transaction**, so a failure half way leaves nothing behind; an
@@ -61,8 +62,7 @@ inside a **single transaction**, so a failure half way leaves nothing behind; an
 run if someone commits a migration dated earlier than one already applied.
 
 Workflow: `npm run migrate:new -- add-something` (spaces and underscores in the name are
-normalised to dashes), write the up and down SQL in the generated file, `npm run
-migrate:up`, commit the file, then write the queries that use it in `resources/query.js`.
+normalised to dashes), write the up and down SQL in the generated file, `npm run migrate:up`, commit the file, then write the queries that use it in `resources/query.js`.
 
 ### Schema snapshots
 
@@ -126,12 +126,61 @@ import. If ChartDB upgrades its parser, bump that alias in `package.json`; if it
 emitting something else 3.14 cannot read, the error names the line and points at
 `downgradeForChartDB()`.
 
+## File storage
+
+`access/primitives/storage.js` is a content-addressed store spread over several
+mounted disks. The arrangement is inverted from the obvious one: **Postgres is the
+filesystem, and the disks are a dumb bag of bytes keyed by SHA-256.** Identity is the
+content; the path is metadata on a row. The two axes then move independently — renaming a
+folder is one row update and nothing on disk moves, and draining a dying disk copies bytes
+without changing any path.
+
+```
+<mount>/.imagenuaq-volume   {"label":"main"} — verified at startup
+<mount>/tmp/                in-flight uploads; same filesystem, so rename(2) is atomic
+<mount>/content/ab/cd/<hash>  64 hex chars. No extension. No filename.
+```
+
+Two levels of fanout because a flat directory reaches millions of entries, where
+`readdir`, rsync and backup tools all degrade. No filename on disk because one piece of content has many
+names — that is what dedup means — so writing one here would pick an arbitrary winner and
+create a second, disagreeing source of truth. The name belongs to the node row and comes
+back as `Content-Disposition`.
+
+`npm run storage:demo` exercises the whole surface against two scratch volumes under the
+OS temp directory; it needs no database and no real disks, and it is the shortest way to
+see how `putContent` is meant to be called.
+
+Four things worth knowing before building on it:
+
+- **Bytes first, row second.** `putContent` writes and returns where the bytes landed; it
+  never touches the database. Commit the `files` and `file_locations` rows only after it resolves. A crash in
+  between leaves orphaned content for a sweeper to reclaim, whereas the reverse order leaves
+  a `files` row pointing at bytes that do not exist — a permanent 500.
+- **There is no update.** Different content is a different hash and therefore a different
+  content. Renames and moves happen on the `files` row, never here.
+- **Placement is recorded, not derived.** Content goes to whichever writable volume has the
+  most free space, and the database remembers which. Deriving it from the hash (`hash % n`)
+  would reshuffle everything already stored the moment a disk is added.
+- **The marker file is load-bearing.** A disk that fails to mount leaves an empty directory
+  on the root filesystem, and the service would otherwise write into it while recording
+  that content as living on a disk that is not there. `openVolumes()` refuses to start
+  without a matching `.imagenuaq-volume`. Initialise a genuinely new disk once, by hand,
+  with `initVolume()` — it is deliberately not automatic.
+
+Two costs this design has, stated plainly. **The database is now as critical as the
+disks**: lose it and the disks hold correctly-named but meaningless bytes. And **multi-disk
+is not redundancy** — one disk failing permanently loses that fraction of the corpus with
+no partial recovery, so either ZFS/SnapRAID sits underneath or `file_locations` grows a
+second row per hash. The schema supports the second without change; nothing implements it
+yet.
+
 ## Endpoints
 
-| Method | Route         | Notes                                          |
-| ------ | ------------- | ---------------------------------------------- |
-| GET    | `/`           | Readiness ping, no database involved           |
-| GET    | `/api/health` | 200 while Postgres answers, 503 once it stops  |
+| Method | Route           | Notes                                         |
+| ------ | --------------- | --------------------------------------------- |
+| GET    | `/`           | Readiness ping, no database involved          |
+| GET    | `/api/health` | 200 while Postgres answers, 503 once it stops |
 
 ## Adding a resource
 
