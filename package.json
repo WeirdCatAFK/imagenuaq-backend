@@ -23,6 +23,7 @@
     "migrate:status": "npm run migrate -- up --dry-run"
   },
   "dependencies": {
+    "@azure/msal-node": "^6.0.0",
     "cors": "^2.8.6",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
