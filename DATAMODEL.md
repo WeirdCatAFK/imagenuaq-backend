@@ -13,7 +13,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | Módulo | Tablas | Estado |
 | --- | --- | --- |
 | USR | `users`, `roles`, `areas`, `area_members`, `contract_types`, `permissions`, `role_permissions` | Implementado; roles por área pendientes (§5.2) |
-| CAL / AUS | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado |
+| CAL / AUS | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado; `contract_type_entitlements` aún sin topes (§5.4) |
 | ARC | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens` | Implementado |
 | — | `logs`, `actions` | Implementado |
 | **SOL, PRY, FLW, TSK, EST** | — | **Propuesto**: la forma en `design/`, el porqué en §2, la cobertura en §3 |
@@ -229,7 +229,7 @@ Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ell
 ## 5. Huecos en el modelo ya implementado
 
 Independientes de la columna vertebral, y encontrados al contrastar el esquema vigente con
-los requerimientos. **Los tres se cerraron en `I0-dbFixes`**, una migración por hueco para
+los requerimientos. **Los cuatro se cerraron en `I0-dbFixes`**, una migración por hueco para
 que el rollback fuera granular:
 
 | Hueco | Migración | Estado |
@@ -237,6 +237,7 @@ que el rollback fuera granular:
 | 5.1 Saldos sin dimensión de tipo | `1788545750396_absence-types-and-balances.sql` | Cerrado |
 | 5.2 Sin dónde guardar un permiso | `1788545749090_role-permissions.sql` | Cerrado salvo los roles por área |
 | 5.3 `logs` sin objeto | `1788545740478_logs-target.sql` | Cerrado |
+| 5.4 Catálogos vacíos | `1788794776184_catalog-bootstrap.sql` | Cerrado salvo los topes por esquema |
 
 El diagnóstico se conserva abajo porque explica por qué el esquema quedó como quedó.
 
@@ -311,3 +312,53 @@ posible porque el objetivo es una tabla distinta en cada fila; lo que sí se exi
 dos mitades viajen juntas, con el mismo patrón `num_nonnulls(...) IN (0, 2)` de
 `event_participants` y `access_tokens` — cero es legítimo (`user_login` no tiene objeto),
 uno siempre es un error. Con esto §2.7 ya es implementable.
+
+### 5.4 Los catálogos estaban vacíos — cerrado
+
+El esquema era correcto y la base era inservible. Siete migraciones levantaron 26 tablas y
+sembraron dos catálogos: `permissions` y la única fila de `absence_types` que necesitaba su
+propio backfill. Todo lo demás a lo que apunta una llave foránea `NOT NULL` quedó vacío, y
+eso no es un detalle cosmético: en una base recién migrada cierra los caminos de escritura.
+
+- `users.role_id` y `users.contract_type_id` son `NOT NULL` y `roles` y `contract_types` no
+  tenían filas: no se podía insertar un usuario, y sin usuario no hay sesión, ni autor, ni
+  integrante de área, ni ausencia.
+- `logs.action_id` es `NOT NULL` contra `actions`, vacía: `RF-USR-07` pide bitácora y no se
+  podía escribir un solo renglón.
+- `events.event_type_id` es `NOT NULL` contra `event_types`, vacía: la mitad de calendario
+  quedaba igual de cerrada.
+- `role_permissions` vacía. §5.2 dejó las asignaciones a coordinación por `RF-USR-05`, y ese
+  criterio sigue siendo el correcto, pero suponía que alguien podía entrar a configurarlas.
+  Nadie podía: el rol que configuraría tampoco tenía permisos.
+
+**Cómo se cerró.** `catalog-bootstrap` siembra solo lo que un requerimiento nombra: los
+cuatro roles de `RF-USR-02` más `finance` de `RF-USR-08`, los cuatro esquemas de
+contratación de `RF-AUS-02`, las siete áreas de `RF-USR-01`, los cuatro `event_types`, el
+tipo `dia_institucional` de `RF-AUS-09` y un catálogo de `actions`. Añade índices únicos en
+`areas.name` y `contract_types.name` — no existían, así que dos "Imprenta" eran posibles,
+por captura repetida o por el alta en caliente que exige `RF-USR-09` — y con ellos cada
+`INSERT` es idempotente vía `ON CONFLICT`.
+
+Dos asignaciones de permisos se siembran porque son definiciones, no configuración: `admin`
+recibe todos, porque es el rol desde el que se configuran los demás y dejarlo vacío es el
+bloqueo descrito arriba; `finance` recibe `finance.read` y nada más, porque esa asignación
+*es* el rol según `RF-USR-08`. `worker` y `area_lead` quedan vacíos a propósito: ahí sí es
+política de coordinación.
+
+El catálogo de `actions` es genérico a propósito — `record_created`, `record_updated`,
+`record_deleted`, `status_changed`, más un verbo con nombre donde el verbo dice algo que las
+columnas no. `target_table` ya dice sobre qué tabla, y `before_data`/`after_data` ya dicen si
+fue alta, cambio o baja, así que un juego de verbos por tabla los repetiría y crecería con
+cada tabla nueva: la bitácora acabaría siendo una segunda copia peor del esquema.
+`status_changed` es la excepción con nombre porque §2.7 pone ahí el historial de estatus, y
+como código propio se consulta por índice en vez de comparando dos `jsonb`. No hay
+`absence_approved`, pese al ejemplo en el comentario de `actions.code`: el estatus de un
+permiso va a `absence_status_history` por `RF-AUS-13`, y mandarlo a `logs` obligaría a que
+toda consulta sobre la bitácora recordara excluir `target_table = 'absences'` o lo filtraría.
+
+**Lo que sigue pendiente:** `contract_type_entitlements` sigue vacía. Los topes por esquema
+son las cifras del contrato colectivo y no están en ningún documento del repositorio.
+Inventar un número plausible sería peor que dejarlo vacío: por `RF-AUS-04` cada fila afirma
+qué tope estuvo vigente en un periodo, y una equivocada explicaría en silencio saldos ya
+consumidos contra un tope que nunca existió. Es dato operativo que carga control de
+personal, no una migración.
