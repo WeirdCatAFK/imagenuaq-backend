@@ -6,6 +6,8 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 
 import healthRouter from './routes/health.js';
+import authRouter from './routes/auth.js';
+import usersRouter from './routes/users.js';
 import { notFound } from './middlewares/notFound.js';
 import { errorHandler } from './middlewares/errorHandler.js';
 
@@ -13,6 +15,8 @@ import { errorHandler } from './middlewares/errorHandler.js';
 // each, so the URL comes from a single place.
 export const ROUTERS = {
   health: healthRouter,
+  auth: authRouter,
+  users: usersRouter,
 };
 
 export default class Api {

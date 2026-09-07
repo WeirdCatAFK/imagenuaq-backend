@@ -20,12 +20,15 @@
     "postmigrate:down": "npm run dbml",
     "migrate:redo": "npm run migrate -- redo",
     "postmigrate:redo": "npm run dbml",
-    "migrate:status": "npm run migrate -- up --dry-run"
+    "migrate:status": "npm run migrate -- up --dry-run",
+    "admin:create": "node --env-file-if-exists=.env scripts/createAdmin.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
+    "jose": "^6.2.12",
     "morgan": "^1.10.1",
     "postgrejs": "^2.23.1"
   },

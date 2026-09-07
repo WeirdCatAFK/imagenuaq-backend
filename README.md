@@ -177,10 +177,49 @@ yet.
 
 ## Endpoints
 
-| Method | Route           | Notes                                         |
-| ------ | --------------- | --------------------------------------------- |
-| GET    | `/`           | Readiness ping, no database involved          |
-| GET    | `/api/health` | 200 while Postgres answers, 503 once it stops |
+| Method | Route | Auth | Notes |
+| --- | --- | --- | --- |
+| GET | `/` | — | Readiness ping, no database involved |
+| GET | `/api/health` | — | 200 while Postgres answers, 503 once it stops |
+| POST | `/api/auth/login` | — | `{ email, password }` → `{ token, user }` |
+| GET | `/api/auth/me` | session | The subject of the presented token |
+| POST | `/api/auth/activate` | invite token | `{ token, password }` → `{ token, user }` |
+| POST | `/api/users` | admin | Create a staff account → `{ user, inviteToken }` |
+| POST | `/api/users/:id/invite` | admin | Re-issue an invite for an account that never activated |
+
+### Accounts
+
+There is no self-registration. RF-USR-01/02 make area and role decisions coordination
+takes about a person, so accounts are created by an admin through `POST /api/users` and
+arrive with **no password**. The response carries a one-time `inviteToken`; its owner picks
+their own password at `POST /api/auth/activate`, which returns a session.
+
+The invite is single-use with no table behind it: it is valid only while the account has no
+password, and redeeming it gives the account one. That trick does not extend to password
+*resets* — those need a hashed single-use token of their own, and are not built yet.
+
+Session and invite tokens are both signed with `JWT_SECRET` and are distinguished by a
+`purpose` claim. Without it an invite would be accepted as a session, which is a full login
+for an account whose owner has not chosen a password.
+
+### The first admin, and lockouts
+
+Account creation needs an admin, which is a closed loop — nobody has been created yet, or
+every admin has lost access. `npm run admin:create` breaks it:
+
+```bash
+ADMIN_PASSWORD=... npm run admin:create -- --email a@uaq.mx --name "Nombre Apellido"                                           [--contract <id|name>] [--area <id|name>]
+```
+
+Run against an address that already exists it **promotes that user to admin and resets
+their password**, which is the recovery path when every admin is locked out. It is a script
+and not an endpoint deliberately: in a lockout the admin rows are still present and valid,
+so a route gated on “no admins exist” would refuse to help in the one situation it was for.
+The gate is possession of `DATABASE_URL` — whoever has that can already do this with
+`psql`; the script only makes it correct, at the same bcrypt cost the server verifies with.
+
+Omit `ADMIN_PASSWORD` on a terminal and it prompts with the echo off. Never pass the
+password as an argument: `argv` is readable through `ps` and lands in shell history.
 
 ## Adding a resource
 
