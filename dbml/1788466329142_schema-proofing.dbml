@@ -5,7 +5,8 @@ Table "roles" {
 
 Table "contract_types" {
   "id" int8 [pk, not null, increment]
-  "name" varchar(200) [unique, not null]
+  "name" varchar(200) [not null]
+  "annual_offdays" int4 [not null]
 }
 
 Table "event_types" {
@@ -23,7 +24,7 @@ Table "event_collections" {
 
 Table "areas" {
   "id" int8 [pk, not null, increment]
-  "name" varchar(200) [unique, not null]
+  "name" varchar(200) [not null]
   "description" text
 }
 
@@ -58,6 +59,21 @@ Table "area_members" {
     (user_id, area_id) [type: btree, unique, name: "area_members_idx_area_members_user_id_area_id"]
     area_id [type: btree, name: "area_members_idx_area_members_area_id"]
   }
+}
+
+Table "days_off" {
+  "id" int8 [pk, not null, increment]
+  "user_id" int8 [not null]
+  "year" int4 [not null]
+  "amount" int4 [not null]
+  "used" int4 [not null, default: 0]
+
+  Indexes {
+    (user_id, year) [type: btree, unique, name: "days_off_idx_leave_balances_user_id_year"]
+  }
+  Note: '''One row per user per year. No annual reset job needed.
+CHECK days_off_used_within_amount: (used >= 0) AND (used <= amount)
+CHECK days_off_amount_nonneg: amount >= 0'''
 }
 
 Table "events" {
@@ -130,15 +146,10 @@ Table "absences" {
   "approved_at" timestamptz
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "document_file_id" int8
-  "absence_type_id" int8 [not null]
-  "status" varchar(20) [not null, default: 'requested', note: 'RF-AUS-14: solicitado, autorizado, rechazado, cancelado, gozado']
 
   Indexes {
-    absence_type_id [type: btree, name: "idx_absences_absence_type_id"]
     document_file_id [type: btree, name: "idx_absences_document_file_id"]
-    status [type: btree, name: "idx_absences_status"]
   }
-  Note: '''CHECK absences_status_valid: (status)::text = ANY ((ARRAY[\'requested\'::character varying, \'approved\'::character varying, \'rejected\'::character varying, \'cancelled\'::character varying, \'taken\'::character varying])::text[])'''
 }
 
 Table "logs" {
@@ -146,17 +157,11 @@ Table "logs" {
   "user_id" int8
   "action_id" int8 [not null]
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "target_table" varchar(50) [note: 'Table the action was performed on. Not a foreign key: the target is a different table per row']
-  "target_id" int8 [note: 'Primary key of the affected row, within target_table']
-  "before_data" jsonb [note: 'Row before the change. NULL = the row was created']
-  "after_data" jsonb [note: 'Row after the change. NULL = the row was deleted']
 
   Indexes {
     action_id [type: btree, name: "idx_logs_action_id"]
     created_at [type: btree, name: "idx_logs_created_at"]
-    (target_table, target_id) [type: btree, name: "idx_logs_target"]
   }
-  Note: 'CHECK logs_target_complete: num_nonnulls(target_table, target_id) = ANY (ARRAY[0, 2])'
 }
 
 Table "storage_volumes" {
@@ -265,94 +270,6 @@ Table "actions" {
   "label" varchar(200) [not null]
 }
 
-Table "permissions" {
-  "id" int8 [pk, not null, increment]
-  "code" varchar(100) [unique, not null, note: 'Dotted resource.action, e.g. project.write. Stable machine name, like actions.code']
-  "label" varchar(200) [not null]
-  "description" text
-}
-
-Table "role_permissions" {
-  "role_id" int8 [not null]
-  "permission_id" int8 [not null]
-
-  Indexes {
-    (role_id, permission_id) [pk, type: btree, name: "role_permissions_pkey"]
-    permission_id [type: btree, name: "idx_role_permissions_permission_id"]
-  }
-  Note: 'Which permissions a role grants. Deleting either side removes the grant rather than leaving it dangling.'
-}
-
-Table "absence_types" {
-  "id" int8 [pk, not null, increment]
-  "code" varchar(50) [unique, not null, note: 'vacaciones, permiso_economico, incapacidad, dia_institucional']
-  "label" varchar(200) [not null]
-  "unit" varchar(10) [not null, note: 'How the allowance is counted for this type: day or hour. RF-AUS-03']
-  "consumes_balance" bool [not null, default: true, note: 'RF-AUS-09: false for institutional non-working days, which apply without drawing down an allowance']
-  "requires_document" bool [not null, default: false]
-  "is_active" bool [not null, default: true]
-  Note: '''CHECK absence_types_unit_valid: (unit)::text = ANY ((ARRAY[\'day\'::character varying, \'hour\'::character varying])::text[])'''
-}
-
-Table "contract_type_entitlements" {
-  "id" int8 [pk, not null, increment]
-  "contract_type_id" int8 [not null]
-  "absence_type_id" int8 [not null]
-  "amount" numeric(6,2) [not null]
-  "valid_from" date [not null]
-  "valid_to" date [note: 'NULL = still in force']
-
-  Indexes {
-    absence_type_id [type: btree, name: "idx_cte_absence_type_id"]
-    contract_type_id [type: btree, name: "idx_cte_contract_type_id"]
-  }
-  Note: '''RF-AUS-04. A cap change closes the current row with valid_to and inserts a new one; amount is never updated in place, so consumed history keeps the cap that was in force at the time.
-CHECK cte_valid_range: (valid_to IS NULL) OR (valid_to >= valid_from)
-CHECK cte_amount_nonneg: amount >= (0)::numeric
-INDEX cte_no_overlap USING gist (contract_type_id, absence_type_id, daterange(valid_from, valid_to, \'[]\'::text))'''
-}
-
-Table "leave_balances" {
-  "id" int8 [pk, not null, increment]
-  "user_id" int8 [not null]
-  "absence_type_id" int8 [not null]
-  "cycle_start" date [not null]
-  "cycle_end" date [not null]
-  "granted" numeric(6,2) [not null, note: 'Starts as a copy of the scheme cap; raised individually for RF-AUS-05 exceptions such as seniority days']
-  "used" numeric(6,2) [not null, default: 0]
-  "note" text
-
-  Indexes {
-    (user_id, absence_type_id, cycle_start) [type: btree, unique, name: "uq_leave_balances_user_type_cycle"]
-    user_id [type: btree, name: "idx_leave_balances_user_id"]
-  }
-  Note: '''One row per person, type and cycle. RF-AUS-15. The cycle is a date range rather than a year, so calendar-year and contract-anniversary cycles both fit.
-CHECK lb_cycle_range: cycle_end >= cycle_start
-CHECK lb_used_within: (used >= (0)::numeric) AND (used <= granted)
-CHECK lb_granted_nonneg: granted >= (0)::numeric'''
-}
-
-Table "absence_status_history" {
-  "id" int8 [pk, not null, increment]
-  "event_id" int8 [not null]
-  "status" varchar(20) [not null]
-  "changed_by" int8
-  "changed_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "note" text
-
-  Indexes {
-    event_id [type: btree, name: "idx_absence_status_history_event_id"]
-  }
-  Note: '''RF-AUS-14: user and date on every status change. Separate from logs because RF-AUS-13 restricts who may read the detail of a permit.
-CHECK ash_status_valid: (status)::text = ANY ((ARRAY[\'requested\'::character varying, \'approved\'::character varying, \'rejected\'::character varying, \'cancelled\'::character varying, \'taken\'::character varying])::text[])'''
-}
-
-Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
-
-Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
-
-Ref "absences_absence_type_id_fkey":"absence_types"."id" < "absences"."absence_type_id"
-
 Ref "absences_document_file_id_fkey":"files"."id" < "absences"."document_file_id"
 
 Ref "fk_absences_approved_by_users_id":"users"."id" < "absences"."approved_by"
@@ -373,9 +290,7 @@ Ref "fk_collection_events_collection_id_event_collections_id":"event_collections
 
 Ref "fk_collection_events_event_id_events_id":"events"."id" < "collection_events"."event_id"
 
-Ref "contract_type_entitlements_absence_type_id_fkey":"absence_types"."id" < "contract_type_entitlements"."absence_type_id"
-
-Ref "contract_type_entitlements_contract_type_id_fkey":"contract_types"."id" < "contract_type_entitlements"."contract_type_id"
+Ref "fk_days_off_user_id_users_id":"users"."id" < "days_off"."user_id"
 
 Ref "fk_event_exceptions_event_id_events_id":"events"."id" < "event_exceptions"."event_id"
 
@@ -403,17 +318,9 @@ Ref "folders_owner_id_fkey":"users"."id" < "folders"."owner_id"
 
 Ref "folders_parent_id_fkey":"folders"."id" < "folders"."parent_id"
 
-Ref "leave_balances_absence_type_id_fkey":"absence_types"."id" < "leave_balances"."absence_type_id"
-
-Ref "leave_balances_user_id_fkey":"users"."id" < "leave_balances"."user_id"
-
 Ref "fk_logs_action_id_actions_id":"actions"."id" < "logs"."action_id"
 
 Ref "fk_logs_user_id_users_id":"users"."id" < "logs"."user_id"
-
-Ref "role_permissions_permission_id_fkey":"permissions"."id" < "role_permissions"."permission_id" [delete: cascade]
-
-Ref "role_permissions_role_id_fkey":"roles"."id" < "role_permissions"."role_id" [delete: cascade]
 
 Ref "fk_users_contract_type_id_contract_types_id":"contract_types"."id" < "users"."contract_type_id"
 

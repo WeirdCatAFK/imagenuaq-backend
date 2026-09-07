@@ -12,3 +12,5 @@ Los primitivos utilizan como puente para llamar a un recurso en específico, con
 Los recursos son las tareas para consumir los primitivos que tienene en la conexión, se tienen en este nivel para identificar errores en la lógica de interacción con los primitivos. Los recursos pueden usar multiples primitivos
 
 La orquestración son tareas concretas. Conceptos abstractos de acciones definidas, normalmente coinciden con como se monta la api, estos manejan tareas que consumen múltiples recursos y sus manejadores de errores indican fallos en el conjunto de tareas, también manejan control de fallas si se manejan multiples recursos para que el fallo en uno no deje residuales en otra parte de los recursos
+
+![1788541609261](image/ACCESS/1788541609261.png)

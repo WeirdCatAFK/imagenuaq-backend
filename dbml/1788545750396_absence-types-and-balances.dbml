@@ -5,7 +5,7 @@ Table "roles" {
 
 Table "contract_types" {
   "id" int8 [pk, not null, increment]
-  "name" varchar(200) [unique, not null]
+  "name" varchar(200) [not null]
 }
 
 Table "event_types" {
@@ -23,7 +23,7 @@ Table "event_collections" {
 
 Table "areas" {
   "id" int8 [pk, not null, increment]
-  "name" varchar(200) [unique, not null]
+  "name" varchar(200) [not null]
   "description" text
 }
 
