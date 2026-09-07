@@ -1,3 +1,313 @@
 # Datamodel
 
-Aquí estarán los diccionarios de datos y la descripción de las dinámicas por las que se consume la api
+Aquí estarán los diccionarios de datos y la descripción de las dinámicas por las que se
+consume la api.
+
+Los identificadores (tablas, columnas, valores de catálogo) van en inglés, como el resto
+del código; la prosa de este documento va en español, como el resto de la documentación de
+dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vienen de
+`../docs/Requerimientos funcionales.docx`.
+
+## Estado
+
+| Módulo | Tablas | Estado |
+| --- | --- | --- |
+| USR | `users`, `roles`, `areas`, `area_members`, `contract_types`, `permissions`, `role_permissions` | Implementado; roles por área pendientes (§5.2) |
+| CAL / AUS | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado |
+| ARC | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens` | Implementado |
+| — | `logs`, `actions` | Implementado |
+| **SOL, PRY, FLW, TSK, EST** | — | **Propuesto**: la forma en `design/`, el porqué en §2, la cobertura en §3 |
+| FIN, INV, IMP, RPT, EXT | — | Sin modelar; §4 describe los puntos de enganche |
+
+Los archivos de diseño se escriben a mano y no los toca `scripts/genDBML.js`: viven fuera
+de `dbml/`, que es salida generada. Todos importan en ChartDB con **Import DBML**.
+
+Ojo: están en `docs/design/` del directorio contenedor `ImagenUAQ/`, **fuera de este
+repositorio**, junto a los requerimientos. Quien clone solo `imagenuaq-backend` no los
+tiene y los enlaces de abajo le quedan muertos.
+
+| Archivo | Alcance |
+| --- | --- |
+| [`../docs/design/projects.dbml`](../docs/design/projects.dbml) | **MVP.** Proyectos y solicitudes, más los catálogos de los que dependen |
+| [`../docs/design/tasks.dbml`](../docs/design/tasks.dbml) | **MVP.** Tareas, para conectar a mano con el anterior |
+| [`../docs/design/spine.dbml`](../docs/design/spine.dbml) | La columna vertebral completa, incluidos formatos y flujo. Referencia de a dónde va esto |
+
+El MVP recorta del `spine` dos cosas, y las secciones que las describen siguen siendo la
+referencia de cómo vuelven a entrar:
+
+- **Formatos** (`forms`, `form_versions`, `form_fields`, §2.2 y §2.3). `requests` queda
+  mínima: guarda la captura en `data jsonb` y el origen en `form_code` como texto suelto.
+  Eso ya cubre `RF-MIG-01` — las respuestas quedan en la base mientras el Excel sigue
+  vivo — sin comprometer todavía el modelo de formatos.
+- **Flujo** (`workflows`, `workflow_stages`, `project_stages`, `approvals`, §2.1 y §2.6).
+  El proyecto avanza por `status_id`. Las columnas que apuntan a una etapa
+  (`notes.project_stage_id`, `tasks.project_stage_id`, `project_field_values`) no existen
+  aún; entran con el módulo.
+
+## 1. La columna vertebral
+
+Cinco módulos que se leen como una sola cadena, y de los que cuelgan todos los demás:
+
+```
+entities ─┬─ requests ──→ projects ─┬─ project_stages ──→ approvals
+          │   (form_versions,        ├─ tasks
+          │    data JSONB)           ├─ notes / time_entries
+          └─ entity_contacts         └─ project_field_values
+
+workflows → workflow_versions → workflow_stages ⇄ workflow_transitions   (grafo)
+```
+
+Una solicitud entra por un formato (`form_versions`), recibe folio y cae en la bandeja del
+área (`RF-SOL-03`, `RF-SOL-04`). Una o varias solicitudes se convierten en proyecto
+(`RF-PRY-01`). El proyecto instancia la versión de un flujo: cada nodo por el que pasa es
+una fila en `project_stages`, y cada visto bueno una fila en `approvals` (`RF-FLW-03`,
+`RF-PRY-03`). Las tareas cuelgan del proyecto y, opcionalmente, de la etapa.
+
+## 2. Decisiones de diseño
+
+Las que cambian la forma del esquema y son caras de revertir después.
+
+### 2.1 El flujo es un grafo, no una lista ordenada
+
+`RF-FLW-09` permite que un mismo proyecto derive en trabajo **simultáneo** para más de un
+área, y `RF-FLW-02` pide armarlo en una interfaz por nodos. Una columna `orden int` sobre
+las etapas no puede expresar una bifurcación ni una reunión de ramas.
+
+Por eso `workflow_stages` son nodos y `workflow_transitions` son aristas. El editor guarda
+la posición de cada nodo (`position_x`, `position_y`) para que el diagrama sobreviva al
+guardado.
+
+**Consecuencia:** `projects` **no** lleva `current_stage_id`. Con ramas paralelas no hay
+una etapa actual sino varias; la etapa actual es el conjunto de filas de `project_stages`
+con `status = 'active'`. Poner esa columna es el error que obliga a rehacer el módulo
+cuando aparece el primer proyecto que va a diseño e imprenta a la vez.
+
+### 2.2 Formatos y flujos se versionan; las versiones publicadas son inmutables
+
+`RF-SOL-01` y `RF-FLW-02` piden que coordinación dé de alta formatos y flujos sin
+desarrollo. Si esas definiciones se editan en su lugar, dos cosas se rompen: una solicitud
+vieja deja de poder mostrarse con los campos con los que se capturó, y un proyecto en
+vuelo cambia de flujo a media ejecución.
+
+Por eso `forms → form_versions → form_fields` y `workflows → workflow_versions →
+workflow_stages`. Editar publica una versión nueva; `requests.form_version_id` y
+`projects.workflow_version_id` apuntan a la versión con la que nacieron y nunca se mueven.
+
+### 2.3 El payload de la solicitud es JSONB; los campos que se buscan son columnas
+
+`RF-SOL-06` exige conservar **todo** lo capturado, incluidos los campos que después ocupa
+facturación. `RF-SOL-05` exige buscar por nombre, entidad, folio, responsable y estatus.
+
+Las dos cosas no quieren el mismo almacenamiento:
+
+- `requests.data jsonb` guarda la captura completa, sea cual sea el formato. Un modelo EAV
+  (`request_field_values`) daría lo mismo con un join por campo y sin ganar nada: nadie
+  consulta un campo suelto de un formato arbitrario.
+- Lo que `RF-SOL-05` busca sube a columnas reales (`folio`, `title`, `entity_id`,
+  `status_id`, `assignee_id`). Son las mismas para todos los formatos, así que no
+  dependen de la definición dinámica.
+- `form_fields` sí son filas, no JSON: el constructor de formatos y el validador los
+  consultan y los ordenan.
+
+### 2.4 Los valores que cruzan etapas son filas, no un JSONB acumulado
+
+`RF-FLW-06` es explícito: el número de orden que genera diseño debe aparecer en el
+registro de facturación de imprenta sin recaptura. `RF-IMP-08` lo repite desde el otro
+lado.
+
+`project_field_values(project_id, key, value, produced_by_stage_id)` guarda esos valores
+como filas porque, a diferencia del payload de la solicitud, **otros módulos los buscan**
+(imprenta busca por número de orden) y `RF-PRY-03` quiere saber qué etapa los produjo. Un
+`projects.data jsonb` mutable perdería la procedencia y obligaría a un índice GIN para lo
+que aquí es una búsqueda por igualdad.
+
+### 2.5 El formato enruta a través del flujo, no por su cuenta
+
+`RF-SOL-02` pide que cada formato esté asociado al área a la que se dirigen sus
+solicitudes (el formato 02, papel institucional, cae primero a diseño gráfico).
+
+En vez de una tabla `form_target_areas` en paralelo, `form_versions.workflow_version_id`
+apunta al flujo, y las etapas marcadas `is_entry` definen a qué áreas cae. Un solo lugar
+decide el enrutamiento, que es también lo que `RF-FLW-04` automatiza al dar el visto bueno.
+Es la misma lección de la migración `schema-proofing`: la jefatura de área estaba en tres
+lugares y ninguno los mantenía de acuerdo.
+
+**Revisable.** Si aparece un formato que debe existir sin flujo, la salida es permitir
+`workflow_version_id` nulo más un área de destino explícita, no reintroducir la tabla
+paralela.
+
+### 2.6 Las etapas se pueden repetir
+
+Un visto bueno rechazado devuelve el trabajo a diseño. Por eso `project_stages` no es
+única por `(project_id, workflow_stage_id)` sino por `(project_id, workflow_stage_id,
+attempt)`. Sin el contador, el reproceso o sobrescribe la historia o falla al insertar —
+y `RF-PRY-03` pide justamente esa historia.
+
+### 2.7 El historial de estatus se registra en `logs`, no en una tabla propia
+
+`RF-USR-07` ya pide bitácora de quién creó, modificó o eliminó cada registro relevante.
+Una `status_history` aparte sería un segundo mecanismo de auditoría para un caso
+particular. `logs` ya tiene objeto (§5.3), así que los cambios de estatus son entradas
+suyas.
+
+Los vistos buenos **sí** son tabla propia (`approvals`): `RF-FLW-03` y `RF-FLW-05` los
+tratan como un objeto de negocio con decisión, comentario y firmante, no como una traza.
+
+**Y las ausencias también**, en `absence_status_history`, que es una excepción deliberada a
+la regla de arriba. El motivo no es de forma sino de confidencialidad: `RF-AUS-13` restringe
+quién puede ver el detalle de un permiso, y llevar ese rastro a la bitácora general
+obligaría a que toda consulta contra `logs` recordara excluir `target_table = 'absences'`
+para no filtrarlo. Mantener lo restringido dentro de las tablas `absence_*` deja una
+frontera contigua que vigilar, en vez de un filtro que recordar.
+
+Para las alertas de `RF-EST-03` y `RF-EST-04` ("lleva demasiado tiempo en el mismo
+estatus") se desnormaliza `status_since` en la fila. Recorrer la bitácora para contestar
+eso en cada consulta del tablero no escala, y el valor es reconstruible desde `logs` si
+llega a divergir.
+
+## 3. Trazabilidad
+
+| RF | Cubierto por |
+| --- | --- |
+| RF-SOL-01 | `forms`, `form_versions`, `form_fields` |
+| RF-SOL-02 | `form_versions.workflow_version_id` → `workflow_stages.is_entry` (§2.5) |
+| RF-SOL-03 | `requests.folio` (único) |
+| RF-SOL-04, RF-SOL-05 | Columnas promovidas de `requests` (§2.3) |
+| RF-SOL-06 | `requests.data`, `requests.folder_id` |
+| RF-SOL-07 | `entities`, `entity_contacts` |
+| RF-SOL-08 | `requests.source` |
+| RF-PRY-01 | `requests.project_id` |
+| RF-PRY-02 | `projects`, `project_members`; las áreas participantes se derivan, no se guardan |
+| RF-PRY-03 | `project_stages` + `approvals` + `logs` |
+| RF-PRY-04 | `time_entries` |
+| RF-PRY-05 | `notes.kind` |
+| RF-PRY-06 | `workflows` reutilizables; sin estructura nueva por eventualidad |
+| RF-PRY-07 | `projects.has_cost` |
+| RF-PRY-08 | `projects.period_id`, `carried_over` |
+| RF-PRY-09 | `project_materials.origin` |
+| RF-FLW-01, RF-FLW-02 | `workflow_stages` + `workflow_transitions` (§2.1) |
+| RF-FLW-03 | `approvals` |
+| RF-FLW-04 | `workflow_transitions` + `notifications` |
+| RF-FLW-05 | `approvals.approver_contact_id`, `requires_entity_approval` |
+| RF-FLW-06 | `project_field_values` (§2.4) |
+| RF-FLW-07 | `project_stages.status = 'waiting_external'`, `blocked_reason` |
+| RF-FLW-08 | `priority`; sin orden por fecha de llegada |
+| RF-FLW-09 | Grafo con ramas paralelas (§2.1) |
+| RF-TSK-01 … RF-TSK-05 | `tasks` |
+| RF-TSK-06, RF-TSK-07 | Consulta sobre `events` + `area_members`; sin tabla nueva |
+| RF-EST-01 | `projects.status_id` |
+| RF-EST-02 | `statuses.area_id` |
+| RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since` |
+| RF-EST-05 | Sin tabla: regla de orquestación sobre `expected_invoice_count`, las etapas sin `approvals` y la evidencia |
+| RF-EST-06, RF-EST-10 | `notifications` |
+| RF-EST-07, RF-EST-08 | Consulta sobre `projects` + `status_since` |
+| RF-CAL-03 | `period_closures` + `projects.has_cost` |
+
+`RF-TSK-07` y `RF-CAL-06` cruzan con ausencias: la ocupación del área debe descontar las
+ausencias autorizadas. Se resuelven leyendo `events` (público) y **nunca** `absences`
+(restringido) — la misma frontera que obliga a que la notificación de `RF-EST-10` lleve
+fechas y duración pero nunca el motivo.
+
+## 4. Puntos de enganche de los módulos restantes
+
+Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ellos:
+
+- **FIN** — `projects.expected_invoice_count`, `entities` como destinatario del cobro,
+  `project_field_values` para el número de orden que `RF-IMP-08` pasa a facturación
+  imprenta. Faltan `providers`, `quotes`, `invoices`, `oficios`, `payments`.
+- **INV** — independiente del proyecto salvo por préstamos ligados a uno. Faltan
+  `inventory_items`, `inventory_loans`, `inventory_movements`, y para `RF-INV-07` las
+  licencias compartidas con su bitácora de sesiones.
+- **IMP** — `print_orders` cuelga de `projects`; los pantones por facultad cuelgan de
+  `entities` (`RF-IMP-06`).
+- **EXT** — `entity_contacts` ya es la identidad del externo y `access_tokens` ya da
+  compartición de solo lectura (`RF-ARC-03`, `RF-EXT-03`). Falta el token de portal para
+  `RF-EXT-01`.
+- **RPT** — sin tablas: son consultas. `RF-RPT-02` (carga por persona) sale de
+  `project_members` y `time_entries`; `RF-RPT-03` de `status_since`.
+
+## 5. Huecos en el modelo ya implementado
+
+Independientes de la columna vertebral, y encontrados al contrastar el esquema vigente con
+los requerimientos. **Los tres se cerraron en `I0-dbFixes`**, una migración por hueco para
+que el rollback fuera granular:
+
+| Hueco | Migración | Estado |
+| --- | --- | --- |
+| 5.1 Saldos sin dimensión de tipo | `1788545750396_absence-types-and-balances.sql` | Cerrado |
+| 5.2 Sin dónde guardar un permiso | `1788545749090_role-permissions.sql` | Cerrado salvo los roles por área |
+| 5.3 `logs` sin objeto | `1788545740478_logs-target.sql` | Cerrado |
+
+El diagnóstico se conserva abajo porque explica por qué el esquema quedó como quedó.
+
+### 5.1 Los saldos de días no tenían dimensión de tipo — cerrado
+
+`contract_types.annual_offdays` era un entero y `days_off` una fila por usuario y año.
+Eso no alcanzaba para:
+
+- `RF-AUS-03` — catálogo de **tipos** de ausencia configurable desde la aplicación (nombre,
+  unidad de conteo, tope, vigencia, si descuenta saldo). No existe `absence_types`, así que
+  `RF-AUS-09` (días institucionales que no descuentan) no se puede ni expresar.
+- `RF-AUS-04` — los topes pertenecen a (esquema de contratación × tipo × **vigencia**), y
+  cambiarlos **no debe reescribir el histórico ya consumido**. Un entero mutable sobre
+  `contract_types` hace exactamente lo que el requerimiento prohíbe.
+- `RF-AUS-05` — las excepciones individuales (días por antigüedad en el esquema
+  sindicalizado) solo se pueden sobrescribir para la bolsa global, no por tipo.
+- `RF-AUS-14` — el permiso necesita estatus propio (solicitado, autorizado, rechazado,
+  cancelado, gozado) con fecha y usuario en cada cambio. `absences` solo tiene
+  `approved_by`/`approved_at`: rechazado y cancelado son irrepresentables, y `RF-AUS-06`
+  pide reponer el saldo al cancelar.
+
+**Cómo se cerró.** `absence_types` es el catálogo configurable de `RF-AUS-03`, con
+`consumes_balance` para los días institucionales de `RF-AUS-09`.
+`contract_type_entitlements` mueve el tope a (esquema × tipo × vigencia): cambiarlo cierra
+la fila vigente con `valid_to` e inserta otra, nunca hace `UPDATE amount`, que es lo que
+`RF-AUS-04` prohíbe. Una restricción `EXCLUDE` impide que dos vigencias se traslapen y
+vuelvan ambiguo el tope de una fecha. `leave_balances` reemplaza a `days_off` con
+dimensión de tipo, y su `granted` es la excepción individual de `RF-AUS-05`. `absences`
+gana `absence_type_id` y `status`, y `absence_status_history` guarda usuario y fecha de
+cada cambio (`RF-AUS-14`).
+
+La pregunta del ciclo — año calendario o aniversario de contratación, que para el esquema
+sindicalizado no coinciden — dejó de ser de modelo: `leave_balances` guarda
+`cycle_start`/`cycle_end` como fechas, así que cualquiera de los dos se siembra sin otra
+migración. **Sigue pendiente decidirlo con control de personal**, pero ya no bloquea el
+esquema.
+
+Consecuencia de mantener `absences.event_id` como PK: como el permiso crea su evento desde
+que se solicita, `events` por sí solo sobre-reporta ausencias. La vista
+`absence_availability` filtra por `status IN ('approved','taken')` y expone fechas, persona
+y área sin `reason` ni `document_file_id`. **Es lo que deben leer `RF-TSK-06`, `RF-TSK-07`,
+`RF-CAL-05` y `RF-CAL-06`**, y de donde sale la notificación de `RF-EST-10` con fechas y
+duración pero sin motivo.
+
+### 5.2 No había dónde guardar un permiso — cerrado, salvo los roles por área
+
+`users.role_id → roles.name` era todo el modelo. `RF-USR-05` (lectura y edición
+independientes, asignables por rol) y `RF-USR-10` (ver el motivo de una ausencia es un
+permiso distinto de ver la disponibilidad) vivían solo en código.
+
+**Cómo se cerró.** `permissions` y `role_permissions`, con el catálogo sembrado en la
+migración porque los códigos son el requerimiento hecho dato. `project.read` y
+`project.write` son dos filas y no dos niveles de una: un `level` ordenado no podría
+expresar `finance.read` de `RF-USR-08`, que es lectura transversal sin escritura en ningún
+lado. `availability.read` y `absence.reason.read` separados son literalmente `RF-USR-10`, y
+que existan como dos filas es lo que impide colapsarlos al implementar.
+
+**Lo que sigue pendiente:** `role_id` es global y único, pero la visibilidad es por área
+(`RF-USR-03`, `RF-USR-04`). Es el mismo razonamiento que llevó a `schema-proofing` a mover
+la jefatura a `area_members`: alguien puede encabezar un área y ser integrante de otra.
+Mover el rol a `area_members` toca dos tablas y cada punto donde se autoriza, así que va en
+su propia rama.
+
+### 5.3 `logs` registraba quién hizo qué, pero no sobre qué — cerrado
+
+`RF-USR-07` pide bitácora sobre proyecto, estatus, archivo y factura. `logs(user_id,
+action_id, created_at)` no tenía referencia al objeto, así que "quién borró esta factura"
+no tenía respuesta.
+
+**Cómo se cerró.** `target_table` y `target_id`, más `before_data`/`after_data`. No hay FK
+posible porque el objetivo es una tabla distinta en cada fila; lo que sí se exige es que las
+dos mitades viajen juntas, con el mismo patrón `num_nonnulls(...) IN (0, 2)` de
+`event_participants` y `access_tokens` — cero es legítimo (`user_login` no tiene objeto),
+uno siempre es un error. Con esto §2.7 ya es implementable.
