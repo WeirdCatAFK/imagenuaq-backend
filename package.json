@@ -32,7 +32,8 @@
     "helmet": "^8.1.0",
     "jose": "^6.2.12",
     "morgan": "^1.10.1",
-    "postgrejs": "^2.23.1"
+    "postgrejs": "^2.23.1",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "@dbml/connector": "^10.1.1",

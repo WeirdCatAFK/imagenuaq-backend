@@ -20,6 +20,7 @@ dbml/                    one committed snapshot per migration, plus current.dbml
 scripts/genDBML.js       writes dbml/ from the live schema (npm run dbml)
 src/
   api.js                 Api class: builds the app, mounts ROUTERS under /api/, start/stop
+  swagger.js             the OpenAPI 3.1 document, hand-written
   routes/                one file per resource, thin: parse the request, call orchestration
   access/                everything that reads or writes data
     orchestration/       business rules per domain
@@ -181,12 +182,37 @@ yet.
 | Method | Route | Auth | Notes |
 | --- | --- | --- | --- |
 | GET | `/` | — | Readiness ping, no database involved |
+| GET | `/api/docs` | — | Swagger UI; `/api/docs/openapi.json` is the raw document |
 | GET | `/api/health` | — | 200 while Postgres answers, 503 once it stops |
 | POST | `/api/auth/login` | — | `{ email, password }` → `{ token, user }` |
 | GET | `/api/auth/me` | session | The subject of the presented token |
 | POST | `/api/auth/activate` | invite token | `{ token, password }` → `{ token, user }` |
 | POST | `/api/users` | admin | Create a staff account → `{ user, inviteToken }` |
 | POST | `/api/users/:id/invite` | admin | Re-issue an invite for an account that never activated |
+
+### API documentation
+
+`npm run dev`, then <http://localhost:3000/api/docs>. *Authorize* takes the token from
+`POST /api/auth/login`, and **Try it out** calls this server — the document lists `/` as
+its first server, so the UI resolves it against whatever host you opened it on.
+`/api/docs/openapi.json` is the same document as a file, for a client generator or an
+import into Postman.
+
+The spec is **hand-written**, in [src/swagger.js](src/swagger.js) — one module rather than
+JSDoc comments scattered across `routes/`, for the same reason `ROUTERS` exists. What keeps
+it from drifting is `tests/docs.test.js`, which walks the routers the app actually mounts
+and fails when one has no documented operation, when the document describes a route nothing
+serves, or when a `$ref` does not resolve. A new endpoint therefore fails the suite until
+it is described.
+
+It is served in production too. This is an internal system behind a tunnel, every route it
+describes refuses unauthenticated callers on its own, and a spec that only exists in
+development is the one that never gets updated. Gate the `docs` entry in `ROUTERS` if that
+ever needs to change.
+
+Swagger UI needs `'unsafe-inline'` for scripts, which helmet's default policy forbids;
+[src/routes/docs.js](src/routes/docs.js) re-runs helmet with a relaxed CSP scoped to that
+subtree, and the suite asserts the relaxation does not leak onto the rest of the API.
 
 ### Accounts
 
@@ -228,7 +254,7 @@ password as an argument: `argv` is readable through `ps` and lands in shell hist
 npm test
 ```
 
-126 cases over the seven endpoints, driven through real HTTP. `pretest` creates
+140 cases over the eight endpoints, driven through real HTTP. `pretest` creates
 `imagenuaq_test` and migrates it, so `npm test` is the only command to remember; the
 database container has to be up.
 
@@ -266,4 +292,5 @@ There is still no linter.
 
 A migration in `migrations/`, SQL in `access/resources/query.js`, rules
 in `access/orchestration/<name>.js`, a router in `routes/<name>.js`, then one line in the
-`ROUTERS` map in `src/api.js`.
+`ROUTERS` map in `src/api.js`, and its paths in `src/swagger.js` — `tests/docs.test.js`
+fails on a route that is mounted and not described.
