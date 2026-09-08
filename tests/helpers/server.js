@@ -85,6 +85,23 @@ class Server {
     return this.request('POST', path, options);
   }
 
+  // The areas and roles routers were the first to use anything but GET and POST. Thin
+  // wrappers over request() rather than callers passing the verb themselves, so a test
+  // reads as the HTTP it performs.
+  put(path, options) {
+    return this.request('PUT', path, options);
+  }
+
+  patch(path, options) {
+    return this.request('PATCH', path, options);
+  }
+
+  // `delete` is a reserved word as a bare identifier but legal as a method name, and using
+  // the verb's own name is worth more than avoiding the surprise.
+  delete(path, options) {
+    return this.request('DELETE', path, options);
+  }
+
   async close() {
     await this.api.stop();
     await closeStore();

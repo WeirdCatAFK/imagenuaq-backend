@@ -5,11 +5,11 @@
 //
 // This tier owns the refusals: it throws ApiError, so the routes below it stay four lines
 // and the middleware does not have to invent status codes of its own.
-import bcrypt from 'bcrypt';
-import * as jose from 'jose';
+import bcrypt from "bcrypt";
+import * as jose from "jose";
 
-import query from '../resources/query.js';
-import { ApiError } from '../../utils/ApiError.js';
+import query from "../resources/query.js";
+import { ApiError } from "../../utils/ApiError.js";
 
 const SALT_ROUNDS = 12;
 
@@ -19,7 +19,7 @@ const SALT_ROUNDS = 12;
 // for anyone with a stopwatch. It must be a syntactically valid hash -- bcrypt.compare()
 // rejects a malformed one immediately and the padding would do nothing.
 const ABSENT_USER_HASH =
-  '$2b$12$Y8bJW7j4VeZFKWsqTRTpiug1BeJKXqA.7A6wSVndckjEKYw5rGz36';
+  "$2b$12$Y8bJW7j4VeZFKWsqTRTpiug1BeJKXqA.7A6wSVndckjEKYw5rGz36";
 
 // Tokens live a week. Long enough that staff are not re-typing a password daily, short
 // enough that a revoked account stops working without a token blocklist -- which is the
@@ -27,19 +27,19 @@ const ABSENT_USER_HASH =
 // deleted or given a different role today keeps the old role until their token expires;
 // when that becomes unacceptable the fix is a `token_version` column on users compared at
 // verification, not a shorter TTL.
-const TOKEN_TTL = '7d';
+const TOKEN_TTL = "7d";
 
 // An invite is a token like any other, so it must say what it is for. Without a `purpose`
 // claim the two are interchangeable: an invite token would be accepted as a session by
 // verifyToken(), handing a full login to somebody who has not chosen a password yet. Each
 // verifier demands its own purpose and rejects the other.
-const PURPOSE_SESSION = 'session';
-const PURPOSE_INVITE = 'invite';
+const PURPOSE_SESSION = "session";
+const PURPOSE_INVITE = "invite";
 
 // How long a new user has to choose a password before an admin must re-issue. Shorter than
 // a session on purpose: an invite is a bearer credential for an account with no password
 // on it, and it travels by email or chat, where it lingers.
-const INVITE_TTL = '3d';
+const INVITE_TTL = "3d";
 
 // Read lazily rather than at import time, and cached after the first read. main.js loads
 // .env with --env-file-if-exists, so the value *is* present by the time a request arrives
@@ -53,7 +53,7 @@ function jwtSecret() {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret.length < 32) {
     throw new Error(
-      'JWT_SECRET is unset or shorter than the 32 bytes HS256 needs (see .env.example).',
+      "JWT_SECRET is unset or shorter than the 32 bytes HS256 needs (see .env.example).",
     );
   }
 
@@ -65,15 +65,15 @@ function jwtSecret() {
 // a token minted by another deployment -- staging, a colleague's laptop -- is rejected even
 // if it was signed with the same leaked secret. They fall back to the dev URLs because
 // HOST/PORT in src/api.js do the same; JWT_SECRET above gets no such courtesy.
-const issuer = () => process.env.API_DOMAIN || 'http://localhost:3000';
-const audience = () => process.env.FRONTEND_DOMAIN || 'http://localhost:5173';
+const issuer = () => process.env.API_DOMAIN || "http://localhost:3000";
+const audience = () => process.env.FRONTEND_DOMAIN || "http://localhost:5173";
 
 class Auth {
   // Hash and store. Kept here rather than in a future users orchestration because the cost
   // factor and the column are one decision: nothing else may write password_hash.
   async setPassword(userId, password) {
     if (!password || password.length < 8) {
-      throw ApiError.badRequest('Password must be at least 8 characters long.');
+      throw ApiError.badRequest("Password must be at least 8 characters long.");
     }
 
     const hash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -81,7 +81,7 @@ class Auth {
 
     // null means no live row matched -- a wrong id, or a soft-deleted user. Hashing into
     // nowhere would report success and leave the account unusable.
-    if (updated === null) throw ApiError.notFound('User not found.');
+    if (updated === null) throw ApiError.notFound("User not found.");
   }
 
   // Hash without writing. Exists for scripts/createAdmin.js, which has to move the role
@@ -90,7 +90,7 @@ class Auth {
   // own cost would still verify, and would quietly leave one account weaker than the rest.
   async hashPassword(password) {
     if (!password || password.length < 8) {
-      throw ApiError.badRequest('Password must be at least 8 characters long.');
+      throw ApiError.badRequest("Password must be at least 8 characters long.");
     }
     return bcrypt.hash(password, SALT_ROUNDS);
   }
@@ -100,13 +100,15 @@ class Auth {
   // ignored, and Express 5 forwards it to the error handler on its own.
   async authenticate(email, password) {
     if (!email || !password) {
-      throw ApiError.badRequest('Email and password are required.');
+      throw ApiError.badRequest("Email and password are required.");
     }
 
     // Lowercased to match how orchestration/users.js stores it. The uniqueness guarantee
     // is a plain index on the column, so without this a user created as ana@uaq.mx cannot
     // log in by typing Ana@uaq.mx -- which is exactly what a phone keyboard produces.
-    const user = await query.getAuthUserByEmail(String(email).trim().toLowerCase());
+    const user = await query.getAuthUserByEmail(
+      String(email).trim().toLowerCase(),
+    );
 
     // password_hash is nullable: a user brought in by the Excel migration (RF-MIG-01) has
     // a row long before anyone sets them a password. Comparing against the placeholder
@@ -117,7 +119,7 @@ class Auth {
     // One message for "no such email", "no password set" and "wrong password". Splitting
     // them is friendlier and tells an attacker which addresses are worth guessing at.
     if (!user || !user.password_hash || !matches) {
-      throw ApiError.unauthorized('Invalid email or password.');
+      throw ApiError.unauthorized("Invalid email or password.");
     }
 
     return {
@@ -139,22 +141,24 @@ class Auth {
   // token goes stale the moment coordination edits a role. Read them per request with
   // permissionsFor() instead.
   async issueToken(user) {
-    return new jose.SignJWT({
-      purpose: PURPOSE_SESSION,
-      email: user.email,
-      fullName: user.fullName,
-      roleId: user.roleId,
-      role: user.role,
-    })
-      .setProtectedHeader({ alg: 'HS256' })
-      // `sub`, not a custom userId claim: it is the registered JWT claim for the subject.
-      // jose requires it to be a string, so it is read back with Number().
-      .setSubject(String(user.id))
-      .setIssuedAt()
-      .setIssuer(issuer())
-      .setAudience(audience())
-      .setExpirationTime(TOKEN_TTL)
-      .sign(jwtSecret());
+    return (
+      new jose.SignJWT({
+        purpose: PURPOSE_SESSION,
+        email: user.email,
+        fullName: user.fullName,
+        roleId: user.roleId,
+        role: user.role,
+      })
+        .setProtectedHeader({ alg: "HS256" })
+        // `sub`, not a custom userId claim: it is the registered JWT claim for the subject.
+        // jose requires it to be a string, so it is read back with Number().
+        .setSubject(String(user.id))
+        .setIssuedAt()
+        .setIssuer(issuer())
+        .setAudience(audience())
+        .setExpirationTime(TOKEN_TTL)
+        .sign(jwtSecret())
+    );
   }
 
   // Verify signature, expiry, issuer and audience, and hand back the same shape
@@ -172,7 +176,7 @@ class Auth {
       // signed with the same key. Only this check keeps a not-yet-activated account from
       // being a working login.
       if (payload.purpose !== PURPOSE_SESSION) {
-        throw ApiError.unauthorized('Invalid or expired token.');
+        throw ApiError.unauthorized("Invalid or expired token.");
       }
 
       return {
@@ -186,7 +190,7 @@ class Auth {
       // A missing JWT_SECRET is a server bug, not a bad token. Reporting it as a 401 would
       // have every client retrying a login that can never succeed.
       if (!(err instanceof jose.errors.JOSEError)) throw err;
-      throw ApiError.unauthorized('Invalid or expired token.');
+      throw ApiError.unauthorized("Invalid or expired token.");
     }
   }
 
@@ -196,7 +200,7 @@ class Auth {
   // clicking the link does not have to re-issue.
   async issueInviteToken(userId) {
     return new jose.SignJWT({ purpose: PURPOSE_INVITE })
-      .setProtectedHeader({ alg: 'HS256' })
+      .setProtectedHeader({ alg: "HS256" })
       .setSubject(String(userId))
       .setIssuedAt()
       .setIssuer(issuer())
@@ -223,22 +227,22 @@ class Auth {
       }));
     } catch (err) {
       if (!(err instanceof jose.errors.JOSEError)) throw err;
-      throw ApiError.unauthorized('Invalid or expired invitation.');
+      throw ApiError.unauthorized("Invalid or expired invitation.");
     }
 
     if (payload.purpose !== PURPOSE_INVITE) {
-      throw ApiError.unauthorized('Invalid or expired invitation.');
+      throw ApiError.unauthorized("Invalid or expired invitation.");
     }
 
     // Re-read the row rather than trusting the token's age. The user may have been
     // soft-deleted since the invite was sent, and the account may already be active.
     const user = await query.getAuthUserById(Number(payload.sub));
-    if (!user) throw ApiError.unauthorized('Invalid or expired invitation.');
+    if (!user) throw ApiError.unauthorized("Invalid or expired invitation.");
 
     // The single-use check. A 409 and not a 401: the link was genuine, it has simply been
     // spent, and the caller's next move is to log in, not to ask for another invite.
     if (user.password_hash !== null) {
-      throw ApiError.conflict('This invitation has already been used.');
+      throw ApiError.conflict("This invitation has already been used.");
     }
 
     await this.setPassword(user.id, password);

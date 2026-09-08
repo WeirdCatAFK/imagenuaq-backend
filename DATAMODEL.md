@@ -12,7 +12,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 
 | Módulo | Tablas | Estado |
 | --- | --- | --- |
-| USR | `users`, `roles`, `areas`, `area_members`, `contract_types`, `permissions`, `role_permissions` | Implementado; roles por área pendientes (§5.2) |
+| USR | `users`, `roles`, `areas`, `area_hierarchy`, `area_members`, `contract_types`, `permissions`, `role_permissions` | Implementado; roles por área pendientes (§5.2) |
 | CAL / AUS | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado; `contract_type_entitlements` aún sin topes (§5.4) |
 | ARC | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens` | Implementado |
 | — | `logs`, `actions` | Implementado |
@@ -202,6 +202,11 @@ llega a divergir.
 | RF-EST-06, RF-EST-10 | `notifications` |
 | RF-EST-07, RF-EST-08 | Consulta sobre `projects` + `status_since` |
 | RF-CAL-03 | `period_closures` + `projects.has_cost` |
+| RF-USR-01, RF-USR-02 | `users`, `areas`, `area_members`, `roles` |
+| RF-USR-03, RF-USR-04 | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella |
+| RF-USR-05, RF-USR-10 | `permissions` + `role_permissions` (§5.2) |
+| RF-USR-07 | `logs` con `target_table`/`target_id` (§5.3) |
+| RF-USR-09 | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla |
 
 `RF-TSK-07` y `RF-CAL-06` cruzan con ausencias: la ocupación del área debe descontar las
 ausencias autorizadas. Se resuelven leyendo `events` (público) y **nunca** `absences`
@@ -229,7 +234,7 @@ Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ell
 ## 5. Huecos en el modelo ya implementado
 
 Independientes de la columna vertebral, y encontrados al contrastar el esquema vigente con
-los requerimientos. **Los cuatro se cerraron en `I0-dbFixes`**, una migración por hueco para
+los requerimientos. **Los primeros cuatro se cerraron en `I0-dbFixes`**, una migración por hueco para
 que el rollback fuera granular:
 
 | Hueco | Migración | Estado |
@@ -238,6 +243,7 @@ que el rollback fuera granular:
 | 5.2 Sin dónde guardar un permiso | `1788545749090_role-permissions.sql` | Cerrado salvo los roles por área |
 | 5.3 `logs` sin objeto | `1788545740478_logs-target.sql` | Cerrado |
 | 5.4 Catálogos vacíos | `1788794776184_catalog-bootstrap.sql` | Cerrado salvo los topes por esquema |
+| 5.5 La organización era plana | `1788887962363_roles-and-areas.sql` | Cerrado |
 
 El diagnóstico se conserva abajo porque explica por qué el esquema quedó como quedó.
 
@@ -362,3 +368,54 @@ Inventar un número plausible sería peor que dejarlo vacío: por `RF-AUS-04` ca
 qué tope estuvo vigente en un periodo, y una equivocada explicaría en silencio saldos ya
 consumidos contra un tope que nunca existió. Es dato operativo que carga control de
 personal, no una migración.
+
+### 5.5 La organización era una lista, no una estructura — cerrado
+
+`areas` era un catálogo plano: siete filas sin relación entre ellas. Dos requerimientos
+necesitan que esa relación sea dato:
+
+- `RF-USR-09` — dar de alta nuevas áreas **y coordinaciones** sin desarrollo, "dado que la
+  estructura organizacional crece". Una coordinación no es otro tipo de registro: es un
+  área con áreas debajo. Sin dónde decir cuál cuelga de cuál, dar de alta un área y dar de
+  alta una coordinación son la misma operación y la diferencia vive solo en quien la
+  recuerda.
+- `RF-USR-04` — los responsables de área y la coordinación consultan el trabajo de "todos
+  los usuarios a su cargo". Eso es un **subárbol** de áreas, no un área, y la consulta
+  simplemente no se podía escribir.
+
+**Cómo se cerró.** `area_hierarchy`, una fila por área que *tiene* padre. Sin fila = raíz,
+así que la tabla guarda solo las excepciones: la mayoría de las áreas no cuelgan de nadie, y
+una columna `parent_area_id` sobre `areas` habría sido siete NULL y el mismo join.
+
+**La llave primaria es `child_area_id` sola**, y ahí está toda la decisión. La forma obvia
+—y el primer borrador de la migración— era `PRIMARY KEY (parent_area_id, child_area_id)`,
+que permite que un área tenga varios padres. Eso deja de ser un árbol, y el organigrama que
+`RF-USR-09` implica se queda sin forma de dibujarse: el subárbol de un área con dos padres o
+se dibuja dos veces —la misma gente en dos lugares, sin nada que indique que son un solo
+equipo— o se dibuja una vez y la gráfica miente sobre una de las dos líneas de autoridad.
+Con el hijo como llave, el segundo padre lo rechaza la base y no tiene que elegirlo el
+frontend.
+
+**Rechazado: una columna `level`** para colocar el nodo en el diagrama. La profundidad no es
+un hecho del área, es consecuencia de dónde cuelga hoy, y mover un subárbol obligaría a
+reescribir `level` en todos sus descendientes —una operación que nadie va a recordar hacer,
+y que deja una gráfica que se dibuja con seguridad a la profundidad equivocada. Se calcula
+con un CTE recursivo al leer. Contrasta con `file_locations`, donde la ubicación **sí** se
+guarda: en qué disco están los bytes es una decisión que nada puede volver a derivar.
+
+**Los ciclos de más de un salto no son restricción de tabla.** `CHECK (parent <> child)`
+cubre el salto directo; A bajo B bajo A necesitaría un trigger o una cerradura transitiva
+materializada, y ambos le cobran a cada escritura por algo que solo produce un UPDATE a
+mano. En su lugar: `Areas.setParent()` rechaza como padre a un descendiente del hijo, y la
+consulta de lectura lleva la cláusula `CYCLE` del CTE recursivo (Postgres 14+), de modo que
+un ciclo escrito por `psql` trunca una rama en vez de colgar la petición. Es cinturón de
+seguridad, no la guarda: quien agregue una segunda ruta de escritura a esa tabla debe la
+misma verificación.
+
+`ON DELETE CASCADE` de los dos lados: borrar un área elimina el enlace con su padre y los
+enlaces con sus hijos, que quedan como raíces —siguen siendo dibujables. La alternativa,
+`RESTRICT` del lado del padre, se niega a borrar una coordinación hasta que cada área abajo
+se haya movido a mano, que es justamente el estado del que intenta salir quien reorganiza.
+
+Queda abierta la otra mitad de §5.2: mover `role_id` a `area_members` para que el rol pueda
+diferir por área. Sigue siendo su propia rama.

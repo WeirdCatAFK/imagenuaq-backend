@@ -179,20 +179,81 @@ yet.
 
 ## Endpoints
 
-| Method | Route | Auth | Notes |
-| --- | --- | --- | --- |
-| GET | `/` | — | Readiness ping, no database involved |
-| GET | `/api/docs` | — | Swagger UI; `/api/docs/openapi.json` is the raw document |
-| GET | `/api/health` | — | 200 while Postgres answers, 503 once it stops |
-| POST | `/api/auth/login` | — | `{ email, password }` → `{ token, user }` |
-| GET | `/api/auth/me` | session | The subject of the presented token |
-| POST | `/api/auth/activate` | invite token | `{ token, password }` → `{ token, user }` |
-| POST | `/api/users` | admin | Create a staff account → `{ user, inviteToken }` |
-| POST | `/api/users/:id/invite` | admin | Re-issue an invite for an account that never activated |
+| Method | Route                     | Auth         | Notes                                                     |
+| ------ | ------------------------- | ------------ | --------------------------------------------------------- |
+| GET    | `/`                     | —           | Readiness ping, no database involved                      |
+| GET    | `/api/docs`             | —           | Swagger UI;`/api/docs/openapi.json` is the raw document |
+| GET    | `/api/health`           | —           | 200 while Postgres answers, 503 once it stops             |
+| POST   | `/api/auth/login`       | —           | `{ email, password }` → `{ token, user }`            |
+| GET    | `/api/auth/me`          | session      | The subject of the presented token                        |
+| POST   | `/api/auth/activate`    | invite token | `{ token, password }` → `{ token, user }`            |
+| POST   | `/api/users`            | admin        | Create a staff account →`{ user, inviteToken }`        |
+| POST   | `/api/users/:id/invite` | admin        | Re-issue an invite for an account that never activated    |
+
+### Areas and the organisation chart
+
+Reads need only a session — RF-USR-03 gives everyone sight of their colleagues' work.
+Writes need `admin`.
+
+| Method | Route                                | Auth    | Notes                                                        |
+| ------ | ------------------------------------ | ------- | ------------------------------------------------------------ |
+| GET    | `/api/areas`                       | session | Flat and alphabetical                                        |
+| GET    | `/api/areas/orgchart`              | session | The whole organisation, nested →`{ roots: [...] }`        |
+| GET    | `/api/areas/:id`                   | session | One area                                                     |
+| GET    | `/api/areas/:id/orgchart`          | session | The subtree under one area — the read`RF-USR-04` asks for  |
+| GET    | `/api/areas/:id/members`           | session | Leaders first, then by name                                  |
+| POST   | `/api/areas`                       | admin   | `{ name, description?, leaderUserId? }`                    |
+| PATCH  | `/api/areas/:id`                   | admin   | Partial; absent keys are left alone                          |
+| DELETE | `/api/areas/:id`                   | admin   | 409 while anyone is still assigned to it                     |
+| PUT    | `/api/areas/:id/parent`            | admin   | `{ parentAreaId }`; 409 if the move would close a cycle     |
+| DELETE | `/api/areas/:id/parent`            | admin   | Promote the area back to a root                              |
+| PUT    | `/api/areas/:id/members/:userId`   | admin   | `{ isAreaLeader? }`; an upsert, so it also promotes/demotes |
+| DELETE | `/api/areas/:id/members/:userId`   | admin   | Removes the membership, not the account                      |
+
+An area with no `area_hierarchy` row is a root, so the chart is a **forest**, not a single
+tree. Each area has at most one parent — that is the primary key — which is what makes the
+result renderable: every node carries its own `children`, and the frontend's
+`react-organizational-chart` recurses over the response with no reshaping. `depth` is
+computed by the recursive walk rather than stored, because depth is a consequence of where
+an area currently hangs and a stored copy would go stale on every re-parent.
+
+Cycles deeper than one hop are refused by `PUT /api/areas/:id/parent`, not by the table:
+`area_hierarchy` can only CHECK that an area is not its own parent. The read query carries
+the recursive CTE's `CYCLE` clause so a loop written straight into the database through
+`psql` truncates one branch instead of hanging the request — that is a seatbelt, not the
+guard. A second write path to that table owes the same check.
+
+### Roles and permissions
+
+| Method | Route                                          | Auth    | Notes                                          |
+| ------ | ---------------------------------------------- | ------- | ----------------------------------------------- |
+| GET    | `/api/roles`                                 | session | The catalogue; a role picker needs it           |
+| GET    | `/api/roles/:id`                             | session | One role                                        |
+| GET    | `/api/roles/:id/permissions`                 | session | What that role may do                           |
+| GET    | `/api/roles/permissions`                     | session | Every permission code that exists               |
+| POST   | `/api/roles`                                 | admin   | `{ name, description? }`                      |
+| PATCH  | `/api/roles/:id`                             | admin   | Renaming locks out live tokens — see below     |
+| DELETE | `/api/roles/:id`                             | admin   | 409, with the count, while users still hold it  |
+| PUT    | `/api/roles/:id/permissions`                 | admin   | `{ permissions: [codes] }` — replaces the set |
+| POST   | `/api/roles/:id/permissions/:permissionId`   | admin   | 201 when new, 200 when already held             |
+| DELETE | `/api/roles/:id/permissions/:permissionId`   | admin   | Takes effect on the next request                |
+| POST   | `/api/roles/permissions`                     | admin   | `{ code, label, description? }`               |
+| PATCH  | `/api/roles/permissions/:permissionId`       | admin   | Prefer adding a code to renaming one            |
+| DELETE | `/api/roles/permissions/:permissionId`       | admin   | Cascades the grants away with it                |
+
+`role_permissions` arrives partly filled by `catalog-bootstrap`: `admin` holds every
+permission, because it is the role the others are configured from and an empty one is a
+deadlock; `finance` holds `finance.read`, because that grant *is* the role under
+`RF-USR-08`. `worker` and `area_lead` hold nothing on purpose — theirs is coordination's
+policy decision (`RF-USR-05`), and `PUT /api/roles/:id/permissions` is where it gets made.
+
+Renaming a role is heavier than it looks. `requireRole()` compares `roles.name`, and every
+token already issued carries the old name for up to seven days, because nothing re-reads the
+database on a verified token. A rename locks those holders out until they log in again.
 
 ### API documentation
 
-`npm run dev`, then <http://localhost:3000/api/docs>. *Authorize* takes the token from
+`npm run dev`, then [http://localhost:3000/api/docs](http://localhost:3000/api/docs). *Authorize* takes the token from
 `POST /api/auth/login`, and **Try it out** calls this server — the document lists `/` as
 its first server, so the UI resolves it against whatever host you opened it on.
 `/api/docs/openapi.json` is the same document as a file, for a client generator or an
@@ -254,7 +315,7 @@ password as an argument: `argv` is readable through `ps` and lands in shell hist
 npm test
 ```
 
-140 cases over the eight endpoints, driven through real HTTP. `pretest` creates
+Every endpoint above, driven through real HTTP. `pretest` creates
 `imagenuaq_test` and migrates it, so `npm test` is the only command to remember; the
 database container has to be up.
 

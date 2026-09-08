@@ -9,23 +9,23 @@
 // a caller pick their own role_id would make RF-USR-06 -- do not edit what is not yours --
 // unenforceable, because anyone could ask to be coordination. External requesters are not
 // users at all: RF-EXT-03 gives them view-only sight of their own request.
-import query from '../resources/query.js';
-import { ApiError } from '../../utils/ApiError.js';
+import query from "../resources/query.js";
+import { ApiError } from "../../utils/ApiError.js";
 
 // Postgres error codes. Checking these beats pre-flighting each value with its own select:
 // the constraint is the authority, and two callers creating the same email at once resolve
 // correctly instead of both passing a check and one blowing up as a 500.
-const UNIQUE_VIOLATION = '23505';
-const FOREIGN_KEY_VIOLATION = '23503';
+const UNIQUE_VIOLATION = "23505";
+const FOREIGN_KEY_VIOLATION = "23503";
 
 // Which constraint failed maps to which field the caller got wrong. Names come from the
 // migrations; a renamed constraint should be renamed here too, and until then falls
 // through to the generic message rather than reporting the wrong field.
 const FK_FIELDS = {
-  fk_users_role_id_roles_id: 'roleId',
-  fk_users_contract_type_id_contract_types_id: 'contractTypeId',
-  fk_users_primary_area_id_areas_id: 'primaryAreaId',
-  fk_area_members_area_id_areas_id: 'primaryAreaId',
+  fk_users_role_id_roles_id: "roleId",
+  fk_users_contract_type_id_contract_types_id: "contractTypeId",
+  fk_users_primary_area_id_areas_id: "primaryAreaId",
+  fk_area_members_area_id_areas_id: "primaryAreaId",
 };
 
 // Deliberately permissive. The authority on what is a deliverable address is whether mail
@@ -34,12 +34,12 @@ const FK_FIELDS = {
 // typo; 320 is the column width.
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Create an account with no password. The caller is an authenticated admin -- the route
+// enforces that -- so the failures here are about the *payload*, not about permission.
+//
+// Returns the created user in the same shape a session carries, so the route can mint an
+// invite for it without a second read.
 class Users {
-  // Create an account with no password. The caller is an authenticated admin -- the route
-  // enforces that -- so the failures here are about the *payload*, not about permission.
-  //
-  // Returns the created user in the same shape a session carries, so the route can mint an
-  // invite for it without a second read.
   async create({
     email,
     fullName,
@@ -49,38 +49,42 @@ class Users {
     birthday = null,
     isAreaLeader = false,
   }) {
-    const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-    const cleanName = typeof fullName === 'string' ? fullName.trim() : '';
-
-    // Lowercased on the way in because the uniqueness guarantee is a plain unique index on
-    // the column: without this, Ana@uaq.mx and ana@uaq.mx are two accounts, and the login
-    // lookup finds whichever was typed. Normalising at the one place rows are created is
-    // cheaper than a functional index and a matching lower() in every query.
+    const cleanEmail =
+      typeof email === "string" ? email.trim().toLowerCase() : "";
+    const cleanName = typeof fullName === "string" ? fullName.trim() : "";
     if (!EMAIL.test(cleanEmail) || cleanEmail.length > 320) {
-      throw ApiError.badRequest('A valid email address is required.');
+      throw ApiError.badRequest("A valid email address is required.");
     }
     if (!cleanName || cleanName.length > 200) {
-      throw ApiError.badRequest('Full name is required (200 characters or fewer).');
+      throw ApiError.badRequest(
+        "Full name is required (200 characters or fewer).",
+      );
     }
 
     // Required by the schema and by RF-USR-02: a user with no role has no visibility rules
     // to apply, and contract type is what RF-AUS-04 later reads absence caps from.
     const role = toId(roleId);
     const contractType = toId(contractTypeId);
-    if (role === null) throw ApiError.badRequest('roleId is required.');
-    if (contractType === null) throw ApiError.badRequest('contractTypeId is required.');
+    if (role === null) throw ApiError.badRequest("roleId is required.");
+    if (contractType === null)
+      throw ApiError.badRequest("contractTypeId is required.");
 
-    const area = primaryAreaId === null || primaryAreaId === undefined
-      ? null
-      : toId(primaryAreaId);
-    if (primaryAreaId !== null && primaryAreaId !== undefined && area === null) {
-      throw ApiError.badRequest('primaryAreaId must be a positive integer.');
+    const area =
+      primaryAreaId === null || primaryAreaId === undefined
+        ? null
+        : toId(primaryAreaId);
+    if (
+      primaryAreaId !== null &&
+      primaryAreaId !== undefined &&
+      area === null
+    ) {
+      throw ApiError.badRequest("primaryAreaId must be a positive integer.");
     }
 
     // A leader flag without an area has nowhere to apply. Accepting it silently would
     // record a decision that never took effect.
     if (isAreaLeader && area === null) {
-      throw ApiError.badRequest('isAreaLeader requires primaryAreaId.');
+      throw ApiError.badRequest("isAreaLeader requires primaryAreaId.");
     }
 
     try {
@@ -112,7 +116,8 @@ class Users {
 // NaN and true as 1; this returns null for anything that is not a positive integer, and
 // the caller decides whether that is a 400 or a legitimate absence.
 function toId(value) {
-  if (typeof value === 'boolean' || value === null || value === undefined) return null;
+  if (typeof value === "boolean" || value === null || value === undefined)
+    return null;
   const n = Number(value);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
@@ -124,13 +129,13 @@ function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     // The live-only partial index (uq_users_email_live) means this fires for an active
     // account and stays silent for a soft-deleted one whose address is free again.
-    return ApiError.conflict('A user with that email address already exists.');
+    return ApiError.conflict("A user with that email address already exists.");
   }
 
   if (err?.code === FOREIGN_KEY_VIOLATION) {
     const field = FK_FIELDS[err.constraint];
     return ApiError.badRequest(
-      field ? `Unknown ${field}.` : 'A referenced record does not exist.',
+      field ? `Unknown ${field}.` : "A referenced record does not exist.",
     );
   }
 
