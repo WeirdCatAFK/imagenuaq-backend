@@ -2,6 +2,9 @@ node_modules/
 .env
 .env.*
 !.env.example
+# Committed: it holds only non-secret test overrides. The test DATABASE_URL is derived
+# from .env at runtime by tests/helpers/env.js, never written here.
+!.env.test
 *.log
 coverage/
 dist/

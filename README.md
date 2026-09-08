@@ -8,6 +8,7 @@ cp .env.example .env          # set DATABASE_URL
 docker compose up -d db       # Postgres on the port in .env
 npm run migrate:up            # apply migrations
 npm run dev                   # node --watch
+npm test                      # see Tests below
 ```
 
 ## Layout
@@ -177,10 +178,89 @@ yet.
 
 ## Endpoints
 
-| Method | Route           | Notes                                         |
-| ------ | --------------- | --------------------------------------------- |
-| GET    | `/`           | Readiness ping, no database involved          |
-| GET    | `/api/health` | 200 while Postgres answers, 503 once it stops |
+| Method | Route | Auth | Notes |
+| --- | --- | --- | --- |
+| GET | `/` | — | Readiness ping, no database involved |
+| GET | `/api/health` | — | 200 while Postgres answers, 503 once it stops |
+| POST | `/api/auth/login` | — | `{ email, password }` → `{ token, user }` |
+| GET | `/api/auth/me` | session | The subject of the presented token |
+| POST | `/api/auth/activate` | invite token | `{ token, password }` → `{ token, user }` |
+| POST | `/api/users` | admin | Create a staff account → `{ user, inviteToken }` |
+| POST | `/api/users/:id/invite` | admin | Re-issue an invite for an account that never activated |
+
+### Accounts
+
+There is no self-registration. RF-USR-01/02 make area and role decisions coordination
+takes about a person, so accounts are created by an admin through `POST /api/users` and
+arrive with **no password**. The response carries a one-time `inviteToken`; its owner picks
+their own password at `POST /api/auth/activate`, which returns a session.
+
+The invite is single-use with no table behind it: it is valid only while the account has no
+password, and redeeming it gives the account one. That trick does not extend to password
+*resets* — those need a hashed single-use token of their own, and are not built yet.
+
+Session and invite tokens are both signed with `JWT_SECRET` and are distinguished by a
+`purpose` claim. Without it an invite would be accepted as a session, which is a full login
+for an account whose owner has not chosen a password.
+
+### The first admin, and lockouts
+
+Account creation needs an admin, which is a closed loop — nobody has been created yet, or
+every admin has lost access. `npm run admin:create` breaks it:
+
+```bash
+ADMIN_PASSWORD=... npm run admin:create -- --email a@uaq.mx --name "Nombre Apellido"                                           [--contract <id|name>] [--area <id|name>]
+```
+
+Run against an address that already exists it **promotes that user to admin and resets
+their password**, which is the recovery path when every admin is locked out. It is a script
+and not an endpoint deliberately: in a lockout the admin rows are still present and valid,
+so a route gated on “no admins exist” would refuse to help in the one situation it was for.
+The gate is possession of `DATABASE_URL` — whoever has that can already do this with
+`psql`; the script only makes it correct, at the same bcrypt cost the server verifies with.
+
+Omit `ADMIN_PASSWORD` on a terminal and it prompts with the echo off. Never pass the
+password as an argument: `argv` is readable through `ps` and lands in shell history.
+
+## Tests
+
+```bash
+npm test
+```
+
+126 cases over the seven endpoints, driven through real HTTP. `pretest` creates
+`imagenuaq_test` and migrates it, so `npm test` is the only command to remember; the
+database container has to be up.
+
+The runner is Node's own (`node --test`) with `node:assert` and `fetch`, so the suite adds
+no dependencies. Each file boots the app with `new Api({ port: 0 })` and talks to it over a
+socket rather than through an in-process shim -- helmet, CORS and `express.json()` are part
+of what is being tested, and two of the cases are the body parser's refusals rather than
+ours.
+
+**The suite never touches the development database.** `tests/helpers/env.js` derives the
+test database from `DATABASE_URL` by swapping the name for `imagenuaq_test`, and throws if
+the result does not end in `_test` -- the fixtures truncate tables, so the name is checked
+rather than trusted. Point `TEST_DATABASE_URL` somewhere else to override, subject to the
+same check.
+
+Files run serially (`--test-concurrency=1`) because they share that database and each one
+truncates `users` and `area_members` before every case. The catalogs seeded by
+`catalog-bootstrap` survive, and fixtures look roles and areas up **by name** -- the ids
+differ between databases.
+
+Most of the runtime is bcrypt: cost 12, roughly a second per login on a laptop, paid
+honestly on every login the suite performs. Fixtures hash once per process and reuse the
+digest.
+
+What the suite is for, beyond regressions: the behaviours it pins are the ones the code
+comments argue for and a plausible refactor would quietly undo -- the `purpose` claim that
+keeps an invite from working as a session, the single login message that denies an
+email-enumeration oracle, the ordering that makes a spent invite a 409 rather than a 400,
+the CTE that writes `area_members` with the user, and the partial index that frees a
+soft-deleted address. Each was checked by breaking it and confirming the suite fails.
+
+There is still no linter.
 
 ## Adding a resource
 
