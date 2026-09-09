@@ -146,6 +146,7 @@ describe('GET /api/auth/me', () => {
       fullName: 'Ana Gómez',
       roleId: user.role_id,
       role: 'worker',
+      areaId: null,
     });
   });
 

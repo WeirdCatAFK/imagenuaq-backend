@@ -1,9 +1,35 @@
+// Tier 2: the ONLY module in the codebase that writes SQL.
+//
+// Everything above it -- orchestration, routes -- composes these methods; nothing below it
+// knows what a table is. Two things bite anybody adding a method here:
+//
+//   - **Parameters are positional.** `$1, $2` in an array, never `:named` in an object:
+//     postgrejs calls .map() on options.params, so an object throws
+//     "params?.map is not a function" at runtime rather than at parse time.
+//   - **Casts are load-bearing.** Postgres infers a parameter's type from its first use,
+//     and a bare null or an `is not null` test gives it nothing, so it fails the statement
+//     with "could not determine data type of parameter $n" rather than the row.
+//
+// Multi-step writes are data-modifying CTEs, not transactions. A CTE is atomic on its own
+// and keeps the tier boundary intact -- opening a transaction would mean handing a
+// connection up to orchestration, which is what this module exists to prevent.
 import { getStore } from "../primitives/database.js";
 
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
     return result.rows ?? [];
+  }
+
+  /**
+   * Normalises an array parameter. postgrejs serialises an empty array as '' and
+   * Postgres rejects that with 22P02, so an empty set becomes null and the SQL
+   * coalesces it back to '{}'.
+   *
+   * @param {Array} ids
+   */
+  #idArray(ids) {
+    return ids.length ? ids : null;
   }
 
   // --- Health ---
@@ -19,21 +45,14 @@ class Query {
   }
 
   // --- Auth ---
-  //
-  // Parameters are positional ($1, $2) in an array, never `:named` in an object: postgrejs
-  // calls .map() on options.params, so an object throws "params?.map is not a function" at
-  // runtime rather than at parse time. Nothing else in the codebase takes parameters yet,
-  // so this is the note that saves the next resource an hour.
 
-  // One row with everything a session needs, so authenticating is a single round trip
-  // rather than a login lookup followed by a role lookup. The join is to `roles` and not
-  // just `role_id` because the token carries the role *name*: an integer id in a JWT is
-  // meaningless to the frontend and would have to be resolved on every request anyway.
-  //
-  // `deleted_at is null` matters here more than anywhere else. Users are soft-deleted
-  // (that is what the partial index `uq_users_email_live` is for -- a freed address can be
-  // reused), so without this predicate a removed employee keeps logging in, and a reused
-  // address can match two rows.
+  /**
+   * One live user with the role name joined in: everything a session token needs, in a
+   * single round trip.
+   *
+   * @param {string} email
+   * @returns {Promise<object | null>}
+   */
   async getAuthUserByEmail(email) {
     const [row] = await this.#rows(
       `select u.id,
@@ -41,6 +60,7 @@ class Query {
               u.full_name,
               u.password_hash,
               u.role_id,
+              u.primary_area_id,
               r.name as role_name
          from users u
          join roles r on r.id = u.role_id
@@ -51,9 +71,11 @@ class Query {
     return row ?? null;
   }
 
-  // `returning id` rather than a rowcount: the same statement then reports whether the
-  // user existed and was live, so the caller can tell "wrong id" from "wrote nothing"
-  // without a second select.
+  /**
+   * Sets a live user's password hash.
+   *
+   * @returns {Promise<number | null>} The user id, or null when no live row matched.
+   */
   async setPasswordHash(userId, passwordHash) {
     const [row] = await this.#rows(
       `update users
@@ -66,9 +88,12 @@ class Query {
     return row?.id ?? null;
   }
 
-  // Same columns as getAuthUserByEmail, keyed by id. Used by the invite flow, which knows
-  // the user id from the token and must still re-read `password_hash` and `deleted_at`
-  // live -- an invite token minted a week ago says nothing about the row's state now.
+  /**
+   * Same columns as getAuthUserByEmail, keyed by id. The invite flow uses it to re-read
+   * `password_hash` and `deleted_at` live.
+   *
+   * @returns {Promise<object | null>}
+   */
   async getAuthUserById(userId) {
     const [row] = await this.#rows(
       `select u.id,
@@ -87,9 +112,11 @@ class Query {
     return row ?? null;
   }
 
-  // Permission *codes*, not ids. `permissions.code` is the stable machine name the rest
-  // of the code compares against; the surrogate id is an implementation detail of the
-  // join table and would make every call site do another lookup.
+  /**
+   * The permission codes granted to a role.
+   *
+   * @returns {Promise<string[]>}
+   */
   async getRolePermissionCodes(roleId) {
     const rows = await this.#rows(
       `select p.code
@@ -104,20 +131,13 @@ class Query {
 
   // --- Users ---
 
-  // Creates the user and, when an area is given, their membership of it -- in ONE
-  // statement. area_members is not redundant with users.primary_area_id: DATAMODEL.md
-  // §5.2 moved area leadership there precisely because somebody can lead one area and be
-  // a member of another, and the RF-USR-03 / RF-TSK-06 visibility queries read
-  // area_members. A user created without a row there is invisible to their own colleagues.
-  //
-  // A CTE rather than two calls inside a transaction: a data-modifying CTE is atomic on
-  // its own, so this cannot half-succeed, and it keeps the tier boundary intact -- opening
-  // a transaction would mean handing a connection up to orchestration, which is exactly
-  // what `query.js` exists to prevent.
-  //
-  // No password_hash. A user is created without one and reaches it through the invite
-  // flow, so the account cannot be logged into before its owner chooses a secret. That is
-  // also what makes an invite single-use: see completeInvite() in orchestration/auth.js.
+  /**
+   * Creates a user and, when an area is given, their `area_members` row, in one
+   * data-modifying CTE. Writes no password hash: the account is reached through the
+   * invite flow.
+   *
+   * @returns {Promise<object>} The new user row.
+   */
   async createUser({
     email,
     fullName,
@@ -127,9 +147,7 @@ class Query {
     birthday = null,
     isAreaLeader = false,
   }) {
-    // The casts are load-bearing, not decoration. Postgres infers a parameter's type from
-    // its first use, and `$5 is not null` in the second CTE gives it nothing to work with;
-    // without ::bigint it fails with "could not determine data type of parameter $5".
+    // The ::bigint casts are required; Postgres cannot infer $5's type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into users (email, full_name, role_id, contract_type_id,
@@ -152,20 +170,146 @@ class Query {
               r.name as role_name
          from created c
          join roles r on r.id = c.role_id`,
-      [email, fullName, roleId, contractTypeId, primaryAreaId, birthday, isAreaLeader],
+      [
+        email,
+        fullName,
+        roleId,
+        contractTypeId,
+        primaryAreaId,
+        birthday,
+        isAreaLeader,
+      ],
     );
     return row;
   }
+  async getUser(userId) {
+    const [row] = await this.#rows(
+      `select * from users where id = $1 and deleted_at is null`,
+      [userId],
+    );
+    return row ?? null;
+  }
+  /**
+   * Updates every column in one statement. The caller passes merged values — a partial
+   * update would mean building SQL by concatenation.
+   *
+   * @returns {Promise<object | null>}
+   */
+  async updateUser(
+    userId,
+    { fullName, contractTypeId, primaryAreaId, birthday, email, scheduleId },
+  ) {
+    const [row] = await this.#rows(
+      `update users
+          set full_name        = $2,
+              contract_type_id = $3,
+              primary_area_id  = $4::bigint,
+              birthday         = $5::date,
+              email            = $6,
+              schedule_id      = $7::bigint
+        where id = $1 and deleted_at is null
+        returning *`,
+      [
+        userId,
+        fullName,
+        contractTypeId,
+        primaryAreaId,
+        birthday,
+        email,
+        scheduleId,
+      ],
+    );
+    return row ?? null;
+  }
+  async deleteUser(userId) {
+    const [row] = await this.#rows(
+      `update users set deleted_at = now()
+        where id = $1 and deleted_at is null
+        returning *`,
+      [userId],
+    );
+    return row ?? null;
+  }
+  // --- User Helpers ---
 
-  // Catalog lookups for scripts/createAdmin.js, which accepts either an id or a name --
-  // ids come from a sequence and differ per database, so an operator recovering a lockout
-  // cannot be expected to know them. One statement handles both: the id branch is taken
-  // only when the reference parses as a positive integer, which `$1::bigint is not null`
-  // expresses without the caller sending two different queries.
-  //
-  // These live here rather than as raw SQL in the script because query.js is the only
-  // module that writes SQL, and a recovery path is the worst possible place to make an
-  // exception to that -- it is the code that runs when everything else has already failed.
+  /** Stores a profile picture. The caller resizes to 256x256 PNG first. */
+  async updateProfilePicture(userId, pictureBinary) {
+    const [row] = await this.#rows(
+      `update users set profile_picture = $2
+        where id = $1 and deleted_at is null
+        returning *`,
+      [userId, pictureBinary],
+    );
+    return row ?? null;
+  }
+  async getUserProfilePicture(userId) {
+    const [row] = await this.#rows(
+      `select profile_picture from users where id = $1 and deleted_at is null`,
+      [userId],
+    );
+    return row?.profile_picture ?? null;
+  }
+  async getUserEmailById(userId) {
+    const [row] = await this.#rows(
+      `select email from users where id = $1 and deleted_at is null`,
+      [userId],
+    );
+    return row?.email ?? null;
+  }
+  async getUserIdByEmail(email) {
+    const [row] = await this.#rows(
+      `select id from users where email = $1 and deleted_at is null`,
+      [email],
+    );
+    return row?.id ?? null;
+  }
+
+  /**
+   * Searches live users by email.
+   *
+   * @param {string} email
+   * @param {number} [length] Maximum rows.
+   */
+  async searchUsersByEmail(email, length = 50) {
+    const rows = await this.#rows(
+      `select id, email, full_name from users
+        where lower(email) like lower($1)
+          and deleted_at is null
+        order by email
+        limit $2`,
+      [`%${email}%`, length],
+    );
+    return rows;
+  }
+  async searchUsersByFullName(fullName, length = 50) {
+    const rows = await this.#rows(
+      `select id, email, full_name from users
+        where lower(full_name) like lower($1)
+          and deleted_at is null
+        order by full_name
+        limit $2`,
+      [`%${fullName}%`, length],
+    );
+    return rows;
+  }
+  async searchUsersByEmailOrFullName(query, length = 50) {
+    const rows = await this.#rows(
+      `select id, email, full_name from users
+        where (lower(email) like lower($1) or lower(full_name) like lower($1))
+          and deleted_at is null
+        order by full_name
+        limit $2`,
+      [`%${query}%`, length],
+    );
+    return rows;
+  }
+
+  /**
+   * Looks a contract type up by id or by name, for scripts/createAdmin.js — an operator
+   * recovering a lockout knows the name, not the sequence id.
+   *
+   * @param {string | number} ref
+   */
   async findContractType(ref) {
     return this.#findCatalog(
       `select id, name from contract_types
@@ -195,23 +339,22 @@ class Query {
     return row ?? null;
   }
 
-  // The fallback when no contract type was named. contract_type_id is NOT NULL and there
-  // is no defensible invented default, so the script picks the first and reports it.
+  /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
   async firstContractType() {
     const [row] = await this.#rows(
-      'select id, name from contract_types order by id limit 1',
+      "select id, name from contract_types order by id limit 1",
     );
     return row ?? null;
   }
 
   async getRoleIdByName(name) {
-    const [row] = await this.#rows('select id from roles where name = $1', [name]);
+    const [row] = await this.#rows("select id from roles where name = $1", [
+      name,
+    ]);
     return row?.id ?? null;
   }
 
-  // Used only by scripts/createAdmin.js, to report what the recovery it just performed
-  // changed. Live rows only: a soft-deleted admin cannot log in and must not be counted
-  // as one.
+  /** Counts live users holding a role, by role name. Used by scripts/createAdmin.js. */
   async countLiveUsersWithRole(roleName) {
     const [row] = await this.#rows(
       `select count(*)::int as count
@@ -224,9 +367,10 @@ class Query {
     return row?.count ?? 0;
   }
 
-  // Role change and password reset in one statement, for the lockout recovery in
-  // scripts/createAdmin.js. Deliberately NOT exposed through the API: promoting somebody
-  // to admin over HTTP is the one operation whose only safe gate is database access.
+  /**
+   * Changes a user's role and password in one statement, for the lockout recovery in
+   * scripts/createAdmin.js. Deliberately not exposed over HTTP.
+   */
   async promoteToRoleAndSetPassword(userId, roleId, passwordHash) {
     const [row] = await this.#rows(
       `update users
@@ -239,7 +383,604 @@ class Query {
     );
     return row?.id ?? null;
   }
+  // --- Audit trail (RF-USR-07) ---
 
+  /**
+   * The whole action catalogue. Callers cache it; codes are stable, ids are per database.
+   *
+   * @returns {Promise<object[]>}
+   */
+  async getActions() {
+    const rows = await this.#rows("select id, code, label from actions order by code");
+    return rows;
+  }
+
+  /**
+   * Writes one row of the audit trail. `area_id` is resolved by a subquery inside the
+   * INSERT from the actor's current `primary_area_id`, never passed in. `targetTable`
+   * and `targetId` travel together or not at all (`logs_target_complete`).
+   */
+  async insertLog({
+    userId,
+    actionId,
+    targetTable = null,
+    targetId = null,
+    beforeData = null,
+    afterData = null,
+  }) {
+    const [row] = await this.#rows(
+      `insert into logs (user_id, action_id, area_id, target_table, target_id,
+                         before_data, after_data)
+        values ($1::bigint,
+                $2,
+                (select primary_area_id from users where id = $1::bigint),
+                $3::varchar, $4::bigint, $5::jsonb, $6::jsonb)
+        returning id, user_id, action_id, area_id, target_table, target_id, created_at`,
+      [
+        userId,
+        actionId,
+        targetTable,
+        targetId,
+        beforeData === null ? null : JSON.stringify(beforeData),
+        afterData === null ? null : JSON.stringify(afterData),
+      ],
+    );
+    return row;
+  }
+
+  /** The trail for one object, newest first. Rides the partial index `idx_logs_target`. */
+  async getLogsForTarget(targetTable, targetId, limit = 100) {
+    const rows = await this.#rows(
+      `select l.id, l.user_id, u.full_name as user_full_name, a.code as action_code,
+              l.area_id, ar.name as area_name,
+              l.target_table, l.target_id, l.before_data, l.after_data, l.created_at
+         from logs l
+         join actions a on a.id = l.action_id
+         left join users u on u.id = l.user_id
+         left join areas ar on ar.id = l.area_id
+        where l.target_table = $1
+          and l.target_id = $2
+        order by l.created_at desc, l.id desc
+        limit $3`,
+      [targetTable, targetId, limit],
+    );
+    return rows;
+  }
+
+  /**
+   * The trail for a set of areas, newest first (RF-USR-04). Rides `idx_logs_area_id`.
+   *
+   * @param {number[]} areaIds
+   */
+  async getLogsForAreas(areaIds, limit = 100) {
+    const rows = await this.#rows(
+      `select l.id, l.user_id, u.full_name as user_full_name, a.code as action_code,
+              l.area_id, ar.name as area_name,
+              l.target_table, l.target_id, l.before_data, l.after_data, l.created_at
+         from logs l
+         join actions a on a.id = l.action_id
+         left join users u on u.id = l.user_id
+         left join areas ar on ar.id = l.area_id
+        where l.area_id = any(coalesce($1::bigint[], '{}'::bigint[]))
+        order by l.created_at desc, l.id desc
+        limit $2`,
+      [this.#idArray(areaIds), limit],
+    );
+    return rows;
+  }
+
+  // --- Areas ---
+
+  async createArea({ name, description }) {
+    const [row] = await this.#rows(
+      `insert into areas (name, description)
+        values ($1, $2)
+        returning id, name, description`,
+      [name, description],
+    );
+    return row;
+  }
+
+  /** Creates an area and its first leader in one statement, so neither can be orphaned. */
+  async createAreaWithLeader({ name, description, userId }) {
+    const [row] = await this.#rows(
+      `with created as (
+         insert into areas (name, description)
+         values ($1, $2)
+         returning id, name, description
+       ),
+       lead as (
+         insert into area_members (user_id, area_id, is_area_leader)
+         select $3::bigint, created.id, true
+           from created
+       )
+       select id, name, description from created`,
+      [name, description, userId],
+    );
+    return row;
+  }
+
+  async getAreas() {
+    const rows = await this.#rows(
+      "select id, name, description from areas order by name",
+    );
+    return rows;
+  }
+
+  async updateArea(areaId, { name, description }) {
+    const [row] = await this.#rows(
+      `update areas
+        set name = $2,
+            description = $3
+        where id = $1
+        returning id, name, description`,
+      [areaId, name, description],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Hard delete; `areas` has no `deleted_at`. The 23503 raised while people are still
+   * assigned is the refusal, which orchestration turns into a 409.
+   */
+  async deleteArea(areaId) {
+    const [row] = await this.#rows(
+      `delete from areas
+        where id = $1
+        returning id, name, description`,
+      [areaId],
+    );
+    return row ?? null;
+  }
+
+  // --- Area Helpers ---
+
+  async getAreaById(areaId) {
+    const [row] = await this.#rows(
+      "select id, name, description from areas where id = $1",
+      [areaId],
+    );
+    return row ?? null;
+  }
+
+  async getAreaByName(name) {
+    const [row] = await this.#rows(
+      "select id, name, description from areas where lower(name) = lower($1)",
+      [name],
+    );
+    return row ?? null;
+  }
+
+  async getAreaDescriptionById(areaId) {
+    const [row] = await this.#rows(
+      "select description from areas where id = $1",
+      [areaId],
+    );
+    return row?.description ?? null;
+  }
+
+  /** Upserts a membership, so adding a leader and promoting a member are the same call. */
+  async setAreaMembership(userId, areaId, isAreaLeader) {
+    const [row] = await this.#rows(
+      `insert into area_members (user_id, area_id, is_area_leader)
+        values ($1, $2, $3)
+        on conflict (user_id, area_id) do update
+          set is_area_leader = excluded.is_area_leader
+        returning user_id, area_id, is_area_leader`,
+      [userId, areaId, isAreaLeader],
+    );
+    return row;
+  }
+
+  async removeAreaMembership(userId, areaId) {
+    const [row] = await this.#rows(
+      `delete from area_members
+        where user_id = $1 and area_id = $2
+        returning user_id, area_id, is_area_leader`,
+      [userId, areaId],
+    );
+    return row ?? null;
+  }
+
+  /** A user's memberships, optionally narrowed to one area. A user can be in several. */
+  async getAreaMemberships(userId, areaId = null) {
+    const rows = await this.#rows(
+      `select area_id, is_area_leader
+         from area_members
+        where user_id = $1
+          and ($2::bigint is null or area_id = $2::bigint)`,
+      [userId, areaId],
+    );
+    return rows;
+  }
+
+  /**
+   * A user's areas with their names joined in. getAreaMemberships() is the id-only
+   * version that authorisation checks use.
+   */
+  async getUserAreas(userId) {
+    const rows = await this.#rows(
+      `select a.id, a.name, a.description, am.is_area_leader
+         from area_members am
+         join areas a on a.id = am.area_id
+        where am.user_id = $1
+        order by a.name`,
+      [userId],
+    );
+    return rows;
+  }
+
+  async isUserAreaLeader(userId, areaId) {
+    const [row] = await this.#rows(
+      `select is_area_leader
+         from area_members
+        where user_id = $1
+          and area_id = $2`,
+      [userId, areaId],
+    );
+    return row?.is_area_leader ?? false;
+  }
+
+  async isUserMemberOfArea(userId, areaId) {
+    const [row] = await this.#rows(
+      `select 1 as is_member
+         from area_members
+        where user_id = $1
+          and area_id = $2`,
+      [userId, areaId],
+    );
+    return row?.is_member === 1;
+  }
+
+  /** One area's members, leaders first then alphabetical. */
+  async getAreaMembers(areaId) {
+    const rows = await this.#rows(
+      `select u.id, u.email, u.full_name, r.name as role_name, am.is_area_leader
+         from area_members am
+         join users u on u.id = am.user_id
+         join roles r on r.id = u.role_id
+        where am.area_id = $1
+          and u.deleted_at is null
+        order by am.is_area_leader desc, u.full_name`,
+      [areaId],
+    );
+    return rows;
+  }
+
+  /** Members of a set of areas in one query, so drawing the org chart is not 1+N. */
+  async getAreaMembersForAreas(areaIds) {
+    const rows = await this.#rows(
+      `select am.area_id, u.id, u.email, u.full_name, r.name as role_name,
+              am.is_area_leader
+         from area_members am
+         join users u on u.id = am.user_id
+         join roles r on r.id = u.role_id
+        where am.area_id = any(coalesce($1::bigint[], '{}'::bigint[]))
+          and u.deleted_at is null
+        order by am.is_area_leader desc, u.full_name`,
+      [this.#idArray(areaIds)],
+    );
+    return rows;
+  }
+
+  // --- Area hierarchy (RF-USR-09, RF-USR-04) ---
+
+  /** Upserts the child's parent. `child_area_id` is the whole key: one parent per area. */
+  async setAreaParent(childAreaId, parentAreaId) {
+    const [row] = await this.#rows(
+      `insert into area_hierarchy (child_area_id, parent_area_id)
+        values ($1, $2)
+        on conflict (child_area_id) do update
+          set parent_area_id = excluded.parent_area_id
+        returning child_area_id, parent_area_id`,
+      [childAreaId, parentAreaId],
+    );
+    return row;
+  }
+
+  async clearAreaParent(childAreaId) {
+    const [row] = await this.#rows(
+      `delete from area_hierarchy
+        where child_area_id = $1
+        returning child_area_id, parent_area_id`,
+      [childAreaId],
+    );
+    return row ?? null;
+  }
+
+  async getAreaParent(childAreaId) {
+    const [row] = await this.#rows(
+      `select a.id, a.name, a.description
+         from area_hierarchy h
+         join areas a on a.id = h.parent_area_id
+        where h.child_area_id = $1`,
+      [childAreaId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Cycle guard for setAreaParent(): is `candidateId` below `ancestorId`? Carries a
+   * CYCLE clause so an already-corrupt table cannot hang the check for corruption.
+   */
+  async isAreaDescendantOf(candidateId, ancestorId) {
+    const [row] = await this.#rows(
+      `with recursive descendants as (
+           select child_area_id as id
+             from area_hierarchy
+            where parent_area_id = $2
+         union all
+           select h.child_area_id
+             from area_hierarchy h
+             join descendants d on d.id = h.parent_area_id
+       ) cycle id set is_cycle using path
+       select 1 as found
+         from descendants
+        where id = $1 and not is_cycle
+        limit 1`,
+      [candidateId, ancestorId],
+    );
+    return row?.found === 1;
+  }
+
+  /**
+   * One row per area with its parent and computed depth. A null `rootAreaId` walks the
+   * whole forest, an id walks that subtree only (RF-USR-04). The CYCLE clause drops
+   * repeated rows instead of recursing forever.
+   */
+  async getAreaTreeRows(rootAreaId = null) {
+    const rows = await this.#rows(
+      `with recursive tree as (
+           select a.id, a.name, a.description, h.parent_area_id, 0 as depth
+             from areas a
+             left join area_hierarchy h on h.child_area_id = a.id
+            where case
+                    when $1::bigint is null then h.child_area_id is null
+                    else a.id = $1::bigint
+                  end
+         union all
+           select a.id, a.name, a.description, h.parent_area_id, t.depth + 1
+             from tree t
+             join area_hierarchy h on h.parent_area_id = t.id
+             join areas a on a.id = h.child_area_id
+       ) cycle id set is_cycle using path
+       select id, name, description, parent_area_id, depth
+         from tree
+        where not is_cycle
+        order by depth, name`,
+      [rootAreaId],
+    );
+    return rows;
+  }
+
+  // --- Roles & Permissions ---
+
+  async createRole({ name, description }) {
+    const [row] = await this.#rows(
+      `insert into roles (name, description)
+        values ($1, $2)
+        returning id, name, description`,
+      [name, description],
+    );
+    return row;
+  }
+
+  async getRoles() {
+    const rows = await this.#rows(
+      "select id, name, description from roles order by name",
+    );
+    return rows;
+  }
+
+  async getRoleById(roleId) {
+    const [row] = await this.#rows(
+      "select id, name, description from roles where id = $1",
+      [roleId],
+    );
+    return row ?? null;
+  }
+
+  async getRoleByName(name) {
+    const [row] = await this.#rows(
+      "select id, name, description from roles where lower(name) = lower($1)",
+      [name],
+    );
+    return row ?? null;
+  }
+
+  async updateRole(roleId, { name, description }) {
+    const [row] = await this.#rows(
+      `update roles
+        set name = $2,
+            description = $3
+        where id = $1
+        returning id, name, description`,
+      [roleId, name, description],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Deletes a role. Its users are not reassigned — `users.role_id` is NOT NULL with no
+   * defensible default — so orchestration counts the holders and refuses first.
+   */
+  async deleteRole(roleId) {
+    const [row] = await this.#rows(
+      `delete from roles
+        where id = $1
+        returning id, name, description`,
+      [roleId],
+    );
+    return row ?? null;
+  }
+
+  /** Counts live users holding a role. */
+  async countUsersWithRole(roleId) {
+    const [row] = await this.#rows(
+      `select count(*)::int as count
+         from users
+        where role_id = $1
+          and deleted_at is null`,
+      [roleId],
+    );
+    return row?.count ?? 0;
+  }
+
+  async createPermission({ code, label, description }) {
+    const [row] = await this.#rows(
+      `insert into permissions (code, label, description)
+        values ($1, $2, $3)
+        returning id, code, label, description`,
+      [code, label, description],
+    );
+    return row;
+  }
+
+  async getPermissions() {
+    const rows = await this.#rows(
+      "select id, code, label, description from permissions order by code",
+    );
+    return rows;
+  }
+
+  async getPermissionById(permissionId) {
+    const [row] = await this.#rows(
+      "select id, code, label, description from permissions where id = $1",
+      [permissionId],
+    );
+    return row ?? null;
+  }
+
+  async getPermissionByCode(code) {
+    const [row] = await this.#rows(
+      "select id, code, label, description from permissions where code = $1",
+      [code],
+    );
+    return row ?? null;
+  }
+
+  async updatePermission(permissionId, { code, label, description }) {
+    const [row] = await this.#rows(
+      `update permissions
+        set code = $2,
+            label = $3,
+            description = $4
+        where id = $1
+        returning id, code, label, description`,
+      [permissionId, code, label, description],
+    );
+    return row ?? null;
+  }
+
+  /** Deletes a permission; `role_permissions` cascades, revoking it everywhere. */
+  async deletePermission(permissionId) {
+    const [row] = await this.#rows(
+      `delete from permissions
+        where id = $1
+        returning id, code, label, description`,
+      [permissionId],
+    );
+    return row ?? null;
+  }
+
+  // --- Role & Permission helpers ---
+
+  /** One role's grants as full rows; getRolePermissionCodes() is the codes-only version. */
+  async getRolePermissions(roleId) {
+    const rows = await this.#rows(
+      `select p.id, p.code, p.label, p.description
+         from role_permissions rp
+         join permissions p on p.id = rp.permission_id
+        where rp.role_id = $1
+        order by p.code`,
+      [roleId],
+    );
+    return rows;
+  }
+
+  /**
+   * Grants a permission to a role.
+   *
+   * @returns {Promise<object | null>} null when the grant already existed.
+   */
+  async grantPermissionToRole(roleId, permissionId) {
+    const [row] = await this.#rows(
+      `insert into role_permissions (role_id, permission_id)
+        values ($1, $2)
+        on conflict (role_id, permission_id) do nothing
+        returning role_id, permission_id`,
+      [roleId, permissionId],
+    );
+    return row ?? null;
+  }
+
+  async revokePermissionFromRole(roleId, permissionId) {
+    const [row] = await this.#rows(
+      `delete from role_permissions
+        where role_id = $1 and permission_id = $2
+        returning role_id, permission_id`,
+      [roleId, permissionId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Replaces a role's whole grant set in one CTE, so the role is never momentarily
+   * stripped. A grant that survives the edit is not removed and re-added.
+   *
+   * @returns {Promise<object[]>} The resolved permissions; fewer rows than ids means one
+   *   id names no permission, which orchestration refuses.
+   */
+  async setRolePermissions(roleId, permissionIds) {
+    const rows = await this.#rows(
+      // coalesce is repeated rather than hoisted: `<> all (select ...)` would compare
+      // bigint to bigint[].
+      `with revoked as (
+         delete from role_permissions
+          where role_id = $1
+            and permission_id <> all(coalesce($2::bigint[], '{}'::bigint[]))
+       ),
+       granted as (
+         insert into role_permissions (role_id, permission_id)
+         select $1, p.id
+           from permissions p
+          where p.id = any(coalesce($2::bigint[], '{}'::bigint[]))
+         on conflict (role_id, permission_id) do nothing
+       )
+       select p.id, p.code, p.label, p.description
+         from permissions p
+        where p.id = any(coalesce($2::bigint[], '{}'::bigint[]))
+        order by p.code`,
+      [roleId, this.#idArray(permissionIds)],
+    );
+    return rows;
+  }
+
+  async getUserRoleIdById(userId) {
+    const [row] = await this.#rows(
+      `select role_id from users where id = $1 and deleted_at is null`,
+      [userId],
+    );
+    return row?.role_id ?? null;
+  }
+
+  /**
+   * Every permission code a user holds, through their role.
+   *
+   * @returns {Promise<string[]>}
+   */
+  async getUserPermissionCodesById(userId) {
+    const rows = await this.#rows(
+      `select p.code
+         from users u
+         join role_permissions rp on rp.role_id = u.role_id
+         join permissions p on p.id = rp.permission_id
+        where u.id = $1 and u.deleted_at is null
+        order by p.code`,
+      [userId],
+    );
+    return rows.map((row) => row.code);
+  }
 }
 
 export default new Query();

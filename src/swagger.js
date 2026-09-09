@@ -49,6 +49,56 @@ const errorResponse = (description, example) => ({
   },
 });
 
+// The same trade as errorResponse(), for the three shapes the areas and roles routes repeat
+// two dozen times between them. Written as helpers rather than as more literal objects
+// because the difference between any two of those operations is a sentence, and a document
+// where the boilerplate outweighs the content stops being read.
+const pathId = (name, description) => ({
+  name,
+  in: 'path',
+  required: true,
+  schema: { type: 'integer', minimum: 1 },
+  description,
+});
+
+const jsonBody = (schema) => ({
+  required: true,
+  content: {
+    'application/json': { schema: { $ref: `#/components/schemas/${schema}` } },
+  },
+});
+
+const jsonResponse = (description, schema) => ({
+  description,
+  content: {
+    'application/json': { schema: { $ref: `#/components/schemas/${schema}` } },
+  },
+});
+
+// Most responses here are a single named key wrapping the record -- `{ area: {...} }`,
+// `{ roles: [...] }`. The envelope is deliberate: it leaves room to add a sibling field
+// without changing the type of the response body, which is what happened to
+// POST /api/users and its `inviteToken`.
+const wrapped = (description, key, schema, isArray = false) => ({
+  description,
+  content: {
+    'application/json': {
+      schema: {
+        type: 'object',
+        properties: {
+          [key]: isArray
+            ? { type: 'array', items: { $ref: `#/components/schemas/${schema}` } }
+            : { $ref: `#/components/schemas/${schema}` },
+        },
+        required: [key],
+      },
+    },
+  },
+});
+
+const UNAUTHORIZED = { $ref: '#/components/responses/Unauthorized' };
+const FORBIDDEN = { $ref: '#/components/responses/Forbidden' };
+
 // The identity a session carries. Deliberately the same five fields the JWT holds and
 // verifyToken() returns, because that is what `req.user` means everywhere -- see
 // issueToken() in access/orchestration/auth.js. Permissions are not among them: the
@@ -67,8 +117,18 @@ const sessionUserSchema = {
         'identifier the frontend and requireRole() compare against.',
       example: 'worker',
     },
+    areaId: {
+      type: ['integer', 'null'],
+      description:
+        'users.primary_area_id, so a screen knows which area the signed-in user belongs ' +
+        'to without spending a request on it. Like `role`, it is a snapshot: nothing ' +
+        're-reads the database on a verified token, so it can be up to seven days behind. ' +
+        'Good enough to render with, not to authorise or to record history on -- ' +
+        '`logs.area_id` is resolved from the database at write time for that reason.',
+      example: 2,
+    },
   },
-  required: ['id', 'email', 'fullName', 'roleId', 'role'],
+  required: ['id', 'email', 'fullName', 'roleId', 'role', 'areaId'],
 };
 
 // Builds the document. A function rather than a module-level constant so the server URL is
@@ -84,10 +144,10 @@ export function buildOpenApiDocument() {
         'API interna de la Dirección de Imagen y Comunicación de la UAQ.',
         '',
         'Only the USR half of the system is reachable over HTTP today: authentication,',
-        'sessions and staff accounts. SOL, PRY, FLW, TSK, EST, CAL, ARC, FIN, INV, IMP,',
-        'RPT and EXT exist in the requirements and, for some, in the schema, but have no',
-        'endpoints yet -- their absence here is the state of the work, not an omission',
-        'from this document.',
+        'sessions, staff accounts, areas and roles. SOL, PRY, FLW, TSK, EST, CAL, ARC,',
+        'FIN, INV, IMP, RPT and EXT exist in the requirements and, for some, in the',
+        'schema, but have no endpoints yet -- their absence here is the state of the work,',
+        'not an omission from this document.',
         '',
         '**Authentication.** `POST /api/auth/login` returns a bearer token good for seven',
         'days. Paste it into *Authorize* to exercise the guarded routes below.',
@@ -117,6 +177,22 @@ export function buildOpenApiDocument() {
       },
       { name: 'auth', description: 'Sessions, invitations and the identity behind a token.' },
       { name: 'users', description: 'Staff accounts. Coordination only (RF-USR-02).' },
+      {
+        name: 'areas',
+        description:
+          'Areas, who is in them, and how they hang off each other. A coordination is not ' +
+          'a different record from an area -- it is an area with areas under it ' +
+          '(RF-USR-09). Reads are open to any signed-in user (RF-USR-03); writes are ' +
+          "coordination's.",
+      },
+      {
+        name: 'roles',
+        description:
+          'The role catalogue and the permissions each role grants. `admin` and `finance` ' +
+          'arrive with the two grants that are definitions rather than configuration; ' +
+          '`worker` and `area_lead` arrive with none, because theirs is a policy decision ' +
+          'coordination makes here (RF-USR-05).',
+      },
     ],
     components: {
       securitySchemes: {
@@ -272,6 +348,238 @@ export function buildOpenApiDocument() {
           type: 'object',
           properties: { inviteToken: { type: 'string' } },
           required: ['inviteToken'],
+        },
+        Area: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 3 },
+            name: { type: 'string', example: 'Diseño Gráfico' },
+            description: { type: ['string', 'null'], example: null },
+          },
+          required: ['id', 'name', 'description'],
+        },
+        CreateAreaRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', maxLength: 200, example: 'Coordinación de Imagen' },
+            description: { type: ['string', 'null'] },
+            leaderUserId: {
+              type: ['integer', 'null'],
+              description:
+                'Optional. Written in the same statement as the area, so a failure cannot ' +
+                'leave an area nobody is responsible for.',
+            },
+          },
+          required: ['name'],
+        },
+        UpdateAreaRequest: {
+          type: 'object',
+          description:
+            'Partial: only the keys present are changed, merged against the current row.',
+          properties: {
+            name: { type: 'string', maxLength: 200 },
+            description: { type: ['string', 'null'] },
+          },
+        },
+        AreaMember: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 12 },
+            email: { type: 'string', format: 'email', example: 'ana.ruiz@uaq.mx' },
+            fullName: { type: 'string', example: 'Ana Ruiz' },
+            role: {
+              type: 'string',
+              description: 'roles.name, not an id -- see SessionUser.',
+              example: 'area_lead',
+            },
+            isAreaLeader: {
+              type: 'boolean',
+              description:
+                'Leadership lives on area_members, not on areas: somebody can lead one ' +
+                'area and be an ordinary member of another.',
+            },
+          },
+          required: ['id', 'email', 'fullName', 'role', 'isAreaLeader'],
+        },
+        OrgChartNode: {
+          type: 'object',
+          description:
+            'One area and everything under it. Self-referential through `children`, so ' +
+            "react-organizational-chart's <Tree>/<TreeNode> recurse over it directly.",
+          properties: {
+            id: { type: 'integer', example: 3 },
+            name: { type: 'string', example: 'Diseño Gráfico' },
+            description: { type: ['string', 'null'] },
+            parentAreaId: {
+              type: ['integer', 'null'],
+              description:
+                'Null for a root. On the root of a *subtree* request this still carries the ' +
+                'parent the area has in the table -- the walk started below it, it is not ' +
+                'the top of the organisation.',
+            },
+            depth: {
+              type: 'integer',
+              description:
+                'Computed by the recursive walk, not stored: depth is a consequence of ' +
+                'where the area currently hangs, and a stored copy would go stale on every ' +
+                're-parent. Relative to the root of this response.',
+              example: 1,
+            },
+            leaders: {
+              type: 'array',
+              description:
+                'A projection of `members`, not a separate set -- whoever heads the area, ' +
+                'for the node label.',
+              items: { $ref: '#/components/schemas/AreaMember' },
+            },
+            members: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/AreaMember' },
+            },
+            memberCount: { type: 'integer', example: 7 },
+            children: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/OrgChartNode' },
+            },
+          },
+          required: [
+            'id',
+            'name',
+            'description',
+            'parentAreaId',
+            'depth',
+            'leaders',
+            'members',
+            'memberCount',
+            'children',
+          ],
+        },
+        OrgChart: {
+          type: 'object',
+          properties: {
+            roots: {
+              type: 'array',
+              description:
+                'Every area with no parent. A forest and not a single tree: the ' +
+                'organisation has several independent heads, and inventing a synthetic root ' +
+                'to join them would put a box in the chart that answers to nobody.',
+              items: { $ref: '#/components/schemas/OrgChartNode' },
+            },
+          },
+          required: ['roots'],
+        },
+        AreaParent: {
+          type: 'object',
+          properties: {
+            areaId: { type: 'integer' },
+            parentAreaId: { type: ['integer', 'null'] },
+            changed: {
+              type: 'boolean',
+              description:
+                'DELETE only. False when the area was already a root -- still a 200, ' +
+                'because the caller asked for it to have no parent and it has none.',
+            },
+          },
+          required: ['areaId', 'parentAreaId'],
+        },
+        AreaMembership: {
+          type: 'object',
+          properties: {
+            userId: { type: 'integer' },
+            areaId: { type: 'integer' },
+            isAreaLeader: { type: 'boolean' },
+          },
+          required: ['userId', 'areaId', 'isAreaLeader'],
+        },
+        Role: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 3 },
+            name: {
+              type: 'string',
+              maxLength: 50,
+              description:
+                'The stable identifier requireRole() compares. Renaming a role locks out ' +
+                'everyone holding a live token until they log in again, because nothing ' +
+                're-reads the database on a verified one.',
+              example: 'area_lead',
+            },
+            description: { type: ['string', 'null'] },
+          },
+          required: ['id', 'name', 'description'],
+        },
+        RoleRequest: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', maxLength: 50 },
+            description: { type: ['string', 'null'] },
+          },
+          required: ['name'],
+        },
+        Permission: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 11 },
+            code: {
+              type: 'string',
+              maxLength: 100,
+              pattern: '^[a-z0-9]+(\\.[a-z0-9]+)+$',
+              description:
+                'Dotted resource.action. `project.read` and `project.write` are two rows ' +
+                'and not two levels of one, which is what makes RF-USR-05 expressible.',
+              example: 'area.manage',
+            },
+            label: { type: 'string', maxLength: 200, example: 'Administrar áreas' },
+            description: { type: ['string', 'null'] },
+          },
+          required: ['id', 'code', 'label', 'description'],
+        },
+        PermissionRequest: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', maxLength: 100, example: 'invoice.write' },
+            label: { type: 'string', maxLength: 200, example: 'Editar facturas' },
+            description: { type: ['string', 'null'] },
+          },
+          required: ['code', 'label'],
+        },
+        SetRolePermissionsRequest: {
+          type: 'object',
+          properties: {
+            permissions: {
+              type: 'array',
+              description:
+                'Permission **codes**, not ids: ids come from a sequence and differ per ' +
+                'database, so the same request would grant different things on staging and ' +
+                'in production. An empty array revokes everything.',
+              items: { type: 'string' },
+              example: ['project.read', 'project.write', 'area.manage'],
+            },
+          },
+          required: ['permissions'],
+        },
+        RolePermissionGrant: {
+          type: 'object',
+          properties: {
+            roleId: { type: 'integer' },
+            permissionId: { type: 'integer' },
+            granted: {
+              type: 'boolean',
+              description:
+                'False when the role already held it. Still a success -- the caller asked ' +
+                'for the grant to exist and it does; the status code is 200 rather than 201.',
+            },
+          },
+          required: ['roleId', 'permissionId', 'granted'],
+        },
+        RolePermissionRevoke: {
+          type: 'object',
+          properties: {
+            roleId: { type: 'integer' },
+            permissionId: { type: 'integer' },
+            revoked: { type: 'boolean' },
+          },
+          required: ['roleId', 'permissionId', 'revoked'],
         },
       },
       responses: {
@@ -522,6 +830,518 @@ export function buildOpenApiDocument() {
             409: errorResponse(
               'The account already has a password, so there is nothing to invite it to.',
               'This account is already active.',
+            ),
+          },
+        },
+      },
+
+      // --- areas ---
+      //
+      // Reads need only a session; writes need 'admin'. Not `area.manage`, even though
+      // RF-USR-09 put that code in the catalogue: role_permissions is empty until somebody
+      // uses PUT /api/roles/{id}/permissions, and a permission gate would refuse everyone
+      // including the admin who has to fill it.
+
+      '/api/areas': {
+        get: {
+          tags: ['areas'],
+          summary: 'List every area',
+          description:
+            'Flat and alphabetical. The nesting is a separate read -- see ' +
+            '`/api/areas/orgchart` -- because a picker wants the list and a chart wants the ' +
+            'tree, and neither should pay for the other.',
+          responses: {
+            200: wrapped('Every area, by name.', 'areas', 'Area', true),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['areas'],
+          summary: 'Create an area',
+          description:
+            'Admin only. RF-USR-09: new areas and coordinations without a deploy. Passing ' +
+            '`leaderUserId` writes the area and its first leader in one statement.',
+          requestBody: jsonBody('CreateAreaRequest'),
+          responses: {
+            201: wrapped('The created area.', 'area', 'Area'),
+            400: errorResponse(
+              'The name is missing or too long, or leaderUserId names no user.',
+              'Area name is required (200 characters or fewer).',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse(
+              'The name is taken. `uq_areas_name` is a plain unique index, not a partial ' +
+                'one: areas have no deleted_at, because a referenced row cannot be deleted.',
+              'An area with that name already exists.',
+            ),
+          },
+        },
+      },
+      '/api/areas/orgchart': {
+        get: {
+          tags: ['areas'],
+          summary: 'The whole organisation as a forest of nested areas',
+          description:
+            'Two queries, whatever the size: the tree, then every member of every area in ' +
+            'it. Each node carries its own `children`, so the frontend recurses over the ' +
+            'response directly.\n\n' +
+            'Any signed-in user may read it. RF-USR-03 gives every member of an area ' +
+            "unrestricted sight of their colleagues' work, and who is in which area is the " +
+            'most basic form of that.',
+          responses: {
+            200: jsonResponse('Every root area, with its subtree.', 'OrgChart'),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/areas/{id}': {
+        get: {
+          tags: ['areas'],
+          summary: 'One area',
+          parameters: [pathId('id', 'areas.id')],
+          responses: {
+            200: wrapped('The area.', 'area', 'Area'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such area.', 'Area not found.'),
+          },
+        },
+        patch: {
+          tags: ['areas'],
+          summary: 'Rename an area or change its description',
+          description:
+            'Admin only. Partial: keys absent from the body are left as they are.',
+          parameters: [pathId('id', 'areas.id')],
+          requestBody: jsonBody('UpdateAreaRequest'),
+          responses: {
+            200: wrapped('The updated area.', 'area', 'Area'),
+            400: errorResponse('The id or the name is malformed.', 'Invalid area id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such area.', 'Area not found.'),
+            409: errorResponse(
+              'Another area already has that name.',
+              'An area with that name already exists.',
+            ),
+          },
+        },
+        delete: {
+          tags: ['areas'],
+          summary: 'Delete an area',
+          description:
+            'Admin only, and a hard delete -- `areas` has no deleted_at. Child areas are ' +
+            'promoted to roots of the chart by the cascade on `area_hierarchy`; people are ' +
+            'not, so an area with members or with users whose primary area it is cannot be ' +
+            'deleted at all.',
+          parameters: [pathId('id', 'areas.id')],
+          responses: {
+            200: wrapped('The deleted area.', 'area', 'Area'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such area.', 'Area not found.'),
+            409: errorResponse(
+              'Somebody is still assigned to it. The foreign key is the authority here: a ' +
+                'count taken first would race a concurrent assignment.',
+              'That area still has users or records assigned to it; reassign them first.',
+            ),
+          },
+        },
+      },
+      '/api/areas/{id}/orgchart': {
+        get: {
+          tags: ['areas'],
+          summary: 'The subtree rooted at one area',
+          description:
+            'The read RF-USR-04 is written in: an area lead or coordination consults the ' +
+            'work of *todos los usuarios a su cargo*, and who that is is exactly this ' +
+            'subtree. The area comes back as the single entry in `roots`, so the same ' +
+            'component renders it either way.',
+          parameters: [pathId('id', 'areas.id -- the root of the subtree')],
+          responses: {
+            200: jsonResponse('The area and everything under it.', 'OrgChart'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such area.', 'Area not found.'),
+          },
+        },
+      },
+      '/api/areas/{id}/members': {
+        get: {
+          tags: ['areas'],
+          summary: "One area's roster",
+          description: 'Leaders first, then alphabetical. Soft-deleted users are excluded.',
+          parameters: [pathId('id', 'areas.id')],
+          responses: {
+            200: wrapped('The members of the area.', 'members', 'AreaMember', true),
+            400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such area.', 'Area not found.'),
+          },
+        },
+      },
+      '/api/areas/{id}/parent': {
+        put: {
+          tags: ['areas'],
+          summary: 'Hang this area under another one',
+          description:
+            'Admin only. PUT and not POST: an area has at most one parent, so this replaces ' +
+            'a single value rather than adding one more relation -- the child is the whole ' +
+            'primary key of `area_hierarchy`.\n\n' +
+            'A move that would close a cycle is refused with 409. The table constrains one ' +
+            'hop; A under B under A is checked here, and this endpoint is the only write ' +
+            'path that does it.',
+          parameters: [pathId('id', 'areas.id -- the area being moved')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { parentAreaId: { type: 'integer', minimum: 1 } },
+                  required: ['parentAreaId'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: jsonResponse('The new parent link.', 'AreaParent'),
+            400: errorResponse(
+              'A malformed id, or an area named as its own parent.',
+              'An area cannot be its own parent.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Either area is missing.', 'Parent area not found.'),
+            409: errorResponse(
+              'The proposed parent is already below this area, so the move would close a ' +
+                'cycle and the chart would have no root.',
+              'That area is already below this one; the move would close a cycle.',
+            ),
+          },
+        },
+        delete: {
+          tags: ['areas'],
+          summary: 'Promote an area back to a root of the chart',
+          description:
+            'Admin only. Not an error when the area was already a root: `changed` says ' +
+            'which of the two happened.',
+          parameters: [pathId('id', 'areas.id')],
+          responses: {
+            200: jsonResponse('The area, now parentless.', 'AreaParent'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such area.', 'Area not found.'),
+          },
+        },
+      },
+      '/api/areas/{id}/members/{userId}': {
+        put: {
+          tags: ['areas'],
+          summary: 'Add a user to an area, or change whether they lead it',
+          description:
+            'Admin only, and one route for both because they are one upsert -- the client ' +
+            'should not have to know which of the two it is doing. A user can be in several ' +
+            'areas and lead only some of them, which is why leadership lives here rather ' +
+            'than on `areas`.',
+          parameters: [pathId('id', 'areas.id'), pathId('userId', 'users.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { isAreaLeader: { type: 'boolean', default: false } },
+                },
+              },
+            },
+          },
+          responses: {
+            200: jsonResponse('The membership.', 'AreaMembership'),
+            400: errorResponse(
+              'A malformed id, or one that names no area or user.',
+              'Invalid user id.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        delete: {
+          tags: ['areas'],
+          summary: 'Remove a user from an area',
+          description:
+            'Admin only. This removes the membership, not the account -- and not ' +
+            '`users.primary_area_id`, which is a separate column with a separate meaning.',
+          parameters: [pathId('id', 'areas.id'), pathId('userId', 'users.id')],
+          responses: {
+            200: jsonResponse('The membership that was removed.', 'AreaMembership'),
+            400: errorResponse('A malformed id.', 'Invalid user id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse(
+              'That user was not a member of that area.',
+              'That user is not a member of this area.',
+            ),
+          },
+        },
+      },
+
+      // --- roles ---
+      //
+      // The catalogues are readable by anyone signed in; editing them is editing the
+      // authorisation model, so it is admin-only. Deliberately NOT requirePermission():
+      // the grants these endpoints write are what requirePermission() reads, so gating them
+      // on one would make an empty role_permissions unrecoverable over HTTP.
+
+      '/api/roles': {
+        get: {
+          tags: ['roles'],
+          summary: 'List every role',
+          description:
+            'Readable by any signed-in user: a form that assigns somebody a role has to ' +
+            'list the roles, and hiding the list would mean the frontend hard-coding the ' +
+            'four names this module exists to make editable.',
+          responses: {
+            200: wrapped('Every role, by name.', 'roles', 'Role', true),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['roles'],
+          summary: 'Create a role',
+          description:
+            'Admin only. RF-USR-02 names three levels and the migration seeded four rows; ' +
+            'this is how the fifth arrives without a deploy.',
+          requestBody: jsonBody('RoleRequest'),
+          responses: {
+            201: wrapped('The created role.', 'role', 'Role'),
+            400: errorResponse(
+              'The name is missing or longer than 50 characters.',
+              'Role name is required (50 characters or fewer).',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse(
+              'The name is taken.',
+              'A role with that name already exists.',
+            ),
+          },
+        },
+      },
+      '/api/roles/permissions': {
+        get: {
+          tags: ['roles'],
+          summary: 'The permission catalogue',
+          description:
+            'Every code that exists, whoever holds it. The seeded rows are the ' +
+            'requirements made data -- `availability.read` and `absence.reason.read` are two ' +
+            'of them precisely so RF-USR-10 cannot be collapsed into one.',
+          responses: {
+            200: wrapped('Every permission, by code.', 'permissions', 'Permission', true),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['roles'],
+          summary: 'Add a permission to the catalogue',
+          description:
+            'Admin only. The code must be dotted lowercase: requirePermission() compares ' +
+            'these strings literally, so `Project Read` and `project.read` are two ' +
+            'permissions that look like one to whoever grants them.',
+          requestBody: jsonBody('PermissionRequest'),
+          responses: {
+            201: wrapped('The created permission.', 'permission', 'Permission'),
+            400: errorResponse(
+              'The code or label is missing, too long, or not dotted lowercase.',
+              'Permission code must be dotted lowercase, e.g. project.write.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse(
+              'The code is taken.',
+              'A permission with that code already exists.',
+            ),
+          },
+        },
+      },
+      '/api/roles/permissions/{permissionId}': {
+        patch: {
+          tags: ['roles'],
+          summary: 'Edit a permission in the catalogue',
+          description:
+            'Admin only. Changing a `code` changes what every requirePermission() call in ' +
+            'the source is comparing against, and nothing in the database knows about those ' +
+            'call sites -- prefer adding a row to renaming one.',
+          parameters: [pathId('permissionId', 'permissions.id')],
+          requestBody: jsonBody('PermissionRequest'),
+          responses: {
+            200: wrapped('The updated permission.', 'permission', 'Permission'),
+            400: errorResponse('A malformed id, code or label.', 'Invalid permission id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such permission.', 'Permission not found.'),
+            409: errorResponse(
+              'Another permission already has that code.',
+              'A permission with that code already exists.',
+            ),
+          },
+        },
+        delete: {
+          tags: ['roles'],
+          summary: 'Remove a permission from the catalogue',
+          description:
+            'Admin only. Every grant of it is revoked by the cascade on `role_permissions`. ' +
+            'Survivable in a way deleting a role is not: requirePermission() fails closed ' +
+            'on a code nobody holds, so the worst outcome is a route that refuses everyone, ' +
+            'which is visible immediately.',
+          parameters: [pathId('permissionId', 'permissions.id')],
+          responses: {
+            200: wrapped('The deleted permission.', 'permission', 'Permission'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid permission id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such permission.', 'Permission not found.'),
+          },
+        },
+      },
+      '/api/roles/{id}': {
+        get: {
+          tags: ['roles'],
+          summary: 'One role',
+          parameters: [pathId('id', 'roles.id')],
+          responses: {
+            200: wrapped('The role.', 'role', 'Role'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid role id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such role.', 'Role not found.'),
+          },
+        },
+        patch: {
+          tags: ['roles'],
+          summary: 'Rename a role or change its description',
+          description:
+            'Admin only, and renaming is heavier than it looks: requireRole() compares ' +
+            '`roles.name`, and every token already issued carries the OLD name for up to ' +
+            'seven days. A rename locks those holders out until they log in again.',
+          parameters: [pathId('id', 'roles.id')],
+          requestBody: jsonBody('RoleRequest'),
+          responses: {
+            200: wrapped('The updated role.', 'role', 'Role'),
+            400: errorResponse('A malformed id or name.', 'Invalid role id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such role.', 'Role not found.'),
+            409: errorResponse(
+              'Another role already has that name.',
+              'A role with that name already exists.',
+            ),
+          },
+        },
+        delete: {
+          tags: ['roles'],
+          summary: 'Delete a role',
+          description:
+            'Admin only, and refused while anyone still holds it. Its users are not ' +
+            'reassigned automatically and cannot be: `users.role_id` is NOT NULL and there ' +
+            'is no defensible default, so choosing one would silently grant or revoke ' +
+            "access on somebody else's behalf.",
+          parameters: [pathId('id', 'roles.id')],
+          responses: {
+            200: wrapped('The deleted role.', 'role', 'Role'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid role id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such role.', 'Role not found.'),
+            409: errorResponse(
+              'Live users still hold it. The count is in the message, because a bare 409 ' +
+                'leaves the admin guessing how much reassigning there is to do.',
+              'That role is still held by 3 users; reassign them first.',
+            ),
+          },
+        },
+      },
+      '/api/roles/{id}/permissions': {
+        get: {
+          tags: ['roles'],
+          summary: 'What one role may do',
+          description:
+            'Readable by any signed-in user on purpose. RF-USR-05 makes read and write ' +
+            'independent permissions, and a user who cannot see why they were refused ' +
+            'something has no way to ask for the right thing.',
+          parameters: [pathId('id', 'roles.id')],
+          responses: {
+            200: wrapped(
+              "The role's grants, by code.",
+              'permissions',
+              'Permission',
+              true,
+            ),
+            400: errorResponse('The id is not a positive integer.', 'Invalid role id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such role.', 'Role not found.'),
+          },
+        },
+        put: {
+          tags: ['roles'],
+          summary: "Replace a role's whole grant set",
+          description:
+            'Admin only. **This is where a role stops being a name and starts meaning ' +
+            'something.** `worker` and `area_lead` are seeded with no grants at all, ' +
+            "because which of them may do what is coordination's decision and not a " +
+            "developer's (RF-USR-05). `admin` arrives with everything, so the model is " +
+            'administrable from the first login rather than deadlocked.\n\n' +
+            'One statement, not a delete followed by an insert: between those two the role ' +
+            'holds nothing, and a request landing in that window is refused for a reason ' +
+            'that has nothing to do with it.',
+          parameters: [pathId('id', 'roles.id')],
+          requestBody: jsonBody('SetRolePermissionsRequest'),
+          responses: {
+            200: wrapped('The grants the role now holds.', 'permissions', 'Permission', true),
+            400: errorResponse(
+              'Not an array, or one entry names no permission. The message says which code.',
+              'Unknown permission code: project.delete.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such role.', 'Role not found.'),
+          },
+        },
+      },
+      '/api/roles/{id}/permissions/{permissionId}': {
+        post: {
+          tags: ['roles'],
+          summary: 'Grant one permission to a role',
+          description:
+            'Admin only. 201 when the grant is new, 200 when the role already held it -- ' +
+            'both successes, distinguished for a UI that reports what it actually changed.',
+          parameters: [pathId('id', 'roles.id'), pathId('permissionId', 'permissions.id')],
+          responses: {
+            200: jsonResponse('The role already held it.', 'RolePermissionGrant'),
+            201: jsonResponse('The grant was created.', 'RolePermissionGrant'),
+            400: errorResponse('A malformed id.', 'Invalid permission id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such role or permission.', 'Permission not found.'),
+          },
+        },
+        delete: {
+          tags: ['roles'],
+          summary: 'Revoke one permission from a role',
+          description:
+            'Admin only. Takes effect on the next request, not on the next login: ' +
+            'requirePermission() reads `role_permissions` per request precisely so a ' +
+            'week-long token cannot keep granting something coordination has revoked.',
+          parameters: [pathId('id', 'roles.id'), pathId('permissionId', 'permissions.id')],
+          responses: {
+            200: jsonResponse('The grant that was removed.', 'RolePermissionRevoke'),
+            400: errorResponse('A malformed id.', 'Invalid permission id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse(
+              'The role did not hold that permission.',
+              'That role does not hold that permission.',
             ),
           },
         },

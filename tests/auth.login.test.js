@@ -135,6 +135,7 @@ describe('POST /api/auth/login', () => {
         fullName: 'Ana Gómez',
         roleId: created.role_id,
         role: 'area_lead',
+        areaId: null,
       });
     });
 

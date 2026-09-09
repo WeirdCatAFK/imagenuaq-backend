@@ -151,11 +151,9 @@ Table "logs" {
   "target_id" int8 [note: 'Primary key of the affected row, within target_table']
   "before_data" jsonb [note: 'Row before the change. NULL = the row was created']
   "after_data" jsonb [note: 'Row after the change. NULL = the row was deleted']
-  "area_id" int8 [note: 'Area the actor belonged to when the action happened, from users.primary_area_id. Recorded, not derived: joining area_members at read time would answer where they are now. NULL = not recorded.']
 
   Indexes {
     action_id [type: btree, name: "idx_logs_action_id"]
-    (area_id, created_at) [type: btree, name: "idx_logs_area_id"]
     created_at [type: btree, name: "idx_logs_created_at"]
     (target_table, target_id) [type: btree, name: "idx_logs_target"]
   }
@@ -428,8 +426,6 @@ Ref "leave_balances_user_id_fkey":"users"."id" < "leave_balances"."user_id"
 Ref "fk_logs_action_id_actions_id":"actions"."id" < "logs"."action_id"
 
 Ref "fk_logs_user_id_users_id":"users"."id" < "logs"."user_id"
-
-Ref "logs_area_id_fkey":"areas"."id" < "logs"."area_id"
 
 Ref "role_permissions_permission_id_fkey":"permissions"."id" < "role_permissions"."permission_id" [delete: cascade]
 

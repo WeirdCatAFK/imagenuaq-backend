@@ -48,6 +48,58 @@ export async function reset() {
   await sql('truncate users, area_members restart identity cascade');
 }
 
+// The prefix every area and role a test creates is named with, and the one every test
+// permission code starts with. They exist so the cleanup below can be a predicate rather
+// than a guess: `areas`, `roles` and `permissions` are SEEDED by the catalog-bootstrap and
+// role-permissions migrations, so truncating them would destroy the rows every other file
+// in the suite depends on, and "delete everything above the highest seeded id" breaks the
+// moment a fixture is deleted and re-created.
+export const TEST_PREFIX = 'zz-test:';
+export const TEST_PERMISSION_PREFIX = 'zz.test.';
+
+// Wipe what a case created, keeping the accounts the file logs in with.
+//
+// The alternative -- reset() plus createActive() in beforeEach -- re-hashes a password at
+// bcrypt cost 12 and performs a real login for every account, every case. That is about
+// four seconds per test, and across the areas and roles files it was most of the suite's
+// runtime. The session token stays valid because nothing about the account changes.
+//
+// Order matters and is the foreign keys read backwards: area_hierarchy and area_members
+// reference areas and users, users reference areas, so the referencing rows go first.
+// area_hierarchy and area_members are emptied wholesale because nothing seeds them -- every
+// row in either belongs to a test.
+//
+// role_permissions is NOT: section 8 of catalog-bootstrap seeds every permission onto
+// `admin` and finance.read onto `finance`, and wiping those would leave the rest of the run
+// testing an authorisation model the migrations never produce. Only grants on test-created
+// roles are removed; a test permission's grants go with it through the cascade.
+export async function resetCases(keepEmails = []) {
+  await sql('delete from area_hierarchy');
+  await sql('delete from area_members');
+  // Before the users delete, not after: logs.user_id references users with NO ACTION, so
+  // once the audit trail started writing (RF-USR-07) every case leaves rows here and the
+  // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
+  // follows inbound foreign keys and takes logs with it.
+  await sql('delete from logs');
+  await sql(
+    `delete from role_permissions
+      where role_id in (select id from roles where name like $1)`,
+    [`${TEST_PREFIX}%`],
+  );
+  await sql('delete from users where email <> all($1::text[])', [
+    keepEmails.length ? keepEmails : [''],
+  ]);
+  await sql('delete from areas where name like $1', [`${TEST_PREFIX}%`]);
+  await sql('delete from permissions where code like $1', [`${TEST_PERMISSION_PREFIX}%`]);
+  await sql('delete from roles where name like $1', [`${TEST_PREFIX}%`]);
+}
+
+// An area created straight through query.js, for the cases that need one to exist without
+// exercising POST /api/areas to get it.
+export async function createArea(name, description = null) {
+  return query.createArea({ name: `${TEST_PREFIX}${name}`, description });
+}
+
 // Catalog ids by NAME, never hardcoded. The bootstrap migration ran on a sequence that had
 // already advanced on this machine, so `admin` is id 9 here and would be something else on
 // a database built from scratch. Anything asserting on a literal id is asserting on an
@@ -96,6 +148,31 @@ export async function softDelete(userId) {
 export async function findUser(userId) {
   const [row] = await sql('select * from users where id = $1', [userId]);
   return row ?? null;
+}
+
+// The audit trail a case produced, oldest first. Raw rows joined to the action code, because
+// the shape orchestration/audit.js returns is the API's and a test asserting on it would not
+// notice a row written with the wrong action id.
+export async function logsFor(targetTable, targetId) {
+  return sql(
+    `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
+            l.before_data, l.after_data
+       from logs l join actions a on a.id = l.action_id
+      where l.target_table = $1 and l.target_id = $2
+      order by l.id`,
+    [targetTable, targetId],
+  );
+}
+
+// Every log row, for the cases that assert on the objectless actions -- user_login and
+// user_login_failed have no target to look them up by.
+export async function allLogs() {
+  return sql(
+    `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
+            l.before_data, l.after_data
+       from logs l join actions a on a.id = l.action_id
+      order by l.id`,
+  );
 }
 
 export async function areaMemberships(userId) {

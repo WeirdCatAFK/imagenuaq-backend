@@ -62,6 +62,10 @@ export const session = (user) =>
       fullName: user.full_name,
       roleId: user.role_id,
       role: user.role_name,
+      // Same claim issueToken() signs. Omitting it would make these tokens the only ones in
+      // the system with no area, and the difference would show up as a puzzling null in
+      // whichever test reached for it first.
+      areaId: user.primary_area_id ?? null,
     },
   });
 
