@@ -117,8 +117,18 @@ const sessionUserSchema = {
         'identifier the frontend and requireRole() compare against.',
       example: 'worker',
     },
+    areaId: {
+      type: ['integer', 'null'],
+      description:
+        'users.primary_area_id, so a screen knows which area the signed-in user belongs ' +
+        'to without spending a request on it. Like `role`, it is a snapshot: nothing ' +
+        're-reads the database on a verified token, so it can be up to seven days behind. ' +
+        'Good enough to render with, not to authorise or to record history on -- ' +
+        '`logs.area_id` is resolved from the database at write time for that reason.',
+      example: 2,
+    },
   },
-  required: ['id', 'email', 'fullName', 'roleId', 'role'],
+  required: ['id', 'email', 'fullName', 'roleId', 'role', 'areaId'],
 };
 
 // Builds the document. A function rather than a module-level constant so the server URL is

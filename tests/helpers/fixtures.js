@@ -76,6 +76,11 @@ export const TEST_PERMISSION_PREFIX = 'zz.test.';
 export async function resetCases(keepEmails = []) {
   await sql('delete from area_hierarchy');
   await sql('delete from area_members');
+  // Before the users delete, not after: logs.user_id references users with NO ACTION, so
+  // once the audit trail started writing (RF-USR-07) every case leaves rows here and the
+  // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
+  // follows inbound foreign keys and takes logs with it.
+  await sql('delete from logs');
   await sql(
     `delete from role_permissions
       where role_id in (select id from roles where name like $1)`,
@@ -143,6 +148,31 @@ export async function softDelete(userId) {
 export async function findUser(userId) {
   const [row] = await sql('select * from users where id = $1', [userId]);
   return row ?? null;
+}
+
+// The audit trail a case produced, oldest first. Raw rows joined to the action code, because
+// the shape orchestration/audit.js returns is the API's and a test asserting on it would not
+// notice a row written with the wrong action id.
+export async function logsFor(targetTable, targetId) {
+  return sql(
+    `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
+            l.before_data, l.after_data
+       from logs l join actions a on a.id = l.action_id
+      where l.target_table = $1 and l.target_id = $2
+      order by l.id`,
+    [targetTable, targetId],
+  );
+}
+
+// Every log row, for the cases that assert on the objectless actions -- user_login and
+// user_login_failed have no target to look them up by.
+export async function allLogs() {
+  return sql(
+    `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
+            l.before_data, l.after_data
+       from logs l join actions a on a.id = l.action_id
+      order by l.id`,
+  );
 }
 
 export async function areaMemberships(userId) {

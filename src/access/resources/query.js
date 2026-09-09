@@ -54,6 +54,7 @@ class Query {
               u.full_name,
               u.password_hash,
               u.role_id,
+              u.primary_area_id,
               r.name as role_name
          from users u
          join roles r on r.id = u.role_id
@@ -377,6 +378,115 @@ class Query {
     );
     return row?.id ?? null;
   }
+  // --- Audit trail (RF-USR-07) ---
+
+  // The action catalogue keyed by code. `actions.code` is the stable machine name, the id is
+  // whatever the sequence handed out on this machine -- the same reason permissions are
+  // compared by code. Read as a whole and cached by the caller rather than looked up per
+  // write: the catalogue is thirteen rows seeded by a migration, and a lookup per logged
+  // action would double the number of round trips the audit trail costs.
+  async getActions() {
+    const rows = await this.#rows("select id, code, label from actions order by code");
+    return rows;
+  }
+
+  // One row of the trail. `target_table` and `target_id` travel together or not at all --
+  // `logs_target_complete` enforces `num_nonnulls(...) IN (0, 2)`, because one of the two
+  // is always a mistake while zero is legitimate: `user_login` has no object.
+  //
+  // The casts are load-bearing. `$4` and `$5` are the target pair and are null for the
+  // objectless actions, and `$6`/`$7` are jsonb that arrives as a JavaScript object;
+  // without them Postgres cannot infer a type for a bare null parameter and fails the
+  // statement rather than the row.
+  // `area_id` is resolved by the statement, not by the caller. The obvious source is the
+  // session -- the JWT could carry the area and it would cost nothing to read -- and it is
+  // the wrong one: a token lives seven days and nothing re-reads the database on a verified
+  // one, so somebody moved between areas keeps stamping the old area onto the trail for the
+  // rest of the week. A trail that is confidently wrong about history is worse than one that
+  // is silent about it.
+  //
+  // The subquery is the fix and it is free: the row is being inserted anyway, so resolving
+  // the area inside the same statement adds no round trip and always reads the current
+  // value. There is deliberately no override parameter -- one source means the trail cannot
+  // disagree with itself depending on which call site wrote the row.
+  //
+  // A null `user_id` -- a failed login on an address that matches no account -- resolves to
+  // a null area, which is correct: there is nobody to have an area.
+  //
+  // Deliberately NOT filtered on `deleted_at`: a soft-deleted user's actions still happened,
+  // and belonged to an area when they did.
+  async insertLog({
+    userId,
+    actionId,
+    targetTable = null,
+    targetId = null,
+    beforeData = null,
+    afterData = null,
+  }) {
+    const [row] = await this.#rows(
+      `insert into logs (user_id, action_id, area_id, target_table, target_id,
+                         before_data, after_data)
+        values ($1::bigint,
+                $2,
+                (select primary_area_id from users where id = $1::bigint),
+                $3::varchar, $4::bigint, $5::jsonb, $6::jsonb)
+        returning id, user_id, action_id, area_id, target_table, target_id, created_at`,
+      [
+        userId,
+        actionId,
+        targetTable,
+        targetId,
+        beforeData === null ? null : JSON.stringify(beforeData),
+        afterData === null ? null : JSON.stringify(afterData),
+      ],
+    );
+    return row;
+  }
+
+  // The trail for one object, newest first. `idx_logs_target` is the partial index this
+  // rides -- (target_table, target_id) WHERE target_table IS NOT NULL -- so the objectless
+  // rows do not bloat it.
+  async getLogsForTarget(targetTable, targetId, limit = 100) {
+    const rows = await this.#rows(
+      `select l.id, l.user_id, u.full_name as user_full_name, a.code as action_code,
+              l.area_id, ar.name as area_name,
+              l.target_table, l.target_id, l.before_data, l.after_data, l.created_at
+         from logs l
+         join actions a on a.id = l.action_id
+         left join users u on u.id = l.user_id
+         left join areas ar on ar.id = l.area_id
+        where l.target_table = $1
+          and l.target_id = $2
+        order by l.created_at desc, l.id desc
+        limit $3`,
+      [targetTable, targetId, limit],
+    );
+    return rows;
+  }
+
+  // What one area did, newest first. This is the read RF-USR-04 is written in -- a
+  // responsable de área consulting the work of everyone under them -- and the reason
+  // logs.area_id exists at all rather than being derived from area_members at read time.
+  //
+  // Rides idx_logs_area_id, which is (area_id, created_at DESC) partial on area_id NOT NULL:
+  // the same order this query asks for, so the sort is the index walk.
+  async getLogsForAreas(areaIds, limit = 100) {
+    const rows = await this.#rows(
+      `select l.id, l.user_id, u.full_name as user_full_name, a.code as action_code,
+              l.area_id, ar.name as area_name,
+              l.target_table, l.target_id, l.before_data, l.after_data, l.created_at
+         from logs l
+         join actions a on a.id = l.action_id
+         left join users u on u.id = l.user_id
+         left join areas ar on ar.id = l.area_id
+        where l.area_id = any(coalesce($1::bigint[], '{}'::bigint[]))
+        order by l.created_at desc, l.id desc
+        limit $2`,
+      [this.#idArray(areaIds), limit],
+    );
+    return rows;
+  }
+
   // --- Areas ---
 
   async createArea({ name, description }) {

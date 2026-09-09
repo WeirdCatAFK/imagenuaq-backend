@@ -9,6 +9,7 @@ import bcrypt from "bcrypt";
 import * as jose from "jose";
 
 import query from "../resources/query.js";
+import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
 const SALT_ROUNDS = 12;
@@ -119,8 +120,38 @@ class Auth {
     // One message for "no such email", "no password set" and "wrong password". Splitting
     // them is friendlier and tells an attacker which addresses are worth guessing at.
     if (!user || !user.password_hash || !matches) {
+      // The trail may say which it was, because it is read by coordination and not returned
+      // to the caller -- that is the whole difference between a log and a response. The
+      // attempted address is recorded and the attempted password is not, ever.
+      //
+      // `actor: user?.id ?? null` is explicit: a failed login has no session, so the request
+      // context is empty, and for an address that matches no account there is nobody to
+      // attribute it to at all. logs.user_id is nullable for exactly this row.
+      await events.emit({
+        action: "user_login_failed",
+        actor: user?.id ?? null,
+        after: {
+          email: String(email).trim().toLowerCase(),
+          reason: !user
+            ? "no such account"
+            : !user.password_hash
+              ? "account never activated"
+              : "wrong password",
+        },
+      });
+
       throw ApiError.unauthorized("Invalid email or password.");
     }
+
+    // The actor is established BY this action, so it has to be passed rather than read from
+    // the request context -- at this point in the request there is no session yet. The area
+    // is not passed: query.insertLog() resolves it from the row in the same statement, so
+    // there is one source for it and no chance of two call sites disagreeing.
+    await events.emit({
+      action: "user_login",
+      actor: user.id,
+      target: { table: "users", id: user.id },
+    });
 
     return {
       id: user.id,
@@ -128,6 +159,7 @@ class Auth {
       fullName: user.full_name,
       roleId: user.role_id,
       role: user.role_name,
+      areaId: user.primary_area_id ?? null,
     };
   }
 
@@ -148,6 +180,17 @@ class Auth {
         fullName: user.fullName,
         roleId: user.roleId,
         role: user.role,
+        // users.primary_area_id, carried for the same reason as `role`: the frontend needs
+        // "which area am I in" on every screen and should not spend a request on it.
+        //
+        // It is NOT what stamps logs.area_id, and that is deliberate. This claim is up to
+        // seven days old -- nothing re-reads the database on a verified token -- so somebody
+        // moved between areas would keep writing the old area into the audit trail for the
+        // rest of the week. query.insertLog() resolves the area from `users` inside the
+        // INSERT instead: no extra round trip, and never stale. Treat this claim the way
+        // `role` is treated -- good enough to render a screen, not good enough to record
+        // history or to authorise on its own.
+        areaId: user.areaId ?? null,
       })
         .setProtectedHeader({ alg: "HS256" })
         // `sub`, not a custom userId claim: it is the registered JWT claim for the subject.
@@ -185,6 +228,9 @@ class Auth {
         fullName: payload.fullName,
         roleId: payload.roleId,
         role: payload.role,
+        // `?? null` rather than passing undefined through: a token minted before this claim
+        // existed is still valid for its seven days, and every reader should see one shape.
+        areaId: payload.areaId ?? null,
       };
     } catch (err) {
       // A missing JWT_SECRET is a server bug, not a bad token. Reporting it as a 401 would
@@ -247,12 +293,27 @@ class Auth {
 
     await this.setPassword(user.id, password);
 
+    // The account going from "invited" to "active" is a change to the user record, and the
+    // one change a user makes to their own row. Only the state transition is recorded --
+    // before and after both omit the hash, and audit.js would redact it anyway.
+    await events.emit({
+      action: "record_updated",
+      actor: user.id,
+      target: { table: "users", id: user.id },
+      before: { activated: false },
+      after: { activated: true },
+    });
+
+    // The same five fields authenticate() returns, plus the area, so that a session minted
+    // here is indistinguishable from one minted by login. getAuthUserById() already selects
+    // primary_area_id, which is why this needed no extra read.
     const subject = {
       id: user.id,
       email: user.email,
       fullName: user.full_name,
       roleId: user.role_id,
       role: user.role_name,
+      areaId: user.primary_area_id ?? null,
     };
 
     return { user: subject, token: await this.issueToken(subject) };

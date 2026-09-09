@@ -10,6 +10,7 @@
 // unenforceable, because anyone could ask to be coordination. External requesters are not
 // users at all: RF-EXT-03 gives them view-only sight of their own request.
 import query from "../resources/query.js";
+import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
 // Postgres error codes. Checking these beats pre-flighting each value with its own select:
@@ -96,6 +97,15 @@ class Users {
         primaryAreaId: area,
         birthday: birthday || null,
         isAreaLeader: Boolean(isAreaLeader),
+      });
+
+      // password_hash is null on a freshly created account, but the row is emitted whole
+      // rather than picked apart: audit.js redacts by column name, so the rule lives in one
+      // place instead of in every emit call that happens to touch `users`.
+      await events.emit({
+        action: "record_created",
+        target: { table: "users", id: row.id },
+        after: row,
       });
 
       return {

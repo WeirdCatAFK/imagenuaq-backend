@@ -10,14 +10,14 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 
 ## Estado
 
-| Módulo | Tablas | Estado |
-| --- | --- | --- |
-| USR | `users`, `roles`, `areas`, `area_hierarchy`, `area_members`, `contract_types`, `permissions`, `role_permissions` | Implementado; roles por área pendientes (§5.2) |
-| CAL / AUS | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado; `contract_type_entitlements` aún sin topes (§5.4) |
-| ARC | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens` | Implementado |
-| — | `logs`, `actions` | Implementado |
-| **SOL, PRY, FLW, TSK, EST** | — | **Propuesto**: la forma en `design/`, el porqué en §2, la cobertura en §3 |
-| FIN, INV, IMP, RPT, EXT | — | Sin modelar; §4 describe los puntos de enganche |
+| Módulo                           | Tablas                                                                                                                                                                                                                                   | Estado                                                                               |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| USR                               | `users`, `roles`, `areas`, `area_hierarchy`, `area_members`, `contract_types`, `permissions`, `role_permissions`                                                                                                         | Implementado                                                                         |
+| CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
+| ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
+| —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
+| **SOL, PRY, FLW, TSK, EST** | —                                                                                                                                                                                                                                       | **Propuesto**: la forma en `design/`, el porqué en §2, la cobertura en §3 |
+| FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
 
 Los archivos de diseño se escriben a mano y no los toca `scripts/genDBML.js`: viven fuera
 de `dbml/`, que es salida generada. Todos importan en ChartDB con **Import DBML**.
@@ -26,11 +26,11 @@ Ojo: están en `docs/design/` del directorio contenedor `ImagenUAQ/`, **fuera de
 repositorio**, junto a los requerimientos. Quien clone solo `imagenuaq-backend` no los
 tiene y los enlaces de abajo le quedan muertos.
 
-| Archivo | Alcance |
-| --- | --- |
-| [`../docs/design/projects.dbml`](../docs/design/projects.dbml) | **MVP.** Proyectos y solicitudes, más los catálogos de los que dependen |
-| [`../docs/design/tasks.dbml`](../docs/design/tasks.dbml) | **MVP.** Tareas, para conectar a mano con el anterior |
-| [`../docs/design/spine.dbml`](../docs/design/spine.dbml) | La columna vertebral completa, incluidos formatos y flujo. Referencia de a dónde va esto |
+| Archivo                                                         | Alcance                                                                                   |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [`../docs/design/projects.dbml`](../docs/design/projects.dbml) | **MVP.** Proyectos y solicitudes, más los catálogos de los que dependen           |
+| [`../docs/design/tasks.dbml`](../docs/design/tasks.dbml)       | **MVP.** Tareas, para conectar a mano con el anterior                               |
+| [`../docs/design/spine.dbml`](../docs/design/spine.dbml)       | La columna vertebral completa, incluidos formatos y flujo. Referencia de a dónde va esto |
 
 El MVP recorta del `spine` dos cosas, y las secciones que las describen siguen siendo la
 referencia de cómo vuelven a entrar:
@@ -89,8 +89,7 @@ desarrollo. Si esas definiciones se editan en su lugar, dos cosas se rompen: una
 vieja deja de poder mostrarse con los campos con los que se capturó, y un proyecto en
 vuelo cambia de flujo a media ejecución.
 
-Por eso `forms → form_versions → form_fields` y `workflows → workflow_versions →
-workflow_stages`. Editar publica una versión nueva; `requests.form_version_id` y
+Por eso `forms → form_versions → form_fields` y `workflows → workflow_versions → workflow_stages`. Editar publica una versión nueva; `requests.form_version_id` y
 `projects.workflow_version_id` apuntan a la versión con la que nacieron y nunca se mueven.
 
 ### 2.3 El payload de la solicitud es JSONB; los campos que se buscan son columnas
@@ -139,8 +138,7 @@ paralela.
 ### 2.6 Las etapas se pueden repetir
 
 Un visto bueno rechazado devuelve el trabajo a diseño. Por eso `project_stages` no es
-única por `(project_id, workflow_stage_id)` sino por `(project_id, workflow_stage_id,
-attempt)`. Sin el contador, el reproceso o sobrescribe la historia o falla al insertar —
+única por `(project_id, workflow_stage_id)` sino por `(project_id, workflow_stage_id, attempt)`. Sin el contador, el reproceso o sobrescribe la historia o falla al insertar —
 y `RF-PRY-03` pide justamente esa historia.
 
 ### 2.7 El historial de estatus se registra en `logs`, no en una tabla propia
@@ -167,46 +165,46 @@ llega a divergir.
 
 ## 3. Trazabilidad
 
-| RF | Cubierto por |
-| --- | --- |
-| RF-SOL-01 | `forms`, `form_versions`, `form_fields` |
-| RF-SOL-02 | `form_versions.workflow_version_id` → `workflow_stages.is_entry` (§2.5) |
-| RF-SOL-03 | `requests.folio` (único) |
-| RF-SOL-04, RF-SOL-05 | Columnas promovidas de `requests` (§2.3) |
-| RF-SOL-06 | `requests.data`, `requests.folder_id` |
-| RF-SOL-07 | `entities`, `entity_contacts` |
-| RF-SOL-08 | `requests.source` |
-| RF-PRY-01 | `requests.project_id` |
-| RF-PRY-02 | `projects`, `project_members`; las áreas participantes se derivan, no se guardan |
-| RF-PRY-03 | `project_stages` + `approvals` + `logs` |
-| RF-PRY-04 | `time_entries` |
-| RF-PRY-05 | `notes.kind` |
-| RF-PRY-06 | `workflows` reutilizables; sin estructura nueva por eventualidad |
-| RF-PRY-07 | `projects.has_cost` |
-| RF-PRY-08 | `projects.period_id`, `carried_over` |
-| RF-PRY-09 | `project_materials.origin` |
-| RF-FLW-01, RF-FLW-02 | `workflow_stages` + `workflow_transitions` (§2.1) |
-| RF-FLW-03 | `approvals` |
-| RF-FLW-04 | `workflow_transitions` + `notifications` |
-| RF-FLW-05 | `approvals.approver_contact_id`, `requires_entity_approval` |
-| RF-FLW-06 | `project_field_values` (§2.4) |
-| RF-FLW-07 | `project_stages.status = 'waiting_external'`, `blocked_reason` |
-| RF-FLW-08 | `priority`; sin orden por fecha de llegada |
-| RF-FLW-09 | Grafo con ramas paralelas (§2.1) |
-| RF-TSK-01 … RF-TSK-05 | `tasks` |
-| RF-TSK-06, RF-TSK-07 | Consulta sobre `events` + `area_members`; sin tabla nueva |
-| RF-EST-01 | `projects.status_id` |
-| RF-EST-02 | `statuses.area_id` |
-| RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since` |
-| RF-EST-05 | Sin tabla: regla de orquestación sobre `expected_invoice_count`, las etapas sin `approvals` y la evidencia |
-| RF-EST-06, RF-EST-10 | `notifications` |
-| RF-EST-07, RF-EST-08 | Consulta sobre `projects` + `status_since` |
-| RF-CAL-03 | `period_closures` + `projects.has_cost` |
-| RF-USR-01, RF-USR-02 | `users`, `areas`, `area_members`, `roles` |
-| RF-USR-03, RF-USR-04 | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella |
-| RF-USR-05, RF-USR-10 | `permissions` + `role_permissions` (§5.2) |
-| RF-USR-07 | `logs` con `target_table`/`target_id` (§5.3) |
-| RF-USR-09 | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla |
+| RF                              | Cubierto por                                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| RF-SOL-01                       | `forms`, `form_versions`, `form_fields`                                                                       |
+| RF-SOL-02                       | `form_versions.workflow_version_id` → `workflow_stages.is_entry` (§2.5)                                       |
+| RF-SOL-03                       | `requests.folio` (único)                                                                                         |
+| RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` (§2.3)                                                                          |
+| RF-SOL-06                       | `requests.data`, `requests.folder_id`                                                                           |
+| RF-SOL-07                       | `entities`, `entity_contacts`                                                                                   |
+| RF-SOL-08                       | `requests.source`                                                                                                 |
+| RF-PRY-01                       | `requests.project_id`                                                                                             |
+| RF-PRY-02                       | `projects`, `project_members`; las áreas participantes se derivan, no se guardan                               |
+| RF-PRY-03                       | `project_stages` + `approvals` + `logs`                                                                       |
+| RF-PRY-04                       | `time_entries`                                                                                                    |
+| RF-PRY-05                       | `notes.kind`                                                                                                      |
+| RF-PRY-06                       | `workflows` reutilizables; sin estructura nueva por eventualidad                                                  |
+| RF-PRY-07                       | `projects.has_cost`                                                                                               |
+| RF-PRY-08                       | `projects.period_id`, `carried_over`                                                                            |
+| RF-PRY-09                       | `project_materials.origin`                                                                                        |
+| RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1)                                                              |
+| RF-FLW-03                       | `approvals`                                                                                                       |
+| RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        |
+| RF-FLW-05                       | `approvals.approver_contact_id`, `requires_entity_approval`                                                     |
+| RF-FLW-06                       | `project_field_values` (§2.4)                                                                                    |
+| RF-FLW-07                       | `project_stages.status = 'waiting_external'`, `blocked_reason`                                                  |
+| RF-FLW-08                       | `priority`; sin orden por fecha de llegada                                                                        |
+| RF-FLW-09                       | Grafo con ramas paralelas (§2.1)                                                                                   |
+| RF-TSK-01 … RF-TSK-05          | `tasks`                                                                                                           |
+| RF-TSK-06, RF-TSK-07            | Consulta sobre`events` + `area_members`; sin tabla nueva                                                        |
+| RF-EST-01                       | `projects.status_id`                                                                                              |
+| RF-EST-02                       | `statuses.area_id`                                                                                                |
+| RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since`                                                                                  |
+| RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      |
+| RF-EST-06, RF-EST-10            | `notifications`                                                                                                   |
+| RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since`                                                                       |
+| RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         |
+| RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   |
+| RF-USR-03, RF-USR-04            | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella |
+| RF-USR-05, RF-USR-10            | `permissions` + `role_permissions` (§5.2)                                                                      |
+| RF-USR-07                       | `logs` con `target_table`/`target_id` (§5.3)                                                                 |
+| RF-USR-09                       | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla                             |
 
 `RF-TSK-07` y `RF-CAL-06` cruzan con ausencias: la ocupación del área debe descontar las
 ausencias autorizadas. Se resuelven leyendo `events` (público) y **nunca** `absences`
@@ -236,14 +234,6 @@ Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ell
 Independientes de la columna vertebral, y encontrados al contrastar el esquema vigente con
 los requerimientos. **Los primeros cuatro se cerraron en `I0-dbFixes`**, una migración por hueco para
 que el rollback fuera granular:
-
-| Hueco | Migración | Estado |
-| --- | --- | --- |
-| 5.1 Saldos sin dimensión de tipo | `1788545750396_absence-types-and-balances.sql` | Cerrado |
-| 5.2 Sin dónde guardar un permiso | `1788545749090_role-permissions.sql` | Cerrado salvo los roles por área |
-| 5.3 `logs` sin objeto | `1788545740478_logs-target.sql` | Cerrado |
-| 5.4 Catálogos vacíos | `1788794776184_catalog-bootstrap.sql` | Cerrado salvo los topes por esquema |
-| 5.5 La organización era plana | `1788887962363_roles-and-areas.sql` | Cerrado |
 
 El diagnóstico se conserva abajo porque explica por qué el esquema quedó como quedó.
 
@@ -288,7 +278,7 @@ y área sin `reason` ni `document_file_id`. **Es lo que deben leer `RF-TSK-06`, 
 `RF-CAL-05` y `RF-CAL-06`**, y de donde sale la notificación de `RF-EST-10` con fechas y
 duración pero sin motivo.
 
-### 5.2 No había dónde guardar un permiso — cerrado, salvo los roles por área
+### 5.2 No había dónde guardar un permiso — cerrado
 
 `users.role_id → roles.name` era todo el modelo. `RF-USR-05` (lectura y edición
 independientes, asignables por rol) y `RF-USR-10` (ver el motivo de una ausencia es un
@@ -301,16 +291,27 @@ expresar `finance.read` de `RF-USR-08`, que es lectura transversal sin escritura
 lado. `availability.read` y `absence.reason.read` separados son literalmente `RF-USR-10`, y
 que existan como dos filas es lo que impide colapsarlos al implementar.
 
-**Lo que sigue pendiente:** `role_id` es global y único, pero la visibilidad es por área
-(`RF-USR-03`, `RF-USR-04`). Es el mismo razonamiento que llevó a `schema-proofing` a mover
-la jefatura a `area_members`: alguien puede encabezar un área y ser integrante de otra.
-Mover el rol a `area_members` toca dos tablas y cada punto donde se autoriza, así que va en
-su propia rama.
+**El rol se queda global — decidido, no pendiente.** Durante un tiempo esta sección dejó
+abierto mover `role_id` a `area_members`, para que alguien pudiera tener un rol distinto en
+cada área. Se descartó. El rol dice **qué puede hacer** una persona y el área dice **sobre
+qué registros**, y son dos preguntas separadas:
+
+- `RF-USR-05` —qué puede hacer— la contesta `role_permissions`, y no cambia de un área a
+  otra: quien puede editar proyectos, puede editar proyectos.
+- `RF-USR-03` y `RF-USR-04` —sobre qué registros— las contesta `area_members`, cruzada con
+  `area_hierarchy` cuando hay que bajar por el organigrama (§5.5). Ahí sí sigue siendo
+  cierto que alguien encabeza un área y es integrante de otra: eso vive en
+  `area_members.is_area_leader`, que es donde `schema-proofing` lo puso.
+
+La consecuencia a tener presente: un rol por área sería la única forma de expresar a alguien
+que puede *editar* en un área y solo *leer* en otra. Hoy eso no se puede decir, y si algún
+día hiciera falta, la forma es la que esta sección describía —`role_id` en `area_members`—
+con el costo de tocar cada punto donde se autoriza. No es una omisión: es el caso que se
+decidió no soportar.
 
 ### 5.3 `logs` registraba quién hizo qué, pero no sobre qué — cerrado
 
-`RF-USR-07` pide bitácora sobre proyecto, estatus, archivo y factura. `logs(user_id,
-action_id, created_at)` no tenía referencia al objeto, así que "quién borró esta factura"
+`RF-USR-07` pide bitácora sobre proyecto, estatus, archivo y factura. `logs(user_id, action_id, created_at)` no tenía referencia al objeto, así que "quién borró esta factura"
 no tenía respuesta.
 
 **Cómo se cerró.** `target_table` y `target_id`, más `before_data`/`after_data`. No hay FK
@@ -417,5 +418,80 @@ enlaces con sus hijos, que quedan como raíces —siguen siendo dibujables. La a
 `RESTRICT` del lado del padre, se niega a borrar una coordinación hasta que cada área abajo
 se haya movido a mano, que es justamente el estado del que intenta salir quien reorganiza.
 
-Queda abierta la otra mitad de §5.2: mover `role_id` a `area_members` para que el rol pueda
-diferir por área. Sigue siendo su propia rama.
+El rol sigue siendo global, y eso está decidido y no pendiente: `area_members` y
+`area_hierarchy` contestan sobre qué registros ve cada quien, `role_permissions` contesta qué
+puede hacer. Ver §5.2.
+
+### 5.6 La bitácora existía pero nadie escribía en ella — cerrado
+
+`logs` y `actions` estaban desde el esquema inicial, §5.3 les agregó el objeto
+(`target_table`, `target_id`, `before_data`, `after_data`) y `catalog-bootstrap` sembró los
+trece códigos de acción. No faltaba nada del modelo: faltaba que algo escribiera. `RF-USR-07`
+—bitácora de quién creó, modificó o eliminó cada registro relevante— seguía sin cumplirse con
+las cuatro tablas listas.
+
+**Cómo se cerró.** Sin migración: es código. La orquestación anuncia lo que hizo por
+`src/utils/events.js` y `access/orchestration/audit.js` lo convierte en una fila. Cuatro
+decisiones que conviene no reabrir:
+
+- **El actor no es un argumento.** Viaja en un `AsyncLocalStorage` que siembra
+  `middlewares/context.js` por petición. Las alternativas eran pasar el usuario por unas
+  treinta firmas de orquestación —una preocupación de bitácora en medio de los argumentos del
+  dominio, que además crece cada vez que se quiera acarrear algo más— o emitir desde las
+  rutas, que no conocen la fila anterior y tendrían que releerla. Fuera de una petición no hay
+  contexto y el actor es nulo: un cambio hecho por `scripts/createAdmin.js` está genuinamente
+  sin atribuir, y `logs.user_id` es nullable justamente para poder decirlo.
+- **Es un despachador y no una llamada directa.** Ya se sabe quién se suscribe después:
+  `RF-EST-03` y `RF-EST-06` necesitan avisar cuando un proyecto lleva demasiado en un estatus,
+  y `RF-FLW-04` cuando un visto bueno habilita la siguiente etapa. Disparan sobre los mismos
+  eventos.
+- **Un suscriptor que falla no tumba la petición.** Se reporta con el evento completo a
+  stderr y se sigue. El costo, dicho para que no se descubra: una escritura puede tener éxito
+  y su fila de bitácora no, y nada las reconcilia. Es aceptable para usuarios, áreas y roles.
+  **No** es evidentemente aceptable para FIN, cuyos registros necesitan integridad de
+  auditoría; ahí la forma que no puede perder una fila es un CTE que escriba `logs` en la
+  misma sentencia que el cambio, como `createUser()` ya escribe `area_members`.
+- **La redacción es un patrón, no una lista.** `before_data` y `after_data` son filas enteras
+  y una fila de `users` lleva `password_hash`. Se borra cualquier columna que empate
+  `/password|secret|token|hash|salt/i`, de modo que una tabla nueva con un secreto queda
+  redactada por omisión y hay que sacarla a mano de la regla, que es la dirección segura.
+
+**Lo que se audita hoy** es lo que existe: `users`, `areas`, `area_members`, `roles`,
+`permissions` y los otorgamientos de permiso, más el acceso (`user_login`,
+`user_login_failed`). `status_changed` está sembrado y sin usar porque nada tiene estatus
+todavía; entra con `RF-EST-01` en I3, y §2.7 es donde vive ese diseño. Los verbos de archivo
+entran con ARC.
+
+**El área de cada acción, y de dónde sale.** `logs.area_id` guarda el área a la que
+pertenecía el actor cuando hizo el cambio (`1788899167759_log-area.sql`). Es lo que hace
+contestable `RF-USR-04` —un responsable consulta el trabajo de todos a su cargo— sin nombrar
+a cada persona una por una, y `RF-USR-03` toma el área como unidad, así que el área es lo que
+la bitácora debe indexar.
+
+Dos alternativas descartadas, porque las dos parecen más baratas y son peores:
+
+- **Derivarla al leer**, cruzando `logs` con `area_members`. Contesta dónde está la persona
+  **ahora**. Mover a alguien de Imprenta a Diseño convertiría retroactivamente en Diseño todo
+  lo que hizo en su vida. La bitácora existe para decir qué era cierto **entonces**: por eso
+  se desnormaliza, igual que `before_data` copia la fila en vez de apuntarla.
+- **Tomarla del JWT.** Es gratis y está a la mano —el token ya podría cargarla— pero vive
+  siete días y nada relee la base sobre un token verificado, así que quien cambie de área
+  seguiría estampando la anterior durante el resto de la semana. Una bitácora
+  confiadamente equivocada sobre el pasado es peor que una callada.
+
+Lo que se hace en su lugar: `query.insertLog()` resuelve el área con una subconsulta **dentro
+del mismo INSERT**. No cuesta un viaje extra —la fila se está insertando de todos modos— y
+siempre lee el valor vigente. El token **sí** carga `areaId`, pero solo para que una pantalla
+sepa de qué área es quien la abrió sin gastar una petición; es una foto, como `role`, y no es
+lo que sella la bitácora.
+
+Cuál área, dado que `area_members` es muchos a muchos: `users.primary_area_id`, la única
+respuesta de un solo valor que tiene el esquema. Quien pertenece a dos áreas y actúa sobre la
+segunda queda atribuido a la primera. Es una imprecisión conocida y es el límite honesto de
+atribuir la acción al área de la *persona* en vez de a la del *registro afectado* —que es la
+mejor pregunta y no tiene respuesta genérica, porque el registro afectado es una tabla
+distinta en cada fila.
+
+**Lo que sigue pendiente:** no hay ruta para *leer* la bitácora. `audit.forTarget()` y
+`audit.forAreas()` están escritos y probados, pero sin endpoint ni pantalla, así que hoy la
+bitácora se consulta por `psql`.

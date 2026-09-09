@@ -80,8 +80,9 @@ CREATE INDEX idx_area_hierarchy_parent_area_id ON area_hierarchy (parent_area_id
 
 
 -- Closes the per-area structure half of DATAMODEL.md 5.2. The other half -- moving
--- users.role_id onto area_members so a role can differ per area -- is still open and still
--- its own branch.
+-- users.role_id onto area_members so a role can differ per area -- is not open: it was
+-- decided against. The role says what a person may do and the area says over which records,
+-- and this table is the second half of that answer, not a step towards merging the two.
 
 
 -- Down Migration

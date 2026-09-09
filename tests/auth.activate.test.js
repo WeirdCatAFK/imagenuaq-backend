@@ -152,6 +152,11 @@ describe('POST /api/auth/activate', () => {
         fullName: 'Nuevo Usuario',
         roleId: user.role_id,
         role: 'worker',
+        // The session gained the area when logs.area_id did -- a screen needs to know which
+        // area the signed-in user is in without spending a request. Asserting the whole
+        // object is what caught the addition instead of letting it reach the frontend
+        // unannounced. Null here because this fixture has no primary area.
+        areaId: null,
       });
 
       // Logged in immediately rather than bounced to a login form for credentials they

@@ -17,9 +17,13 @@
 // RF-USR-08. `worker` and `area_lead` are deliberately empty: theirs is policy, and
 // setPermissions() below is where coordination decides it.
 //
-// See DATAMODEL.md §5.2. The other half of that section, moving `role_id` onto
-// `area_members` so a role can differ per area, is still open and still its own branch.
+// The role is global and stays that way -- see DATAMODEL.md §5.2, which records the
+// decision. `role_permissions` answers what a person may do; `area_members` and
+// `area_hierarchy` answer which records they may do it to. The case that cannot be expressed
+// is somebody who may edit in one area and only read in another; that is the case the
+// decision declines to support, not an omission.
 import query from "../resources/query.js";
+import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
 const UNIQUE_VIOLATION = "23505";
@@ -49,12 +53,18 @@ class Roles {
     }
 
     try {
-      return shapeRole(
-        await query.createRole({
-          name: cleanName,
-          description: cleanText(description),
-        }),
-      );
+      const role = await query.createRole({
+        name: cleanName,
+        description: cleanText(description),
+      });
+
+      await events.emit({
+        action: "record_created",
+        target: { table: "roles", id: role.id },
+        after: role,
+      });
+
+      return shapeRole(role);
     } catch (err) {
       throw translate(err);
     }
@@ -105,6 +115,17 @@ class Roles {
         description: nextDescription,
       });
       if (!role) throw ApiError.notFound("Role not found.");
+
+      // Worth having in the trail beyond the general rule: renaming a role changes what
+      // requireRole() compares, so "why did everyone stop being able to do X" has an
+      // answer here and nowhere else.
+      await events.emit({
+        action: "record_updated",
+        target: { table: "roles", id: role.id },
+        before: current,
+        after: role,
+      });
+
       return shapeRole(role);
     } catch (err) {
       throw translate(err);
@@ -130,6 +151,13 @@ class Roles {
     try {
       const role = await query.deleteRole(id);
       if (!role) throw ApiError.notFound("Role not found.");
+
+      await events.emit({
+        action: "record_deleted",
+        target: { table: "roles", id: role.id },
+        before: role,
+      });
+
       return shapeRole(role);
     } catch (err) {
       // The race the count above cannot close: a user assigned this role between the count
@@ -171,13 +199,19 @@ class Roles {
     }
 
     try {
-      return shapePermission(
-        await query.createPermission({
-          code: cleanCode,
-          label: cleanLabel,
-          description: cleanText(description),
-        }),
-      );
+      const permission = await query.createPermission({
+        code: cleanCode,
+        label: cleanLabel,
+        description: cleanText(description),
+      });
+
+      await events.emit({
+        action: "record_created",
+        target: { table: "permissions", id: permission.id },
+        after: permission,
+      });
+
+      return shapePermission(permission);
     } catch (err) {
       throw translate(err);
     }
@@ -192,6 +226,13 @@ class Roles {
       requireId(permissionId, "permissionId"),
     );
     if (!permission) throw ApiError.notFound("Permission not found.");
+
+    await events.emit({
+      action: "record_deleted",
+      target: { table: "permissions", id: permission.id },
+      before: permission,
+    });
+
     return shapePermission(permission);
   }
 
@@ -229,6 +270,14 @@ class Roles {
         description: nextDescription,
       });
       if (!permission) throw ApiError.notFound("Permission not found.");
+
+      await events.emit({
+        action: "record_updated",
+        target: { table: "permissions", id: permission.id },
+        before: current,
+        after: permission,
+      });
+
       return shapePermission(permission);
     } catch (err) {
       throw translate(err);
@@ -272,6 +321,19 @@ class Roles {
 
     try {
       const row = await query.grantPermissionToRole(role, permission);
+
+      // Only when the grant is new. `permission_granted` and `permission_revoked` are their
+      // own action codes rather than record_created/deleted on role_permissions, because
+      // "who gave finance.read to whom, and when" is the question RF-USR-05 makes worth
+      // asking, and a generic verb over a join table buries it.
+      if (row !== null) {
+        await events.emit({
+          action: "permission_granted",
+          target: { table: "roles", id: role },
+          after: { role_id: role, permission_id: permission },
+        });
+      }
+
       return { roleId: role, permissionId: permission, granted: row !== null };
     } catch (err) {
       throw translate(err);
@@ -284,6 +346,12 @@ class Roles {
 
     const row = await query.revokePermissionFromRole(role, permission);
     if (!row) throw ApiError.notFound("That role does not hold that permission.");
+
+    await events.emit({
+      action: "permission_revoked",
+      target: { table: "roles", id: role },
+      before: { role_id: role, permission_id: permission },
+    });
 
     return { roleId: role, permissionId: permission, revoked: true };
   }
@@ -335,11 +403,41 @@ class Roles {
       ids.push(permission.id);
     }
 
+    // Read the current set so the trail can record what actually changed. A single
+    // "permissions replaced" row would be cheaper and close to useless: the question an
+    // audit answers is which permission a role gained or lost, and a before/after pair of
+    // whole sets makes the reader diff them by eye.
+    const held = await query.getRolePermissions(id);
+    const heldIds = new Set(held.map((permission) => permission.id));
+    const wantedIds = new Set(ids);
+
+    let result;
     try {
-      return (await query.setRolePermissions(id, ids)).map(shapePermission);
+      result = (await query.setRolePermissions(id, ids)).map(shapePermission);
     } catch (err) {
       throw translate(err);
     }
+
+    // After the write, and only for the differences. Emitting before would record grants
+    // that a failed statement never made.
+    for (const permissionId of ids) {
+      if (heldIds.has(permissionId)) continue;
+      await events.emit({
+        action: "permission_granted",
+        target: { table: "roles", id },
+        after: { role_id: id, permission_id: permissionId },
+      });
+    }
+    for (const permission of held) {
+      if (wantedIds.has(permission.id)) continue;
+      await events.emit({
+        action: "permission_revoked",
+        target: { table: "roles", id },
+        before: { role_id: id, permission_id: permission.id },
+      });
+    }
+
+    return result;
   }
 }
 

@@ -11,6 +11,7 @@
 // one area. getOrgChart() below is the read side of that, and the shape the frontend's
 // react-organizational-chart consumes.
 import query from "../resources/query.js";
+import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
 // Postgres error codes, as in orchestration/users.js. The constraint is the authority:
@@ -65,6 +66,12 @@ class Areas {
               userId: leader,
             });
 
+      await events.emit({
+        action: "record_created",
+        target: { table: "areas", id: area.id },
+        after: area,
+      });
+
       return shapeArea(area);
     } catch (err) {
       throw translate(err);
@@ -101,6 +108,17 @@ class Areas {
         description: nextDescription,
       });
       if (!area) throw ApiError.notFound("Area not found.");
+
+      // `current` was read above to merge the partial update, so before_data costs nothing
+      // extra here -- which is the reason the event is emitted from this tier and not from
+      // the route, where the previous row is already gone.
+      await events.emit({
+        action: "record_updated",
+        target: { table: "areas", id: area.id },
+        before: current,
+        after: area,
+      });
+
       return shapeArea(area);
     } catch (err) {
       throw translate(err);
@@ -123,6 +141,15 @@ class Areas {
     try {
       const area = await query.deleteArea(id);
       if (!area) throw ApiError.notFound("Area not found.");
+
+      // The deleted row IS before_data; after_data null is what says it is gone. The
+      // migration's comment on the columns spells that convention out.
+      await events.emit({
+        action: "record_deleted",
+        target: { table: "areas", id: area.id },
+        before: area,
+      });
+
       return shapeArea(area);
     } catch (err) {
       if (err?.code === FOREIGN_KEY_VIOLATION) {
@@ -200,6 +227,17 @@ class Areas {
         area,
         Boolean(isAreaLeader),
       );
+
+      // record_created for what is really an upsert. The trail records the resulting state
+      // and the object it applies to; distinguishing "joined" from "promoted" would need a
+      // read of the membership first, and the area's history read in order already shows
+      // which it was.
+      await events.emit({
+        action: "record_created",
+        target: { table: "area_members", id: area },
+        after: row,
+      });
+
       return {
         userId: row.user_id,
         areaId: row.area_id,
@@ -216,6 +254,12 @@ class Areas {
       requireId(areaId, "areaId"),
     );
     if (!row) throw ApiError.notFound("That user is not a member of this area.");
+
+    await events.emit({
+      action: "record_deleted",
+      target: { table: "area_members", id: row.area_id },
+      before: row,
+    });
 
     return {
       userId: row.user_id,
@@ -267,8 +311,24 @@ class Areas {
       );
     }
 
+    // Read before the upsert overwrites it. Re-parenting is the one change here whose
+    // previous value is not already in hand, and a move recorded without where the area
+    // came from cannot be read backwards.
+    const previousParent = await query.getAreaParent(child);
+
     try {
       const row = await query.setAreaParent(child, parent);
+
+      // Targeted at the area that moved, not at area_hierarchy: "where does this area hang"
+      // is a fact about the area, and somebody reading its history wants the move in the
+      // same list as its rename.
+      await events.emit({
+        action: "record_updated",
+        target: { table: "areas", id: child },
+        before: { parent_area_id: previousParent?.id ?? null },
+        after: { parent_area_id: row.parent_area_id },
+      });
+
       return { areaId: row.child_area_id, parentAreaId: row.parent_area_id };
     } catch (err) {
       throw translate(err);
@@ -284,6 +344,19 @@ class Areas {
     }
 
     const row = await query.clearAreaParent(id);
+
+    // Only when something actually changed. An audit trail that records requests rather
+    // than changes fills with rows that say nothing happened, and the ones that matter get
+    // harder to find.
+    if (row) {
+      await events.emit({
+        action: "record_updated",
+        target: { table: "areas", id },
+        before: { parent_area_id: row.parent_area_id },
+        after: { parent_area_id: null },
+      });
+    }
+
     // `changed` distinguishes "it had a parent and no longer does" from "it never had
     // one", which the caller cannot see from parentAreaId being null either way.
     return { areaId: id, parentAreaId: null, changed: row !== null };
