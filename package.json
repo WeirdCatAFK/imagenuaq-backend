@@ -26,6 +26,7 @@
     "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --test --test-concurrency=1 \"tests/**/*.test.js\""
   },
   "dependencies": {
+    "@azure/msal-node": "^6.0.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "express": "^5.1.0",

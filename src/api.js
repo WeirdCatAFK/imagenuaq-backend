@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 
 import healthRouter from './routes/health.js';
+import spreadsheetsRouter from './routes/spreadsheets.js';
 import authRouter from './routes/auth.js';
 import usersRouter from './routes/users.js';
 import areasRouter from './routes/areas.js';
@@ -20,6 +21,7 @@ import audit from './access/orchestration/audit.js';
 // each, so the URL comes from a single place.
 export const ROUTERS = {
   health: healthRouter,
+  spreadsheets: spreadsheetsRouter,
   auth: authRouter,
   users: usersRouter,
   areas: areasRouter,
