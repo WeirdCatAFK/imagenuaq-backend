@@ -7,6 +7,9 @@ import morgan from 'morgan';
 
 import healthRouter from './routes/health.js';
 import spreadsheetsRouter from './routes/spreadsheets.js';
+import authRouter from './routes/auth.js';
+import usersRouter from './routes/users.js';
+import docsRouter from './routes/docs.js';
 import { notFound } from './middlewares/notFound.js';
 import { errorHandler } from './middlewares/errorHandler.js';
 
@@ -15,6 +18,12 @@ import { errorHandler } from './middlewares/errorHandler.js';
 export const ROUTERS = {
   health: healthRouter,
   spreadsheets: spreadsheetsRouter,
+  auth: authRouter,
+  users: usersRouter,
+  // Swagger UI and the raw document, at /api/docs and /api/docs/openapi.json. It belongs
+  // in this map rather than beside the `/` handler below because it is mounted the same
+  // way everything else is; the only thing unusual about it is that it serves no data.
+  docs: docsRouter,
 };
 
 export default class Api {

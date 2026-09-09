@@ -8,6 +8,7 @@ cp .env.example .env          # set DATABASE_URL
 docker compose up -d db       # Postgres on the port in .env
 npm run migrate:up            # apply migrations
 npm run dev                   # node --watch
+npm test                      # see Tests below
 ```
 
 ## Layout
@@ -19,6 +20,7 @@ dbml/                    one committed snapshot per migration, plus current.dbml
 scripts/genDBML.js       writes dbml/ from the live schema (npm run dbml)
 src/
   api.js                 Api class: builds the app, mounts ROUTERS under /api/, start/stop
+  swagger.js             the OpenAPI 3.1 document, hand-written
   routes/                one file per resource, thin: parse the request, call orchestration
   access/                everything that reads or writes data
     orchestration/       business rules per domain
@@ -111,12 +113,16 @@ database — the migration is always written by a person.
 
 #### Why the output is written for an older DBML
 
-We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects two things
-the newer renderer emits — a snapshot containing either is valid DBML that fails on import
-with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites both:
+We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects three things
+the newer renderer emits — a snapshot containing any of them is valid DBML that fails on
+import with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites all three:
 
 - **`Checks { … }` blocks** become `CHECK <name>: <expression>` lines in the table's note, so
   `event_participants`'s `num_nonnulls(area_id, user_id) = 1` is still on the diagram.
+- **Inline `check:` column attributes** get the same treatment. A CHECK over one column takes
+  a different route out of the connector than a multi-column one — it arrives on the column in
+  `schema.tableConstraints` rather than in `schema.checks` — and renders inline, so both
+  sources are drained into the same note. `files`'s `hash ~ '^[0-9a-f]{64}$'` is one of these.
 - **`?<?` / `<?` relationship operators** become plain `<`. The `?` marks an optional side;
   whether the column is nullable is already on the column as `not null`, so nothing is lost.
 
@@ -144,12 +150,8 @@ without changing any path.
 Two levels of fanout because a flat directory reaches millions of entries, where
 `readdir`, rsync and backup tools all degrade. No filename on disk because one piece of content has many
 names — that is what dedup means — so writing one here would pick an arbitrary winner and
-create a second, disagreeing source of truth. The name belongs to the node row and comes
+create a second, disagreeing source of truth. The name belongs to the `files` row and comes
 back as `Content-Disposition`.
-
-`npm run storage:demo` exercises the whole surface against two scratch volumes under the
-OS temp directory; it needs no database and no real disks, and it is the shortest way to
-see how `putContent` is meant to be called.
 
 Four things worth knowing before building on it:
 
@@ -177,13 +179,118 @@ yet.
 
 ## Endpoints
 
-| Method | Route           | Notes                                         |
-| ------ | --------------- | --------------------------------------------- |
-| GET    | `/`           | Readiness ping, no database involved          |
-| GET    | `/api/health` | 200 while Postgres answers, 503 once it stops |
+| Method | Route | Auth | Notes |
+| --- | --- | --- | --- |
+| GET | `/` | — | Readiness ping, no database involved |
+| GET | `/api/docs` | — | Swagger UI; `/api/docs/openapi.json` is the raw document |
+| GET | `/api/health` | — | 200 while Postgres answers, 503 once it stops |
+| POST | `/api/auth/login` | — | `{ email, password }` → `{ token, user }` |
+| GET | `/api/auth/me` | session | The subject of the presented token |
+| POST | `/api/auth/activate` | invite token | `{ token, password }` → `{ token, user }` |
+| POST | `/api/users` | admin | Create a staff account → `{ user, inviteToken }` |
+| POST | `/api/users/:id/invite` | admin | Re-issue an invite for an account that never activated |
+
+### API documentation
+
+`npm run dev`, then <http://localhost:3000/api/docs>. *Authorize* takes the token from
+`POST /api/auth/login`, and **Try it out** calls this server — the document lists `/` as
+its first server, so the UI resolves it against whatever host you opened it on.
+`/api/docs/openapi.json` is the same document as a file, for a client generator or an
+import into Postman.
+
+The spec is **hand-written**, in [src/swagger.js](src/swagger.js) — one module rather than
+JSDoc comments scattered across `routes/`, for the same reason `ROUTERS` exists. What keeps
+it from drifting is `tests/docs.test.js`, which walks the routers the app actually mounts
+and fails when one has no documented operation, when the document describes a route nothing
+serves, or when a `$ref` does not resolve. A new endpoint therefore fails the suite until
+it is described.
+
+It is served in production too. This is an internal system behind a tunnel, every route it
+describes refuses unauthenticated callers on its own, and a spec that only exists in
+development is the one that never gets updated. Gate the `docs` entry in `ROUTERS` if that
+ever needs to change.
+
+Swagger UI needs `'unsafe-inline'` for scripts, which helmet's default policy forbids;
+[src/routes/docs.js](src/routes/docs.js) re-runs helmet with a relaxed CSP scoped to that
+subtree, and the suite asserts the relaxation does not leak onto the rest of the API.
+
+### Accounts
+
+There is no self-registration. RF-USR-01/02 make area and role decisions coordination
+takes about a person, so accounts are created by an admin through `POST /api/users` and
+arrive with **no password**. The response carries a one-time `inviteToken`; its owner picks
+their own password at `POST /api/auth/activate`, which returns a session.
+
+The invite is single-use with no table behind it: it is valid only while the account has no
+password, and redeeming it gives the account one. That trick does not extend to password
+*resets* — those need a hashed single-use token of their own, and are not built yet.
+
+Session and invite tokens are both signed with `JWT_SECRET` and are distinguished by a
+`purpose` claim. Without it an invite would be accepted as a session, which is a full login
+for an account whose owner has not chosen a password.
+
+### The first admin, and lockouts
+
+Account creation needs an admin, which is a closed loop — nobody has been created yet, or
+every admin has lost access. `npm run admin:create` breaks it:
+
+```bash
+ADMIN_PASSWORD=... npm run admin:create -- --email a@uaq.mx --name "Nombre Apellido"                                           [--contract <id|name>] [--area <id|name>]
+```
+
+Run against an address that already exists it **promotes that user to admin and resets
+their password**, which is the recovery path when every admin is locked out. It is a script
+and not an endpoint deliberately: in a lockout the admin rows are still present and valid,
+so a route gated on “no admins exist” would refuse to help in the one situation it was for.
+The gate is possession of `DATABASE_URL` — whoever has that can already do this with
+`psql`; the script only makes it correct, at the same bcrypt cost the server verifies with.
+
+Omit `ADMIN_PASSWORD` on a terminal and it prompts with the echo off. Never pass the
+password as an argument: `argv` is readable through `ps` and lands in shell history.
+
+## Tests
+
+```bash
+npm test
+```
+
+140 cases over the eight endpoints, driven through real HTTP. `pretest` creates
+`imagenuaq_test` and migrates it, so `npm test` is the only command to remember; the
+database container has to be up.
+
+The runner is Node's own (`node --test`) with `node:assert` and `fetch`, so the suite adds
+no dependencies. Each file boots the app with `new Api({ port: 0 })` and talks to it over a
+socket rather than through an in-process shim -- helmet, CORS and `express.json()` are part
+of what is being tested, and two of the cases are the body parser's refusals rather than
+ours.
+
+**The suite never touches the development database.** `tests/helpers/env.js` derives the
+test database from `DATABASE_URL` by swapping the name for `imagenuaq_test`, and throws if
+the result does not end in `_test` -- the fixtures truncate tables, so the name is checked
+rather than trusted. Point `TEST_DATABASE_URL` somewhere else to override, subject to the
+same check.
+
+Files run serially (`--test-concurrency=1`) because they share that database and each one
+truncates `users` and `area_members` before every case. The catalogs seeded by
+`catalog-bootstrap` survive, and fixtures look roles and areas up **by name** -- the ids
+differ between databases.
+
+Most of the runtime is bcrypt: cost 12, roughly a second per login on a laptop, paid
+honestly on every login the suite performs. Fixtures hash once per process and reuse the
+digest.
+
+What the suite is for, beyond regressions: the behaviours it pins are the ones the code
+comments argue for and a plausible refactor would quietly undo -- the `purpose` claim that
+keeps an invite from working as a session, the single login message that denies an
+email-enumeration oracle, the ordering that makes a spent invite a 409 rather than a 400,
+the CTE that writes `area_members` with the user, and the partial index that frees a
+soft-deleted address. Each was checked by breaking it and confirming the suite fails.
+
+There is still no linter.
 
 ## Adding a resource
 
 A migration in `migrations/`, SQL in `access/resources/query.js`, rules
 in `access/orchestration/<name>.js`, a router in `routes/<name>.js`, then one line in the
-`ROUTERS` map in `src/api.js`.
+`ROUTERS` map in `src/api.js`, and its paths in `src/swagger.js` — `tests/docs.test.js`
+fails on a route that is mounted and not described.

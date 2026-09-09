@@ -6,7 +6,7 @@
 -- disk copies bytes and changes no path.
 
 CREATE TABLE storage_volumes (
-  id          bigserial PRIMARY KEY,
+  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   -- The join key between a row here and a mount. STORAGE_VOLUMES in the environment maps
   -- label -> path, and each disk carries a .imagenuaq-volume marker naming its label, so
   -- a disk that fails to mount is caught at startup instead of being written into.
@@ -27,7 +27,7 @@ CREATE TABLE storage_volumes (
 );
 
 CREATE TABLE folders (
-  id         bigserial PRIMARY KEY,
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   parent_id  bigint REFERENCES folders(id),
   name       varchar(255) NOT NULL,
   owner_id   bigint NOT NULL REFERENCES users(id),
@@ -82,7 +82,7 @@ CREATE TRIGGER folders_no_cycle
   EXECUTE FUNCTION folders_reject_cycle();
 
 CREATE TABLE files (
-  id         bigserial PRIMARY KEY,
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   folder_id  bigint NOT NULL REFERENCES folders(id),
   author_id  bigint NOT NULL REFERENCES users(id),
   -- Lowercase hex SHA-256 of the content. NOT unique: two rows sharing a hash is exactly
@@ -146,7 +146,7 @@ CREATE INDEX idx_folder_areas_area_id ON folder_areas (area_id);
 
 -- Share links. The escape hatch for anyone the owner/area rules cannot reach.
 CREATE TABLE access_tokens (
-  id         bigserial PRIMARY KEY,
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   -- The SHA-256 of the token, never the token itself, for the same reason
   -- users.password_hash exists: a database leak must not hand out working links.
   -- The plaintext is shown once, at creation, and is not recoverable afterwards.

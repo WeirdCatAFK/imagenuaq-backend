@@ -27,6 +27,10 @@ const { connector } = connectorPkg;
 // it in would put a table nobody designed in the middle of every diagram.
 const LEDGER = 'pgmigrations';
 
+// The index access methods ChartDB's parser accepts; see downgradeForChartDB(). Its own error
+// names them ('Expected btree, comment, hash, or whitespace'), so this list is not a guess.
+const CHARTDB_INDEX_TYPES = new Set(['btree', 'hash']);
+
 function flag(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
   const value = i === -1 ? undefined : process.argv[i + 1];
@@ -78,26 +82,83 @@ function dropLedger(schema) {
   return schema;
 }
 
-// We generate with @dbml/core 10, but ChartDB bundles 3.14 and its parser rejects two things
-// the newer renderer emits. Both are downgraded here rather than left for the import to choke
-// on, since a snapshot ChartDB will not open defeats the point of the format.
+// We generate with @dbml/core 10, but ChartDB bundles 3.14 and its parser rejects four
+// things the newer renderer emits. All are downgraded here rather than left for the import to
+// choke on, since a snapshot ChartDB will not open defeats the point of the format.
 //
 //   Checks { … }   a much later addition; 3.14 fails with "Expected schema name or type".
 //                  Folded into the table note, so the constraint is still visible.
+//   [check: …]     the same constraint over a single column, which the connector reports on
+//                  the column rather than the table; 3.14 reads the settings list and fails
+//                  with 'Expected "default:" … but "c" found'. Folded into the same note.
 //   ?<? / <?       optionality markers on relationships; 3.14 only knows < > - <>. The
 //                  endpoint relations are normalised to plain '*' / '1', which makes the
 //                  renderer emit `<`. Whether the FK column is nullable is already on the
 //                  column itself as `not null`, so nothing is actually lost.
+//   [type: gist]   index access methods beyond btree and hash; 3.14 fails with 'Expected
+//                  btree, comment, hash, or whitespace'. Dropped to the table note, since the
+//                  only one we have is the index behind an EXCLUDE constraint, which DBML
+//                  cannot express in any version.
 function downgradeForChartDB(schema) {
+  // Every CHECK ends up in its table's note, because 3.14 can express none of them. They
+  // reach us by two different routes, though: a constraint over several columns arrives in
+  // schema.checks and renders as a `Checks { … }` block, while a single-column one rides on
+  // the column in schema.tableConstraints and renders inline as `check:`. Both are rejected
+  // on import, so both are collected here and the sources emptied.
+  const notes = new Map();
+  const note = (key, line) => {
+    if (!notes.has(key)) notes.set(key, []);
+    notes.get(key).push(line);
+  };
+  const collect = (key, check) => note(key, `CHECK ${check.name}: ${check.expression}`);
+
   for (const [key, checks] of Object.entries(schema.checks ?? {})) {
+    for (const check of checks) collect(key, check);
+  }
+  schema.checks = {};
+
+  for (const [key, columns] of Object.entries(schema.tableConstraints ?? {})) {
+    for (const constraint of Object.values(columns)) {
+      if (!constraint.checks?.length) continue;
+      // Collected under the table, not the column: the note belongs to the table either
+      // way, and the constraint name already says which column it is about.
+      for (const check of constraint.checks) collect(key, check);
+      // pk and unique live on this same object and 3.14 understands both, so only the
+      // checks are cleared.
+      constraint.checks = [];
+    }
+  }
+
+  // 3.14's index grammar accepts btree and hash and nothing else, so a gist/gin/brin index
+  // stops the import dead. The one we have is not really an index anyway: it is what Postgres
+  // builds behind `cte_no_overlap`, the EXCLUDE constraint that stops two entitlement validity
+  // periods overlapping (RF-AUS-04), and no version of DBML can say EXCLUDE. Keeping it would
+  // also record a falsehood, because @dbml/connector splits an index's column list on commas
+  // without regard for parentheses, so `daterange(valid_from, valid_to, '[]'::text)` arrives
+  // as three separate expression columns. Joining the parts back with ', ' undoes that split —
+  // it is the same list the connector cut up — and the whole thing goes to the note, where it
+  // reads as documentation rather than as a schema object someone might try to reproduce.
+  for (const [key, indexes] of Object.entries(schema.indexes ?? {})) {
+    const supported = [];
+    for (const index of indexes) {
+      const method = index.type?.toLowerCase();
+      if (!method || CHARTDB_INDEX_TYPES.has(method)) {
+        supported.push(index);
+        continue;
+      }
+      const columns = index.columns.map((c) => String(c.value).trim()).join(', ');
+      note(key, `INDEX ${index.name} USING ${method} (${columns})`);
+    }
+    schema.indexes[key] = supported;
+  }
+
+  for (const [key, lines] of notes) {
     const [schemaName, tableName] = key.split('.');
     const table = schema.tables.find((t) => t.name === tableName && t.schemaName === schemaName);
     if (!table) continue;
-    const lines = checks.map((c) => `CHECK ${c.name}: ${c.expression}`);
     table.note ??= { value: '' };
     table.note.value = [table.note.value, ...lines].filter(Boolean).join('\n');
   }
-  schema.checks = {};
 
   for (const ref of schema.refs) {
     for (const endpoint of ref.endpoints) {

@@ -20,15 +20,21 @@
     "postmigrate:down": "npm run dbml",
     "migrate:redo": "npm run migrate -- redo",
     "postmigrate:redo": "npm run dbml",
-    "migrate:status": "npm run migrate -- up --dry-run"
+    "migrate:status": "npm run migrate -- up --dry-run",
+    "admin:create": "node --env-file-if-exists=.env scripts/createAdmin.js",
+    "pretest": "node --env-file-if-exists=.env scripts/testDb.js",
+    "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --test --test-concurrency=1 \"tests/**/*.test.js\""
   },
   "dependencies": {
     "@azure/msal-node": "^6.0.0",
+    "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
+    "jose": "^6.2.12",
     "morgan": "^1.10.1",
-    "postgrejs": "^2.23.1"
+    "postgrejs": "^2.23.1",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "@dbml/connector": "^10.1.1",
