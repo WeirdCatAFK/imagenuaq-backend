@@ -66,6 +66,10 @@ export const session = (user) =>
       // the system with no area, and the difference would show up as a puzzling null in
       // whichever test reached for it first.
       areaId: user.primary_area_id ?? null,
+      // verifyToken() compares this against the row, so a token minted here for a fixture
+      // user has to match it. `?? 0` is the column default, which is what every freshly
+      // created fixture has.
+      tokenVersion: user.token_version ?? 0,
     },
   });
 

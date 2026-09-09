@@ -140,9 +140,18 @@ export async function createActive(options) {
 
 // Users are soft-deleted, and almost every rule about them turns on that column: login
 // refuses them, invites refuse them, and uq_users_email_live frees their address for
-// reuse. There is no endpoint for it yet, so the tests set it directly.
+// reuse. DELETE /api/users/:id now does this properly; this stays for the cases that need
+// a deleted row as *setup* rather than as the thing under test, so they do not depend on
+// an endpoint they are not exercising.
+//
+// It bumps token_version for the same reason the endpoint does. Without that a test could
+// soft-delete a user here and still find their token working, which is true of this helper
+// and false of the API -- a difference that would be read as a bug in the wrong place.
 export async function softDelete(userId) {
-  await sql('update users set deleted_at = now() where id = $1', [userId]);
+  await sql(
+    'update users set deleted_at = now(), token_version = token_version + 1 where id = $1',
+    [userId],
+  );
 }
 
 export async function findUser(userId) {

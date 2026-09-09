@@ -6,10 +6,14 @@
 //
 // Three decisions worth knowing before changing anything here:
 //
-//   - **Nothing re-reads the database on a verified token.** A user deleted or given a
-//     different role today keeps the old role until their token expires. That is the trade
-//     TOKEN_TTL makes; when it becomes unacceptable the fix is a `token_version` column on
-//     users compared at verification, not a shorter TTL.
+//   - **A verified token is checked against its row.** verifyToken() costs one primary-key
+//     lookup, and it buys two things a stateless token cannot: a deleted or revoked account
+//     stops working at once rather than when its token expires, and `role` and `areaId`
+//     come from the row, so a change takes effect on the next request instead of in seven
+//     days. This reverses an earlier decision that nothing would re-read the database here;
+//     a shorter TOKEN_TTL was the alternative and it shortens the window without closing
+//     it. Permissions are still NOT read here -- requirePermission() does that separately,
+//     per request, because the catalog is editable at runtime (RF-USR-05).
 //   - **A missing email and a wrong password must cost the same.** Without the padding
 //     hash a missing user returns in microseconds while a real comparison takes ~250ms,
 //     which is a free "does this address have an account?" oracle for anyone with a
@@ -169,6 +173,7 @@ class Auth {
       roleId: user.role_id,
       role: user.role_name,
       areaId: user.primary_area_id ?? null,
+      tokenVersion: user.token_version,
     };
   }
 
@@ -190,9 +195,10 @@ class Auth {
         fullName: user.fullName,
         roleId: user.roleId,
         role: user.role,
-        // Good enough to render a screen, not to record history: this claim is up to seven
-        // days old, so logs.area_id is resolved by query.insertLog() instead.
         areaId: user.areaId ?? null,
+        // Compared against the row on every request. A bump elsewhere makes every token
+        // minted before it stop verifying, which is the whole revocation mechanism.
+        tokenVersion: user.tokenVersion ?? 0,
       })
         .setProtectedHeader({ alg: "HS256" })
         // `sub` is the registered claim for the subject; jose requires a string.
@@ -206,12 +212,18 @@ class Auth {
   }
 
   /**
-   * Verifies signature, expiry, issuer, audience and purpose, returning the same shape
+   * Verifies signature, expiry, issuer, audience and purpose, then that the account is
+   * still live and still at the token's `token_version`. Returns the same shape
    * authenticate() does -- so `req.user` means one thing either way.
+   *
+   * Role and area come from the row, not from the claims: the same read that proves the
+   * token has not been revoked is already paid for, and taking them from a week-old token
+   * is what made a role change wait seven days to take effect.
    *
    * @param {string} token
    * @returns {Promise<object>}
-   * @throws {ApiError} 401 for every failure mode jose distinguishes.
+   * @throws {ApiError} 401 for every failure mode jose distinguishes, for a deleted
+   *   account, and for a revoked token.
    */
   async verifyToken(token) {
     try {
@@ -226,14 +238,21 @@ class Auth {
         throw ApiError.unauthorized("Invalid or expired token.");
       }
 
+      // Last, and deliberately so. Every check above is answerable from the token alone,
+      // and each one refuses for its own reason; putting the lookup first would make a
+      // forged or expired token fail as "no such user" instead.
+      const user = await query.getAuthUserById(Number(payload.sub));
+      if (!user || user.token_version !== (payload.tokenVersion ?? 0)) {
+        throw ApiError.unauthorized("Invalid or expired token.");
+      }
+
       return {
-        id: Number(payload.sub),
-        email: payload.email,
-        fullName: payload.fullName,
-        roleId: payload.roleId,
-        role: payload.role,
-        // `?? null` so a token minted before this claim existed still reads as one shape.
-        areaId: payload.areaId ?? null,
+        id: user.id,
+        email: user.email,
+        fullName: user.full_name,
+        roleId: user.role_id,
+        role: user.role_name,
+        areaId: user.primary_area_id ?? null,
       };
     } catch (err) {
       // A missing JWT_SECRET is a server bug, not a bad token -- a 401 would have clients
@@ -321,6 +340,7 @@ class Auth {
       roleId: user.role_id,
       role: user.role_name,
       areaId: user.primary_area_id ?? null,
+      tokenVersion: user.token_version,
     };
 
     return { user: subject, token: await this.issueToken(subject) };
