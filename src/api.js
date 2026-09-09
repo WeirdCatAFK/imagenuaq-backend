@@ -6,6 +6,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 
 import healthRouter from './routes/health.js';
+import spreadsheetsRouter from './routes/spreadsheets.js';
 import authRouter from './routes/auth.js';
 import usersRouter from './routes/users.js';
 import docsRouter from './routes/docs.js';
@@ -16,6 +17,7 @@ import { errorHandler } from './middlewares/errorHandler.js';
 // each, so the URL comes from a single place.
 export const ROUTERS = {
   health: healthRouter,
+  spreadsheets: spreadsheetsRouter,
   auth: authRouter,
   users: usersRouter,
   // Swagger UI and the raw document, at /api/docs and /api/docs/openapi.json. It belongs
