@@ -495,3 +495,57 @@ distinta en cada fila.
 **Lo que sigue pendiente:** no hay ruta para *leer* la bitácora. `audit.forTarget()` y
 `audit.forAreas()` están escritos y probados, pero sin endpoint ni pantalla, así que hoy la
 bitácora se consulta por `psql`.
+
+### 5.7 Una sesión no se podía revocar, solo esperar a que caducara — cerrado
+
+Las cuentas se borran en suave: se marca `deleted_at` y `uq_users_email_live` libera la
+dirección. Lo que eso no hacía era terminar la sesión que la persona ya tenía en la mano.
+La sesión es un JWT sin estado y `verifyToken()` no releía `users`, así que una cuenta dada
+de baja seguía sirviendo hasta siete días —`TOKEN_TTL`— y la única palanca era rotar
+`JWT_SECRET`, que cierra la sesión de **todos**, no la de una.
+
+Se toleraba mientras no hubiera forma de dar de baja por HTTP. Al abrir
+`DELETE /api/users/:id` dejó de tolerarse: un endpoint que responde 200 y deja la cuenta
+usable es peor que no tenerlo.
+
+**Lo que se hace:** `users.token_version integer NOT NULL DEFAULT 0`. `issueToken()` lo
+firma, `verifyToken()` lo compara contra la fila, y `query.deleteUser()` lo incrementa **en
+la misma sentencia** que marca `deleted_at` —dos sentencias dejarían una ventana en la que
+la cuenta ya no existe y su token todavía sirve, que es justo el hueco que la columna vino
+a cerrar.
+
+**Rechazado:** un `TOKEN_TTL` más corto acorta la ventana sin cerrarla, y la paga con un
+login cada pocas horas para todo el mundo. Rechazada también una tabla de sesiones o una
+lista de revocación: son un segundo almacén que mantener, y ninguno hace falta cuando la
+fila del usuario ya se está leyendo.
+
+**El costo, que es una reversión y conviene decirlo:** `verifyToken()` ahora hace una
+lectura por llave primaria en cada petición autenticada, donde antes no leía nada y
+`requireRole()` salía gratis. A decenas de usuarios y baja concurrencia es el precio
+correcto, y compra algo más que la revocación: `role`, `roleId` y `areaId` salen de la fila
+y no del token, así que un cambio de rol o de área surte efecto en la petición siguiente en
+vez de esperar a que el token caduque. Los permisos siguen sin leerse ahí —
+`requirePermission()` los consulta aparte, porque el catálogo es editable en tiempo de
+ejecución (`RF-USR-05`).
+
+### 5.8 La foto de perfil apuntaba a un almacén que nadie encendió — cerrado
+
+`schema-proofing` §6 cambió `avatar_url text` por `avatar_file_id bigint REFERENCES
+files (id)`, para que la foto fuera un objeto más del almacén direccionado por contenido.
+Es el mejor modelo y no se revierte por sus méritos: `storage.js` está escrito pero **no
+conectado** —nadie llama a `openVolumes()`— y conectarlo es I8. Mientras tanto,
+`query.js` traía dos métodos, `updateProfilePicture` y `getUserProfilePicture`, que leían y
+escribían una columna `profile_picture` que **nunca existió**: código muerto con forma de
+función.
+
+**Lo que se hace:** `profile_picture bytea` y `profile_picture_mime varchar(100)`, con un
+`CHECK (num_nonnulls(...) IN (0, 2))` —el mismo patrón de `logs_target_complete`— porque
+unos bytes sin tipo no le dicen al navegador si mira un PNG o un JPEG, y un tipo sin bytes
+no es nada. Se elimina `avatar_file_id` en la misma migración: dos columnas para un mismo
+hecho es exactamente la falla que `schema-proofing` existía para corregir, y nada la
+escribía nunca, así que no se pierde dato alguno.
+
+**Es deuda declarada, no una decisión de arquitectura.** Cuando I8 conecte el almacén, el
+camino de vuelta es el Down de esta migración: reponer `avatar_file_id`, migrar los bytes a
+`files` y soltar la columna. Ningún `RF-*` pide la foto de perfil; conviene saberlo antes de
+defenderla.

@@ -39,11 +39,6 @@ class Query {
     return row?.ok === 1;
   }
 
-  async serverVersion() {
-    const [row] = await this.#rows("select version() as version");
-    return row?.version ?? null;
-  }
-
   // --- Auth ---
 
   /**
@@ -61,6 +56,7 @@ class Query {
               u.password_hash,
               u.role_id,
               u.primary_area_id,
+              u.token_version,
               r.name as role_name
          from users u
          join roles r on r.id = u.role_id
@@ -102,6 +98,7 @@ class Query {
               u.password_hash,
               u.role_id,
               u.primary_area_id,
+              u.token_version,
               r.name as role_name
          from users u
          join roles r on r.id = u.role_id
@@ -182,6 +179,11 @@ class Query {
     );
     return row;
   }
+  /**
+   * One live user, every column.
+   *
+   * @returns {Promise<object | null>}
+   */
   async getUser(userId) {
     const [row] = await this.#rows(
       `select * from users where id = $1 and deleted_at is null`,
@@ -189,6 +191,60 @@ class Query {
     );
     return row ?? null;
   }
+
+  /**
+   * A page of users with their role name, newest filters applied. One statement serves
+   * every combination: a null filter parameter disables its own predicate.
+   *
+   * @param {object} [options]
+   * @param {number|null} [options.areaId] Restrict to members of this area.
+   * @param {number|null} [options.roleId]
+   * @param {boolean} [options.includeDeleted] Soft-deleted rows are excluded by default.
+   * @param {number} [options.limit]
+   * @param {number} [options.offset]
+   * @returns {Promise<object[]>}
+   */
+  async listUsers({
+    areaId = null,
+    roleId = null,
+    includeDeleted = false,
+    limit = 50,
+    offset = 0,
+  } = {}) {
+    return this.#rows(
+      `select u.*, r.name as role_name
+         from users u
+         join roles r on r.id = u.role_id
+        where ($1::boolean or u.deleted_at is null)
+          and ($2::bigint is null or u.role_id = $2::bigint)
+          and ($3::bigint is null or exists (
+                select 1 from area_members m
+                 where m.user_id = u.id and m.area_id = $3::bigint))
+        order by u.full_name, u.id
+        limit $4 offset $5`,
+      [includeDeleted, roleId, areaId, limit, offset],
+    );
+  }
+
+  /**
+   * How many rows listUsers() would return without its page window.
+   *
+   * @returns {Promise<number>}
+   */
+  async countUsers({ areaId = null, roleId = null, includeDeleted = false } = {}) {
+    const [row] = await this.#rows(
+      `select count(*)::int as total
+         from users u
+        where ($1::boolean or u.deleted_at is null)
+          and ($2::bigint is null or u.role_id = $2::bigint)
+          and ($3::bigint is null or exists (
+                select 1 from area_members m
+                 where m.user_id = u.id and m.area_id = $3::bigint))`,
+      [includeDeleted, roleId, areaId],
+    );
+    return row?.total ?? 0;
+  }
+
   /**
    * Updates every column in one statement. The caller passes merged values — a partial
    * update would mean building SQL by concatenation.
@@ -221,9 +277,20 @@ class Query {
     );
     return row ?? null;
   }
+  /**
+   * Soft-deletes an account and revokes its outstanding sessions in the same statement.
+   *
+   * The bump belongs here rather than in a second call: between two statements there is a
+   * window where the account is gone and its token still works, which is the exact hole
+   * this column was added to close.
+   *
+   * @returns {Promise<object | null>} The deleted row, or null if it was already gone.
+   */
   async deleteUser(userId) {
     const [row] = await this.#rows(
-      `update users set deleted_at = now()
+      `update users
+          set deleted_at = now(),
+              token_version = token_version + 1
         where id = $1 and deleted_at is null
         returning *`,
       [userId],
@@ -232,66 +299,46 @@ class Query {
   }
   // --- User Helpers ---
 
-  /** Stores a profile picture. The caller resizes to 256x256 PNG first. */
-  async updateProfilePicture(userId, pictureBinary) {
+  /**
+   * Stores a profile picture and its type, or clears both when `data` is null.
+   *
+   * @param {number} userId
+   * @param {{ data: Buffer | null, mime: string | null }} picture
+   * @returns {Promise<object | null>} The updated row, or null if no live user matched.
+   */
+  async updateProfilePicture(userId, { data, mime }) {
     const [row] = await this.#rows(
-      `update users set profile_picture = $2
+      `update users
+          set profile_picture = $2,
+              profile_picture_mime = $3
         where id = $1 and deleted_at is null
-        returning *`,
-      [userId, pictureBinary],
+        returning id`,
+      [userId, data, mime],
     );
     return row ?? null;
   }
+  /**
+   * The stored picture and its type, or null when there is none.
+   *
+   * @returns {Promise<{ data: Buffer, mime: string } | null>}
+   */
   async getUserProfilePicture(userId) {
     const [row] = await this.#rows(
-      `select profile_picture from users where id = $1 and deleted_at is null`,
+      `select profile_picture, profile_picture_mime
+         from users where id = $1 and deleted_at is null`,
       [userId],
     );
-    return row?.profile_picture ?? null;
-  }
-  async getUserEmailById(userId) {
-    const [row] = await this.#rows(
-      `select email from users where id = $1 and deleted_at is null`,
-      [userId],
-    );
-    return row?.email ?? null;
-  }
-  async getUserIdByEmail(email) {
-    const [row] = await this.#rows(
-      `select id from users where email = $1 and deleted_at is null`,
-      [email],
-    );
-    return row?.id ?? null;
+    if (!row?.profile_picture) return null;
+    return { data: row.profile_picture, mime: row.profile_picture_mime };
   }
 
   /**
-   * Searches live users by email.
+   * Searches live users on either name or address, case-insensitively.
    *
-   * @param {string} email
+   * @param {string} query Matched as a substring.
    * @param {number} [length] Maximum rows.
+   * @returns {Promise<object[]>} id, email and full_name only.
    */
-  async searchUsersByEmail(email, length = 50) {
-    const rows = await this.#rows(
-      `select id, email, full_name from users
-        where lower(email) like lower($1)
-          and deleted_at is null
-        order by email
-        limit $2`,
-      [`%${email}%`, length],
-    );
-    return rows;
-  }
-  async searchUsersByFullName(fullName, length = 50) {
-    const rows = await this.#rows(
-      `select id, email, full_name from users
-        where lower(full_name) like lower($1)
-          and deleted_at is null
-        order by full_name
-        limit $2`,
-      [`%${fullName}%`, length],
-    );
-    return rows;
-  }
   async searchUsersByEmailOrFullName(query, length = 50) {
     const rows = await this.#rows(
       `select id, email, full_name from users
@@ -337,6 +384,11 @@ class Query {
     const id = Number.isInteger(n) && n > 0 ? n : null;
     const [row] = await this.#rows(sql, [id, String(ref)]);
     return row ?? null;
+  }
+
+  /** The whole catalogue, for a form that has to name one. Ordered for a <select>. */
+  async getContractTypes() {
+    return this.#rows("select id, name from contract_types order by name");
   }
 
   /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
@@ -551,14 +603,6 @@ class Query {
     return row ?? null;
   }
 
-  async getAreaDescriptionById(areaId) {
-    const [row] = await this.#rows(
-      "select description from areas where id = $1",
-      [areaId],
-    );
-    return row?.description ?? null;
-  }
-
   /** Upserts a membership, so adding a leader and promoting a member are the same call. */
   async setAreaMembership(userId, areaId, isAreaLeader) {
     const [row] = await this.#rows(
@@ -582,18 +626,6 @@ class Query {
     return row ?? null;
   }
 
-  /** A user's memberships, optionally narrowed to one area. A user can be in several. */
-  async getAreaMemberships(userId, areaId = null) {
-    const rows = await this.#rows(
-      `select area_id, is_area_leader
-         from area_members
-        where user_id = $1
-          and ($2::bigint is null or area_id = $2::bigint)`,
-      [userId, areaId],
-    );
-    return rows;
-  }
-
   /**
    * A user's areas with their names joined in. getAreaMemberships() is the id-only
    * version that authorisation checks use.
@@ -606,6 +638,25 @@ class Query {
         where am.user_id = $1
         order by a.name`,
       [userId],
+    );
+    return rows;
+  }
+
+  /**
+   * The areas of a SET of users, for the same reason getAreaMembersForAreas() exists:
+   * shaping a page of users is then two queries rather than one plus N.
+   *
+   * @param {number[]} userIds
+   * @returns {Promise<object[]>} Rows carry `user_id` so the caller can group them.
+   */
+  async getAreasForUsers(userIds) {
+    const rows = await this.#rows(
+      `select am.user_id, a.id, a.name, am.is_area_leader
+         from area_members am
+         join areas a on a.id = am.area_id
+        where am.user_id = any(coalesce($1::bigint[], '{}'::bigint[]))
+        order by a.name`,
+      [this.#idArray(userIds)],
     );
     return rows;
   }
@@ -956,31 +1007,6 @@ class Query {
     return rows;
   }
 
-  async getUserRoleIdById(userId) {
-    const [row] = await this.#rows(
-      `select role_id from users where id = $1 and deleted_at is null`,
-      [userId],
-    );
-    return row?.role_id ?? null;
-  }
-
-  /**
-   * Every permission code a user holds, through their role.
-   *
-   * @returns {Promise<string[]>}
-   */
-  async getUserPermissionCodesById(userId) {
-    const rows = await this.#rows(
-      `select p.code
-         from users u
-         join role_permissions rp on rp.role_id = u.role_id
-         join permissions p on p.id = rp.permission_id
-        where u.id = $1 and u.deleted_at is null
-        order by p.code`,
-      [userId],
-    );
-    return rows.map((row) => row.code);
-  }
 }
 
 export default new Query();

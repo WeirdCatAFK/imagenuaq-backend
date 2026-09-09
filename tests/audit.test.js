@@ -340,8 +340,12 @@ describe('the audit trail', () => {
       // Moved after the token was signed. The token still says `before`.
       await sql('update users set primary_area_id = $2 where id = $1', [mover.id, after.id]);
 
+      // The token's own `areaId` claim still says `before` -- it was signed before the move
+      // and claims are immutable. What /me answers no longer comes from it: verifyToken()
+      // rebuilds the subject from the row, so the response already follows the move. The
+      // trail below has to do the same for a different reason, and by a different route.
       const me = await server.get('/api/auth/me', { token: staleToken });
-      assert.equal(me.body.user.areaId, before.id, 'the token is a snapshot, as documented');
+      assert.equal(me.body.user.areaId, after.id, 'the subject is rebuilt from the row');
 
       await server.post('/api/auth/login', {
         body: { email: 'cambia@uaq.mx', password: PASSWORD },

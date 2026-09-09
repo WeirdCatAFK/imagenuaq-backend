@@ -11,6 +11,7 @@ import authRouter from './routes/auth.js';
 import usersRouter from './routes/users.js';
 import areasRouter from './routes/areas.js';
 import rolesRouter from './routes/roles.js';
+import contractTypesRouter from './routes/contractTypes.js';
 import docsRouter from './routes/docs.js';
 import { requestContext } from './middlewares/context.js';
 import { notFound } from './middlewares/notFound.js';
@@ -26,6 +27,8 @@ export const ROUTERS = {
   users: usersRouter,
   areas: areasRouter,
   roles: rolesRouter,
+  // Quoted because the key IS the URL segment: /api/contract-types, not /api/contractTypes.
+  'contract-types': contractTypesRouter,
   // Swagger UI and the raw document, at /api/docs and /api/docs/openapi.json. It belongs
   // in this map rather than beside the `/` handler below because it is mounted the same
   // way everything else is; the only thing unusual about it is that it serves no data.

@@ -108,6 +108,16 @@ export const roleId = (name) => query.getRoleIdByName(name);
 export const areaId = async (name) => (await query.findArea(name))?.id ?? null;
 export const contractTypeId = async () => (await query.firstContractType()).id;
 
+// Areas are looked up by their REAL name, which for one created by createArea() includes
+// TEST_PREFIX -- pass `area.name`, not the string handed to createArea. Returning null for
+// a name that resolves to nothing would create a user with no area and fail somewhere else
+// entirely, so this refuses instead. Seeded names ('Diseño Web') are found unprefixed.
+async function requireAreaId(name) {
+  const id = await areaId(name);
+  if (id === null) throw new Error(`Fixture area not found: ${name}`);
+  return id;
+}
+
 // A user exactly as POST /api/users leaves them: a row with no password, reachable only
 // through an invite.
 export async function createPending({
@@ -122,7 +132,7 @@ export async function createPending({
     fullName,
     roleId: await roleId(role),
     contractTypeId: await contractTypeId(),
-    primaryAreaId: area === null ? null : await areaId(area),
+    primaryAreaId: area === null ? null : await requireAreaId(area),
     birthday: null,
     isAreaLeader,
   });
@@ -140,9 +150,18 @@ export async function createActive(options) {
 
 // Users are soft-deleted, and almost every rule about them turns on that column: login
 // refuses them, invites refuse them, and uq_users_email_live frees their address for
-// reuse. There is no endpoint for it yet, so the tests set it directly.
+// reuse. DELETE /api/users/:id now does this properly; this stays for the cases that need
+// a deleted row as *setup* rather than as the thing under test, so they do not depend on
+// an endpoint they are not exercising.
+//
+// It bumps token_version for the same reason the endpoint does. Without that a test could
+// soft-delete a user here and still find their token working, which is true of this helper
+// and false of the API -- a difference that would be read as a bug in the wrong place.
 export async function softDelete(userId) {
-  await sql('update users set deleted_at = now() where id = $1', [userId]);
+  await sql(
+    'update users set deleted_at = now(), token_version = token_version + 1 where id = $1',
+    [userId],
+  );
 }
 
 export async function findUser(userId) {

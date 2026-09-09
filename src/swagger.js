@@ -186,6 +186,14 @@ export function buildOpenApiDocument() {
           "coordination's.",
       },
       {
+        name: 'contract-types',
+        description:
+          'The schemes of employment RF-AUS-02 names, read-only. A form creating an ' +
+          'account has to name one, and the ids are per-database. Adding a scheme is a ' +
+          'migration; how many days each one grants is `contract_type_entitlements` ' +
+          '(RF-AUS-04), not this list.',
+      },
+      {
         name: 'roles',
         description:
           'The role catalogue and the permissions each role grants. `admin` and `finance` ' +
@@ -205,8 +213,9 @@ export function buildOpenApiDocument() {
           bearerFormat: 'JWT',
           description:
             'The `token` returned by `POST /api/auth/login` or `POST /api/auth/activate`. ' +
-            'HS256, valid seven days. Nothing re-reads the database on a verified token, ' +
-            'so a revoked account stays valid until it expires.',
+            'HS256, valid seven days -- but the user row is re-read on every request, so ' +
+            'a deleted account stops working at once, and role, area and name are always ' +
+            'the current ones rather than the ones the token was signed with.',
         },
       },
       schemas: {
@@ -348,6 +357,94 @@ export function buildOpenApiDocument() {
           type: 'object',
           properties: { inviteToken: { type: 'string' } },
           required: ['inviteToken'],
+        },
+        // The two read shapes. RF-USR-03 lets any colleague see who else is in the
+        // organisation, so `User` is what every signed-in caller gets; `UserAdmin` adds the
+        // fields that are coordination's business and nobody else's.
+        UserArea: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 3 },
+            name: { type: 'string', example: 'Diseño Gráfico' },
+            isAreaLeader: { type: 'boolean', example: false },
+          },
+          required: ['id', 'name', 'isAreaLeader'],
+        },
+        User: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 12 },
+            fullName: { type: 'string', example: 'Ana Gómez' },
+            email: { type: 'string', format: 'email' },
+            role: { type: ['string', 'null'], example: 'worker' },
+            roleId: { type: 'integer', example: 1 },
+            primaryAreaId: { type: ['integer', 'null'], example: 3 },
+            areas: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/UserArea' },
+            },
+          },
+          required: ['id', 'fullName', 'email', 'role', 'roleId', 'primaryAreaId'],
+        },
+        UserAdmin: {
+          allOf: [
+            { $ref: '#/components/schemas/User' },
+            {
+              type: 'object',
+              properties: {
+                contractTypeId: { type: ['integer', 'null'] },
+                birthday: { type: ['string', 'null'], format: 'date' },
+                createdAt: { type: 'string', format: 'date-time' },
+                deletedAt: {
+                  type: ['string', 'null'],
+                  format: 'date-time',
+                  description:
+                    'Non-null only when the caller asked for includeDeleted, which is ' +
+                    'honoured for an admin and ignored for anybody else.',
+                },
+              },
+            },
+          ],
+        },
+        UserListResponse: {
+          type: 'object',
+          properties: {
+            users: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/UserAdmin' },
+            },
+            total: {
+              type: 'integer',
+              description: 'Matching rows before the page window is applied.',
+            },
+            limit: { type: 'integer' },
+            offset: { type: 'integer' },
+          },
+          required: ['users', 'total', 'limit', 'offset'],
+        },
+        UserSearchResult: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            fullName: { type: 'string' },
+            email: { type: 'string', format: 'email' },
+          },
+          required: ['id', 'fullName', 'email'],
+        },
+        UpdateUserRequest: {
+          type: 'object',
+          description:
+            'Partial: only the keys present are changed, merged against the current row. ' +
+            'The role is deliberately absent -- changing what somebody may do belongs with ' +
+            'the role catalogue (RF-USR-02), not the profile form.',
+          properties: {
+            fullName: { type: 'string', maxLength: 200 },
+            email: { type: 'string', format: 'email', maxLength: 320 },
+            birthday: { type: ['string', 'null'], format: 'date' },
+            contractTypeId: { type: 'integer', minimum: 1 },
+            primaryAreaId: { type: ['integer', 'null'], minimum: 1 },
+            scheduleId: { type: ['integer', 'null'], minimum: 1 },
+          },
         },
         Area: {
           type: 'object',
@@ -491,6 +588,18 @@ export function buildOpenApiDocument() {
           },
           required: ['userId', 'areaId', 'isAreaLeader'],
         },
+        ContractType: {
+          type: 'object',
+          description:
+            'A scheme of employment (RF-AUS-02). The id differs per database -- it comes ' +
+            'from a sequence, not from the requirement -- so a client picks by name and ' +
+            'sends the id back, never the other way round.',
+          properties: {
+            id: { type: 'integer', example: 11 },
+            name: { type: 'string', maxLength: 200, example: 'Becario' },
+          },
+          required: ['id', 'name'],
+        },
         Role: {
           type: 'object',
           properties: {
@@ -499,9 +608,9 @@ export function buildOpenApiDocument() {
               type: 'string',
               maxLength: 50,
               description:
-                'The stable identifier requireRole() compares. Renaming a role locks out ' +
-                'everyone holding a live token until they log in again, because nothing ' +
-                're-reads the database on a verified one.',
+                'The stable identifier requireRole() compares. A rename takes effect on ' +
+                'the holder\'s next request, because verifyToken() reads `role` from the ' +
+                'user row rather than from the token.',
               example: 'area_lead',
             },
             description: { type: ['string', 'null'] },
@@ -757,6 +866,43 @@ export function buildOpenApiDocument() {
         },
       },
       '/api/users': {
+        get: {
+          tags: ['users'],
+          summary: 'List staff',
+          description:
+            'Any signed-in caller: RF-USR-03 lets everyone see their colleagues. An admin ' +
+            'additionally gets contract type, birthday and timestamps, and is the only ' +
+            'caller for whom `includeDeleted` is honoured.',
+          parameters: [
+            {
+              name: 'areaId',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description: 'Only members of this area.',
+            },
+            {
+              name: 'roleId',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+            },
+            {
+              name: 'includeDeleted',
+              in: 'query',
+              schema: { type: 'boolean' },
+              description: 'Admin only; ignored for anybody else.',
+            },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 } },
+          ],
+          responses: {
+            200: jsonResponse('A page of staff.', 'UserListResponse'),
+            400: errorResponse(
+              'A filter is not a positive integer.',
+              'areaId must be a positive integer.',
+            ),
+            401: UNAUTHORIZED,
+          },
+        },
         post: {
           tags: ['users'],
           summary: 'Create a staff account and mint its invitation',
@@ -831,6 +977,147 @@ export function buildOpenApiDocument() {
               'The account already has a password, so there is nothing to invite it to.',
               'This account is already active.',
             ),
+          },
+        },
+      },
+      '/api/users/search': {
+        get: {
+          tags: ['users'],
+          summary: 'Search staff by name or address',
+          description:
+            'Declared before `/api/users/{id}` so Express does not capture `search` as an ' +
+            'id. Returns the narrow shape a picker needs, never the admin one.',
+          parameters: [
+            {
+              name: 'q',
+              in: 'query',
+              required: true,
+              schema: { type: 'string', minLength: 2 },
+              description: 'Matched as a substring of the name or the address.',
+            },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } },
+          ],
+          responses: {
+            200: wrapped('The matches.', 'users', 'UserSearchResult', true),
+            400: errorResponse(
+              'The query is shorter than two characters.',
+              'Search query must be at least 2 characters.',
+            ),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/users/{id}': {
+        get: {
+          tags: ['users'],
+          summary: 'One staff member',
+          parameters: [pathId('id', 'users.id')],
+          responses: {
+            200: wrapped('The user, wider when the caller is an admin.', 'user', 'UserAdmin'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid user id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such user, or it is soft-deleted.', 'User not found.'),
+          },
+        },
+        patch: {
+          tags: ['users'],
+          summary: 'Edit a staff account',
+          description:
+            'Admin only. Partial: the current row is read and merged, so omitting a key ' +
+            'leaves it alone.',
+          parameters: [pathId('id', 'users.id')],
+          requestBody: jsonBody('UpdateUserRequest'),
+          responses: {
+            200: wrapped('The updated user.', 'user', 'UserAdmin'),
+            400: errorResponse(
+              'A field is malformed, or names a contract type, area or schedule that does ' +
+                'not exist.',
+              'Unknown contractTypeId.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such user.', 'User not found.'),
+            409: errorResponse(
+              'The address belongs to another live account.',
+              'A user with that email address already exists.',
+            ),
+          },
+        },
+        delete: {
+          tags: ['users'],
+          summary: 'Soft-delete a staff account and revoke its sessions',
+          description:
+            'Admin only. Sets `deleted_at` and bumps `token_version` in the same ' +
+            'statement, so the account stops working immediately rather than when its ' +
+            'token expires. The address becomes reusable -- the unique index is partial.',
+          parameters: [pathId('id', 'users.id')],
+          responses: {
+            200: wrapped('The account as it stood when deleted.', 'user', 'UserAdmin'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid user id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such user, or it was already deleted.', 'User not found.'),
+          },
+        },
+      },
+      '/api/users/{id}/picture': {
+        get: {
+          tags: ['users'],
+          summary: 'A profile picture',
+          description: 'Served back as the type it was uploaded with.',
+          parameters: [pathId('id', 'users.id')],
+          responses: {
+            200: {
+              description: 'The image bytes.',
+              content: {
+                'image/png': { schema: { type: 'string', format: 'binary' } },
+                'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+                'image/webp': { schema: { type: 'string', format: 'binary' } },
+              },
+            },
+            400: errorResponse('The id is not a positive integer.', 'Invalid user id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such user, or no picture set.', 'No profile picture set.'),
+          },
+        },
+        put: {
+          tags: ['users'],
+          summary: 'Replace a profile picture',
+          description:
+            'Admin only. The body is the raw image, not multipart -- the framework has its ' +
+            'own express.raw() parser, so no upload dependency is needed. Capped at 2 MB.',
+          parameters: [pathId('id', 'users.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'image/png': { schema: { type: 'string', format: 'binary' } },
+              'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+              'image/webp': { schema: { type: 'string', format: 'binary' } },
+            },
+          },
+          responses: {
+            204: { description: 'Stored.' },
+            400: errorResponse(
+              'The body is empty or the type is not one of the three accepted.',
+              'Content-Type must be one of: image/png, image/jpeg, image/webp.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such user.', 'User not found.'),
+            413: errorResponse('The image is larger than 2 MB.'),
+          },
+        },
+        delete: {
+          tags: ['users'],
+          summary: 'Remove a profile picture',
+          description: 'Admin only. Clears the bytes and the type together.',
+          parameters: [pathId('id', 'users.id')],
+          responses: {
+            204: { description: 'Removed, or there was nothing to remove.' },
+            400: errorResponse('The id is not a positive integer.', 'Invalid user id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such user.', 'User not found.'),
           },
         },
       },
@@ -1095,6 +1382,21 @@ export function buildOpenApiDocument() {
       // the grants these endpoints write are what requirePermission() reads, so gating them
       // on one would make an empty role_permissions unrecoverable over HTTP.
 
+      '/api/contract-types': {
+        get: {
+          tags: ['contract-types'],
+          summary: 'List every contract scheme',
+          description:
+            'Readable by any signed-in user. `users.contract_type_id` is NOT NULL, so the ' +
+            'form that creates an account has to name one of these -- and hard-coding the ' +
+            'ids is not an option, because they come from a sequence and differ per ' +
+            'database.',
+          responses: {
+            200: wrapped('Every scheme, by name.', 'contractTypes', 'ContractType', true),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
       '/api/roles': {
         get: {
           tags: ['roles'],

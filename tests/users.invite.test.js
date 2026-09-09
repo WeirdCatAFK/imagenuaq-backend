@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import {
   reset,
+  resetCases,
   createPending,
   createActive,
   softDelete,
@@ -18,6 +19,8 @@ describe('POST /api/users/:id/invite', () => {
   let server;
   let adminToken;
 
+  const ACCOUNTS = ['coordinacion@uaq.mx'];
+
   before(async () => {
     server = await startServer();
     await reset();
@@ -29,7 +32,9 @@ describe('POST /api/users/:id/invite', () => {
     await server.close();
   });
 
-  beforeEach(reset);
+  // Keeps the admin account: verifyToken() re-reads the user row, so truncating it would
+  // revoke the token minted in before() and answer 401 to every case below.
+  beforeEach(() => resetCases(ACCOUNTS));
 
   const reinvite = (id, token = adminToken) =>
     server.post(`/api/users/${id}/invite`, { token });

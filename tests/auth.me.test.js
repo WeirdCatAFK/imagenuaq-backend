@@ -2,7 +2,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { startServer } from './helpers/server.js';
-import { reset, createActive, createPending, tokenFor } from './helpers/fixtures.js';
+import { reset, createActive, createPending, tokenFor, sql } from './helpers/fixtures.js';
 import auth from '../src/access/orchestration/auth.js';
 import * as tokens from './helpers/tokens.js';
 
@@ -150,21 +150,36 @@ describe('GET /api/auth/me', () => {
     });
   });
 
-  // Nothing re-reads the database on a verified token: the role and identity are whatever
-  // the token says for its full seven days. That is a deliberate trade -- documented in
-  // CLAUDE.md, and the reason rotating JWT_SECRET is currently the only revocation lever --
-  // so it is pinned here. If a token_version column ever lands, this is the test that
-  // should change.
-  test('the subject comes from the token, not from a fresh read', async () => {
-    const doomed = await createActive({ email: 'temporal@uaq.mx', fullName: 'Temporal' });
+  // This is the test the old comment here said should change when token_version landed, and
+  // it has: verifyToken() re-reads the user row on every authenticated request, compares
+  // `token_version` against the claim, and builds the subject from the row rather than from
+  // the token. So a signature that is still perfectly valid is no longer sufficient -- the
+  // account behind it has to still exist.
+  test('a token whose account is gone is refused, however valid its signature', async () => {
+    await createActive({ email: 'temporal@uaq.mx', fullName: 'Temporal' });
     const theirToken = await tokenFor(server, 'temporal@uaq.mx');
+
+    assert.equal((await me({ token: theirToken })).status, 200);
 
     await reset();
 
     const res = await me({ token: theirToken });
 
+    assert.equal(res.status, 401);
+    assert.equal(res.body.error.message, 'Invalid or expired token.');
+  });
+
+  // The other half of the same read, and the reason it is worth a round trip: a change made
+  // after the token was signed lands on the next request instead of waiting out seven days.
+  test('the subject follows the row, not the claims it was signed with', async () => {
+    const user = await createActive({ email: 'cambia@uaq.mx', fullName: 'Nombre Viejo' });
+    const theirToken = await tokenFor(server, 'cambia@uaq.mx');
+
+    await sql('update users set full_name = $2 where id = $1', [user.id, 'Nombre Nuevo']);
+
+    const res = await me({ token: theirToken });
+
     assert.equal(res.status, 200);
-    assert.equal(res.body.user.id, doomed.id);
-    assert.equal(res.body.user.email, 'temporal@uaq.mx');
+    assert.equal(res.body.user.fullName, 'Nombre Nuevo');
   });
 });
