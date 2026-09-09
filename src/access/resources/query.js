@@ -1,3 +1,18 @@
+// Tier 2: the ONLY module in the codebase that writes SQL.
+//
+// Everything above it -- orchestration, routes -- composes these methods; nothing below it
+// knows what a table is. Two things bite anybody adding a method here:
+//
+//   - **Parameters are positional.** `$1, $2` in an array, never `:named` in an object:
+//     postgrejs calls .map() on options.params, so an object throws
+//     "params?.map is not a function" at runtime rather than at parse time.
+//   - **Casts are load-bearing.** Postgres infers a parameter's type from its first use,
+//     and a bare null or an `is not null` test gives it nothing, so it fails the statement
+//     with "could not determine data type of parameter $n" rather than the row.
+//
+// Multi-step writes are data-modifying CTEs, not transactions. A CTE is atomic on its own
+// and keeps the tier boundary intact -- opening a transaction would mean handing a
+// connection up to orchestration, which is what this module exists to prevent.
 import { getStore } from "../primitives/database.js";
 
 class Query {
@@ -6,15 +21,13 @@ class Query {
     return result.rows ?? [];
   }
 
-  // postgrejs serialises an EMPTY JavaScript array as '' rather than '{}', and Postgres
-  // rejects that with 22P02, "malformed array literal". An empty set is not an edge case
-  // here -- it is how a role's last permission is revoked -- so every array parameter goes
-  // through this, and the SQL that receives it wraps the cast in
-  // coalesce($n::bigint[], '{}'::bigint[]) to turn the null back into the empty array.
-  //
-  // Fixing it at the driver boundary rather than in each caller: an `if (ids.length)` in
-  // orchestration reads like a performance shortcut, and the day somebody removes it as one
-  // the failure is a 500 on the revoke path only.
+  /**
+   * Normalises an array parameter. postgrejs serialises an empty array as '' and
+   * Postgres rejects that with 22P02, so an empty set becomes null and the SQL
+   * coalesces it back to '{}'.
+   *
+   * @param {Array} ids
+   */
   #idArray(ids) {
     return ids.length ? ids : null;
   }
@@ -32,21 +45,14 @@ class Query {
   }
 
   // --- Auth ---
-  //
-  // Parameters are positional ($1, $2) in an array, never `:named` in an object: postgrejs
-  // calls .map() on options.params, so an object throws "params?.map is not a function" at
-  // runtime rather than at parse time. Nothing else in the codebase takes parameters yet,
-  // so this is the note that saves the next resource an hour.
 
-  // One row with everything a session needs, so authenticating is a single round trip
-  // rather than a login lookup followed by a role lookup. The join is to `roles` and not
-  // just `role_id` because the token carries the role *name*: an integer id in a JWT is
-  // meaningless to the frontend and would have to be resolved on every request anyway.
-  //
-  // `deleted_at is null` matters here more than anywhere else. Users are soft-deleted
-  // (that is what the partial index `uq_users_email_live` is for -- a freed address can be
-  // reused), so without this predicate a removed employee keeps logging in, and a reused
-  // address can match two rows.
+  /**
+   * One live user with the role name joined in: everything a session token needs, in a
+   * single round trip.
+   *
+   * @param {string} email
+   * @returns {Promise<object | null>}
+   */
   async getAuthUserByEmail(email) {
     const [row] = await this.#rows(
       `select u.id,
@@ -65,9 +71,11 @@ class Query {
     return row ?? null;
   }
 
-  // `returning id` rather than a rowcount: the same statement then reports whether the
-  // user existed and was live, so the caller can tell "wrong id" from "wrote nothing"
-  // without a second select.
+  /**
+   * Sets a live user's password hash.
+   *
+   * @returns {Promise<number | null>} The user id, or null when no live row matched.
+   */
   async setPasswordHash(userId, passwordHash) {
     const [row] = await this.#rows(
       `update users
@@ -80,9 +88,12 @@ class Query {
     return row?.id ?? null;
   }
 
-  // Same columns as getAuthUserByEmail, keyed by id. Used by the invite flow, which knows
-  // the user id from the token and must still re-read `password_hash` and `deleted_at`
-  // live -- an invite token minted a week ago says nothing about the row's state now.
+  /**
+   * Same columns as getAuthUserByEmail, keyed by id. The invite flow uses it to re-read
+   * `password_hash` and `deleted_at` live.
+   *
+   * @returns {Promise<object | null>}
+   */
   async getAuthUserById(userId) {
     const [row] = await this.#rows(
       `select u.id,
@@ -101,9 +112,11 @@ class Query {
     return row ?? null;
   }
 
-  // Permission *codes*, not ids. `permissions.code` is the stable machine name the rest
-  // of the code compares against; the surrogate id is an implementation detail of the
-  // join table and would make every call site do another lookup.
+  /**
+   * The permission codes granted to a role.
+   *
+   * @returns {Promise<string[]>}
+   */
   async getRolePermissionCodes(roleId) {
     const rows = await this.#rows(
       `select p.code
@@ -118,20 +131,13 @@ class Query {
 
   // --- Users ---
 
-  // Creates the user and, when an area is given, their membership of it -- in ONE
-  // statement. area_members is not redundant with users.primary_area_id: DATAMODEL.md
-  // §5.2 moved area leadership there precisely because somebody can lead one area and be
-  // a member of another, and the RF-USR-03 / RF-TSK-06 visibility queries read
-  // area_members. A user created without a row there is invisible to their own colleagues.
-  //
-  // A CTE rather than two calls inside a transaction: a data-modifying CTE is atomic on
-  // its own, so this cannot half-succeed, and it keeps the tier boundary intact -- opening
-  // a transaction would mean handing a connection up to orchestration, which is exactly
-  // what `query.js` exists to prevent.
-  //
-  // No password_hash. A user is created without one and reaches it through the invite
-  // flow, so the account cannot be logged into before its owner chooses a secret. That is
-  // also what makes an invite single-use: see completeInvite() in orchestration/auth.js.
+  /**
+   * Creates a user and, when an area is given, their `area_members` row, in one
+   * data-modifying CTE. Writes no password hash: the account is reached through the
+   * invite flow.
+   *
+   * @returns {Promise<object>} The new user row.
+   */
   async createUser({
     email,
     fullName,
@@ -141,9 +147,7 @@ class Query {
     birthday = null,
     isAreaLeader = false,
   }) {
-    // The casts are load-bearing, not decoration. Postgres infers a parameter's type from
-    // its first use, and `$5 is not null` in the second CTE gives it nothing to work with;
-    // without ::bigint it fails with "could not determine data type of parameter $5".
+    // The ::bigint casts are required; Postgres cannot infer $5's type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into users (email, full_name, role_id, contract_type_id,
@@ -185,10 +189,12 @@ class Query {
     );
     return row ?? null;
   }
-  // Every column in one statement, and every one of them mandatory in the argument: a
-  // partial update built by concatenating whichever keys the caller sent would put string
-  // interpolation back into the SQL, which is the one thing this module exists to prevent.
-  // Orchestration reads the row first and passes the merged values -- see Users.update().
+  /**
+   * Updates every column in one statement. The caller passes merged values — a partial
+   * update would mean building SQL by concatenation.
+   *
+   * @returns {Promise<object | null>}
+   */
   async updateUser(
     userId,
     { fullName, contractTypeId, primaryAreaId, birthday, email, scheduleId },
@@ -226,7 +232,7 @@ class Query {
   }
   // --- User Helpers ---
 
-  // pictureBinary higher level  handles that picture is resized at 256x256 and converted to PNG before calling this function.
+  /** Stores a profile picture. The caller resizes to 256x256 PNG first. */
   async updateProfilePicture(userId, pictureBinary) {
     const [row] = await this.#rows(
       `update users set profile_picture = $2
@@ -258,8 +264,12 @@ class Query {
     return row?.id ?? null;
   }
 
-  // The tree search functions have to be a parameter on the api caller to select the type of search.
-  // This way each search doesn't get unupdated data from previous searches
+  /**
+   * Searches live users by email.
+   *
+   * @param {string} email
+   * @param {number} [length] Maximum rows.
+   */
   async searchUsersByEmail(email, length = 50) {
     const rows = await this.#rows(
       `select id, email, full_name from users
@@ -294,15 +304,12 @@ class Query {
     return rows;
   }
 
-  // Catalog lookups for scripts/createAdmin.js, which accepts either an id or a name --
-  // ids come from a sequence and differ per database, so an operator recovering a lockout
-  // cannot be expected to know them. One statement handles both: the id branch is taken
-  // only when the reference parses as a positive integer, which `$1::bigint is not null`
-  // expresses without the caller sending two different queries.
-  //
-  // These live here rather than as raw SQL in the script because query.js is the only
-  // module that writes SQL, and a recovery path is the worst possible place to make an
-  // exception to that -- it is the code that runs when everything else has already failed.
+  /**
+   * Looks a contract type up by id or by name, for scripts/createAdmin.js — an operator
+   * recovering a lockout knows the name, not the sequence id.
+   *
+   * @param {string | number} ref
+   */
   async findContractType(ref) {
     return this.#findCatalog(
       `select id, name from contract_types
@@ -332,8 +339,7 @@ class Query {
     return row ?? null;
   }
 
-  // The fallback when no contract type was named. contract_type_id is NOT NULL and there
-  // is no defensible invented default, so the script picks the first and reports it.
+  /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
   async firstContractType() {
     const [row] = await this.#rows(
       "select id, name from contract_types order by id limit 1",
@@ -348,9 +354,7 @@ class Query {
     return row?.id ?? null;
   }
 
-  // Used only by scripts/createAdmin.js, to report what the recovery it just performed
-  // changed. Live rows only: a soft-deleted admin cannot log in and must not be counted
-  // as one.
+  /** Counts live users holding a role, by role name. Used by scripts/createAdmin.js. */
   async countLiveUsersWithRole(roleName) {
     const [row] = await this.#rows(
       `select count(*)::int as count
@@ -363,9 +367,10 @@ class Query {
     return row?.count ?? 0;
   }
 
-  // Role change and password reset in one statement, for the lockout recovery in
-  // scripts/createAdmin.js. Deliberately NOT exposed through the API: promoting somebody
-  // to admin over HTTP is the one operation whose only safe gate is database access.
+  /**
+   * Changes a user's role and password in one statement, for the lockout recovery in
+   * scripts/createAdmin.js. Deliberately not exposed over HTTP.
+   */
   async promoteToRoleAndSetPassword(userId, roleId, passwordHash) {
     const [row] = await this.#rows(
       `update users
@@ -380,41 +385,21 @@ class Query {
   }
   // --- Audit trail (RF-USR-07) ---
 
-  // The action catalogue keyed by code. `actions.code` is the stable machine name, the id is
-  // whatever the sequence handed out on this machine -- the same reason permissions are
-  // compared by code. Read as a whole and cached by the caller rather than looked up per
-  // write: the catalogue is thirteen rows seeded by a migration, and a lookup per logged
-  // action would double the number of round trips the audit trail costs.
+  /**
+   * The whole action catalogue. Callers cache it; codes are stable, ids are per database.
+   *
+   * @returns {Promise<object[]>}
+   */
   async getActions() {
     const rows = await this.#rows("select id, code, label from actions order by code");
     return rows;
   }
 
-  // One row of the trail. `target_table` and `target_id` travel together or not at all --
-  // `logs_target_complete` enforces `num_nonnulls(...) IN (0, 2)`, because one of the two
-  // is always a mistake while zero is legitimate: `user_login` has no object.
-  //
-  // The casts are load-bearing. `$4` and `$5` are the target pair and are null for the
-  // objectless actions, and `$6`/`$7` are jsonb that arrives as a JavaScript object;
-  // without them Postgres cannot infer a type for a bare null parameter and fails the
-  // statement rather than the row.
-  // `area_id` is resolved by the statement, not by the caller. The obvious source is the
-  // session -- the JWT could carry the area and it would cost nothing to read -- and it is
-  // the wrong one: a token lives seven days and nothing re-reads the database on a verified
-  // one, so somebody moved between areas keeps stamping the old area onto the trail for the
-  // rest of the week. A trail that is confidently wrong about history is worse than one that
-  // is silent about it.
-  //
-  // The subquery is the fix and it is free: the row is being inserted anyway, so resolving
-  // the area inside the same statement adds no round trip and always reads the current
-  // value. There is deliberately no override parameter -- one source means the trail cannot
-  // disagree with itself depending on which call site wrote the row.
-  //
-  // A null `user_id` -- a failed login on an address that matches no account -- resolves to
-  // a null area, which is correct: there is nobody to have an area.
-  //
-  // Deliberately NOT filtered on `deleted_at`: a soft-deleted user's actions still happened,
-  // and belonged to an area when they did.
+  /**
+   * Writes one row of the audit trail. `area_id` is resolved by a subquery inside the
+   * INSERT from the actor's current `primary_area_id`, never passed in. `targetTable`
+   * and `targetId` travel together or not at all (`logs_target_complete`).
+   */
   async insertLog({
     userId,
     actionId,
@@ -443,9 +428,7 @@ class Query {
     return row;
   }
 
-  // The trail for one object, newest first. `idx_logs_target` is the partial index this
-  // rides -- (target_table, target_id) WHERE target_table IS NOT NULL -- so the objectless
-  // rows do not bloat it.
+  /** The trail for one object, newest first. Rides the partial index `idx_logs_target`. */
   async getLogsForTarget(targetTable, targetId, limit = 100) {
     const rows = await this.#rows(
       `select l.id, l.user_id, u.full_name as user_full_name, a.code as action_code,
@@ -464,12 +447,11 @@ class Query {
     return rows;
   }
 
-  // What one area did, newest first. This is the read RF-USR-04 is written in -- a
-  // responsable de área consulting the work of everyone under them -- and the reason
-  // logs.area_id exists at all rather than being derived from area_members at read time.
-  //
-  // Rides idx_logs_area_id, which is (area_id, created_at DESC) partial on area_id NOT NULL:
-  // the same order this query asks for, so the sort is the index walk.
+  /**
+   * The trail for a set of areas, newest first (RF-USR-04). Rides `idx_logs_area_id`.
+   *
+   * @param {number[]} areaIds
+   */
   async getLogsForAreas(areaIds, limit = 100) {
     const rows = await this.#rows(
       `select l.id, l.user_id, u.full_name as user_full_name, a.code as action_code,
@@ -499,10 +481,7 @@ class Query {
     return row;
   }
 
-  // The area and its first leader in ONE statement, for the same reason createUser() puts
-  // the membership in a CTE: a two-call version that fails on the second call leaves an
-  // area nobody is responsible for, and orchestration would have to delete it again from a
-  // catch block -- cleanup that is itself allowed to fail.
+  /** Creates an area and its first leader in one statement, so neither can be orphaned. */
   async createAreaWithLeader({ name, description, userId }) {
     const [row] = await this.#rows(
       `with created as (
@@ -540,10 +519,10 @@ class Query {
     return row ?? null;
   }
 
-  // A hard delete, not a soft one: `areas` has no deleted_at, because every foreign key
-  // into it is NO ACTION and a referenced row therefore cannot be deleted at all. The 23503
-  // that comes back when people are still assigned IS the refusal -- orchestration turns it
-  // into a 409 rather than pre-flighting a count another session can invalidate.
+  /**
+   * Hard delete; `areas` has no `deleted_at`. The 23503 raised while people are still
+   * assigned is the refusal, which orchestration turns into a 409.
+   */
   async deleteArea(areaId) {
     const [row] = await this.#rows(
       `delete from areas
@@ -580,9 +559,7 @@ class Query {
     return row?.description ?? null;
   }
 
-  // Upsert, not insert. Promoting an existing member to leader and adding a new leader are
-  // the same intent expressed twice, and the unique index on (user_id, area_id) makes the
-  // insert-only version fail on the first of them.
+  /** Upserts a membership, so adding a leader and promoting a member are the same call. */
   async setAreaMembership(userId, areaId, isAreaLeader) {
     const [row] = await this.#rows(
       `insert into area_members (user_id, area_id, is_area_leader)
@@ -605,8 +582,7 @@ class Query {
     return row ?? null;
   }
 
-  // A user can be in multiple areas -- RF-USR-03, and the reason schema-proofing moved
-  // leadership here from areas.lead_user_id.
+  /** A user's memberships, optionally narrowed to one area. A user can be in several. */
   async getAreaMemberships(userId, areaId = null) {
     const rows = await this.#rows(
       `select area_id, is_area_leader
@@ -618,10 +594,10 @@ class Query {
     return rows;
   }
 
-  // The same relation as getAreaMemberships, joined out to the areas themselves. Two
-  // methods because the callers differ: an authorisation check wants the ids and nothing
-  // else, a profile page wants the names, and making the hot caller pay for the join is
-  // how an authorisation check gets slow.
+  /**
+   * A user's areas with their names joined in. getAreaMemberships() is the id-only
+   * version that authorisation checks use.
+   */
   async getUserAreas(userId) {
     const rows = await this.#rows(
       `select a.id, a.name, a.description, am.is_area_leader
@@ -656,8 +632,7 @@ class Query {
     return row?.is_member === 1;
   }
 
-  // Leaders first, then alphabetical: the first row is who to ask about this area, which
-  // is what both the org chart node and a task-assignment screen want at the top.
+  /** One area's members, leaders first then alphabetical. */
   async getAreaMembers(areaId) {
     const rows = await this.#rows(
       `select u.id, u.email, u.full_name, r.name as role_name, am.is_area_leader
@@ -672,9 +647,7 @@ class Query {
     return rows;
   }
 
-  // Every member of a SET of areas, for the organisation chart. One statement rather than
-  // getAreaMembers() per node: drawing the whole organisation is then one query for the
-  // tree and one for the people in it, not one plus N.
+  /** Members of a set of areas in one query, so drawing the org chart is not 1+N. */
   async getAreaMembersForAreas(areaIds) {
     const rows = await this.#rows(
       `select am.area_id, u.id, u.email, u.full_name, r.name as role_name,
@@ -692,9 +665,7 @@ class Query {
 
   // --- Area hierarchy (RF-USR-09, RF-USR-04) ---
 
-  // Upsert on the child, because the child is the whole primary key: an area has at most
-  // one parent, so "move this area under that one" must overwrite rather than add a second
-  // line of authority. See the migration for why the key is shaped that way.
+  /** Upserts the child's parent. `child_area_id` is the whole key: one parent per area. */
   async setAreaParent(childAreaId, parentAreaId) {
     const [row] = await this.#rows(
       `insert into area_hierarchy (child_area_id, parent_area_id)
@@ -728,13 +699,10 @@ class Query {
     return row ?? null;
   }
 
-  // Is `candidateId` somewhere below `ancestorId`? The cycle guard for setAreaParent():
-  // hanging an area under one of its own descendants closes a loop that no CHECK can see,
-  // and that the read path can then only survive rather than report.
-  //
-  // The CYCLE clause is on this walk too, not only on the reader below. If the table is
-  // ALREADY corrupt, the check whose job is to catch corruption must not be the thing that
-  // hangs.
+  /**
+   * Cycle guard for setAreaParent(): is `candidateId` below `ancestorId`? Carries a
+   * CYCLE clause so an already-corrupt table cannot hang the check for corruption.
+   */
   async isAreaDescendantOf(candidateId, ancestorId) {
     const [row] = await this.#rows(
       `with recursive descendants as (
@@ -755,17 +723,11 @@ class Query {
     return row?.found === 1;
   }
 
-  // The organisation chart's spine: one row per area, with its parent and its depth.
-  //
-  // A null `rootAreaId` walks the whole forest, anchored on every area that has no parent
-  // row. An id walks that subtree only, which is the shape RF-USR-04's "todos los usuarios
-  // a su cargo" asks for.
-  //
-  // `depth` is computed rather than stored -- see the migration for why a `level` column
-  // was rejected. The CYCLE clause is the seatbelt: a loop written straight into the table
-  // through psql marks the repeated row and stops recursing, so a corrupt hierarchy costs
-  // one truncated branch instead of a request that never returns. Those rows are dropped
-  // rather than returned: a repeat of a node already in the chart is not another node.
+  /**
+   * One row per area with its parent and computed depth. A null `rootAreaId` walks the
+   * whole forest, an id walks that subtree only (RF-USR-04). The CYCLE clause drops
+   * repeated rows instead of recursing forever.
+   */
   async getAreaTreeRows(rootAreaId = null) {
     const rows = await this.#rows(
       `with recursive tree as (
@@ -838,10 +800,10 @@ class Query {
     return row ?? null;
   }
 
-  // The role's users are not reassigned on the way out, and cannot be: users.role_id is
-  // NOT NULL and there is no defensible default to move them to -- choosing one would
-  // silently grant or revoke access on somebody else's behalf. Orchestration counts the
-  // holders and refuses; the foreign key is the backstop when it does not.
+  /**
+   * Deletes a role. Its users are not reassigned — `users.role_id` is NOT NULL with no
+   * defensible default — so orchestration counts the holders and refuses first.
+   */
   async deleteRole(roleId) {
     const [row] = await this.#rows(
       `delete from roles
@@ -852,8 +814,7 @@ class Query {
     return row ?? null;
   }
 
-  // Live rows only: a soft-deleted user cannot log in, so holding a role is not a reason to
-  // keep that role alive.
+  /** Counts live users holding a role. */
   async countUsersWithRole(roleId) {
     const [row] = await this.#rows(
       `select count(*)::int as count
@@ -911,10 +872,7 @@ class Query {
     return row ?? null;
   }
 
-  // role_permissions cascades from here, so deleting a permission revokes it everywhere
-  // rather than leaving grants pointing at nothing. That is the migration's decision, not
-  // this method's; what makes it survivable is that a code is only ever compared by
-  // requirePermission(), which fails closed on one nobody holds.
+  /** Deletes a permission; `role_permissions` cascades, revoking it everywhere. */
   async deletePermission(permissionId) {
     const [row] = await this.#rows(
       `delete from permissions
@@ -927,9 +885,7 @@ class Query {
 
   // --- Role & Permission helpers ---
 
-  // One role's grants, as full rows. getRolePermissionCodes() above returns codes only,
-  // because codes are all requirePermission() compares; an administration screen needs the
-  // labels to show a human what it is about to revoke.
+  /** One role's grants as full rows; getRolePermissionCodes() is the codes-only version. */
   async getRolePermissions(roleId) {
     const rows = await this.#rows(
       `select p.id, p.code, p.label, p.description
@@ -942,8 +898,11 @@ class Query {
     return rows;
   }
 
-  // null when the grant was already there. The caller asked for it to be granted and it is,
-  // so that is not a failure -- it is the difference between a 201 and a 200.
+  /**
+   * Grants a permission to a role.
+   *
+   * @returns {Promise<object | null>} null when the grant already existed.
+   */
   async grantPermissionToRole(roleId, permissionId) {
     const [row] = await this.#rows(
       `insert into role_permissions (role_id, permission_id)
@@ -965,23 +924,17 @@ class Query {
     return row ?? null;
   }
 
-  // Replace a role's whole grant set. One data-modifying CTE and not a delete followed by
-  // an insert, because between those two calls the role holds NOTHING: a request landing in
-  // that window is refused by requirePermission() for a reason that has nothing to do with
-  // it, and if the insert then fails the role stays stripped.
-  //
-  // The revoke arm is `<> all(...)` rather than an unconditional delete, so a grant that
-  // survives the edit is never actually removed and re-added. That matters the day
-  // role_permissions grows a granted_at column.
-  //
-  // Returns what the requested ids resolve to. Fewer rows than ids means one of them names
-  // no permission; orchestration compares the two lengths and refuses.
+  /**
+   * Replaces a role's whole grant set in one CTE, so the role is never momentarily
+   * stripped. A grant that survives the edit is not removed and re-added.
+   *
+   * @returns {Promise<object[]>} The resolved permissions; fewer rows than ids means one
+   *   id names no permission, which orchestration refuses.
+   */
   async setRolePermissions(roleId, permissionIds) {
     const rows = await this.#rows(
-      // The coalesce is spelled out three times rather than hoisted into a CTE: `<> all
-      // (select ids from wanted)` parses as ALL(subquery), whose rows are of type bigint[],
-      // and fails with "operator does not exist: bigint <> bigint[]". Repetition is the
-      // cheaper of the two confusions.
+      // coalesce is repeated rather than hoisted: `<> all (select ...)` would compare
+      // bigint to bigint[].
       `with revoked as (
          delete from role_permissions
           where role_id = $1
@@ -1011,9 +964,11 @@ class Query {
     return row?.role_id ?? null;
   }
 
-  // Plural, and it has to be. An earlier draft destructured the first row and returned one
-  // code, which reads as "this user holds exactly one permission" -- a check against it
-  // fails closed, so nothing would have reported the mistake.
+  /**
+   * Every permission code a user holds, through their role.
+   *
+   * @returns {Promise<string[]>}
+   */
   async getUserPermissionCodesById(userId) {
     const rows = await this.#rows(
       `select p.code

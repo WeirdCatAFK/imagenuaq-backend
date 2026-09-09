@@ -1,37 +1,25 @@
 // The domain event dispatcher.
 //
-// Orchestration announces what happened; whoever cares subscribes. Today the only subscriber
-// is the audit trail (access/orchestration/audit.js, RF-USR-07), but the reason this is a
-// dispatcher and not an `audit.write()` call is that it is already known who subscribes
-// next: RF-EST-03/RF-EST-06 need a notification when a project sits too long in one status,
-// and RF-FLW-04 needs the receiving area told when an approval unlocks the next stage. Those
-// fire on exactly the events written here. A direct call would have each of them re-derive
-// the same facts from inside the same methods.
+// Orchestration announces what happened; whoever cares subscribes. Today the only
+// subscriber is the audit trail (access/orchestration/audit.js, RF-USR-07), but this is a
+// dispatcher rather than an `audit.write()` call because it is already known who
+// subscribes next: RF-EST-03/RF-EST-06 need a notification when a project sits too long in
+// one status, and RF-FLW-04 needs the receiving area told when an approval unlocks the
+// next stage. Both fire on exactly the events written here.
 //
-// **Not** node:events. EventEmitter is the obvious choice and it is wrong for this, twice:
+// **Not** node:events. EventEmitter is the obvious choice and it is wrong twice:
 //
-//   - `emit()` is synchronous and ignores what a listener returns. An async listener that
-//     rejects becomes an unhandled rejection -- which in Node 20 is a process-level crash by
-//     default, so a bad audit write would take the API down rather than be reported.
+//   - `emit()` is synchronous and ignores what a listener returns, so an async listener
+//     that rejects becomes an unhandled rejection -- a process-level crash in Node 20.
 //   - `emit()` returns before an async listener has done anything, so nothing can wait for
-//     the audit row. A test could not assert the row exists without polling, and a request
-//     could finish before its own trail was written.
+//     the audit row and no test can assert it exists without polling.
 //
 // So: `emit()` is awaited, listeners run in sequence, and a listener that throws is
-// contained here rather than escaping into the caller's request.
-
-// An audit failure must not turn a successful change into a 500. If Postgres is unreachable
-// the change being recorded failed too and the caller already has an error; the failure mode
-// unique to this path is a bad action code or a malformed payload, which is a bug in the
-// emit call. Bugs are logged in full and swallowed, exactly as middlewares/errorHandler.js
-// treats a non-ApiError.
-//
-// The cost, stated plainly because it is the one thing to remember: a write can succeed
-// while its audit row does not, and nothing reconciles them. That is acceptable while the
-// audited tables are users, areas and roles. It is NOT obviously acceptable for FIN
-// (RF-FIN-*), whose records need an audit trail with integrity -- when that module lands,
-// the shape that cannot lose a row is a data-modifying CTE writing `logs` in the same
-// statement as the change, the way createUser() already writes `area_members`.
+// contained here. The cost, stated plainly: a write can succeed while its audit row does
+// not, and nothing reconciles them. Acceptable while the audited tables are users, areas
+// and roles; NOT obviously acceptable for FIN, where the shape that cannot lose a row is a
+// data-modifying CTE writing `logs` in the same statement as the change.
+/** Reports a subscriber failure to stderr with the event that caused it. */
 function report(name, event, err) {
   console.error(
     `Event subscriber "${name}" failed for ${event?.action ?? "an event"}:`,
@@ -43,21 +31,27 @@ function report(name, event, err) {
 class Dispatcher {
   #subscribers = new Map();
 
-  // Named, and idempotent on that name. `api.js` subscribes when it builds the app, and a
-  // test file that constructs a second Api in the same process would otherwise register the
-  // audit writer twice and log every action twice -- a duplicate that is invisible until
-  // somebody reads the trail.
+  /**
+   * Registers a subscriber. Idempotent on `name`: registering again replaces.
+   *
+   * @param {string} name
+   * @param {(event: object) => unknown} handler
+   */
   on(name, handler) {
     this.#subscribers.set(name, handler);
   }
 
+  /** @param {string} name */
   off(name) {
     this.#subscribers.delete(name);
   }
 
-  // Sequential, not Promise.all. Subscribers are few and the ordering is worth more than the
-  // concurrency: when the notification subscriber of RF-EST-06 arrives it will want the
-  // audit row already written, so that a notification can cite it.
+  /**
+   * Delivers `event` to every subscriber in registration order, awaiting each. A
+   * subscriber that throws is logged and skipped; it never fails the caller.
+   *
+   * @param {object} event
+   */
   async emit(event) {
     for (const [name, handler] of this.#subscribers) {
       try {
@@ -69,5 +63,4 @@ class Dispatcher {
   }
 }
 
-// A singleton instance, not the class -- the same shape as query.js and health.js.
 export default new Dispatcher();

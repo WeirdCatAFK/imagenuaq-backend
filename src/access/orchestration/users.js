@@ -9,19 +9,21 @@
 // a caller pick their own role_id would make RF-USR-06 -- do not edit what is not yours --
 // unenforceable, because anyone could ask to be coordination. External requesters are not
 // users at all: RF-EXT-03 gives them view-only sight of their own request.
+//
+// Constraint violations are translated rather than pre-flighted with a select: the
+// constraint is the authority, and two callers creating the same email at once then
+// resolve correctly instead of both passing a check and one blowing up as a 500.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
-// Postgres error codes. Checking these beats pre-flighting each value with its own select:
-// the constraint is the authority, and two callers creating the same email at once resolve
-// correctly instead of both passing a check and one blowing up as a 500.
 const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
 
-// Which constraint failed maps to which field the caller got wrong. Names come from the
-// migrations; a renamed constraint should be renamed here too, and until then falls
-// through to the generic message rather than reporting the wrong field.
+/**
+ * Constraint name to the request field the caller got wrong. Names come from the
+ * migrations; an unlisted one falls through to the generic message.
+ */
 const FK_FIELDS = {
   fk_users_role_id_roles_id: "roleId",
   fk_users_contract_type_id_contract_types_id: "contractTypeId",
@@ -29,18 +31,26 @@ const FK_FIELDS = {
   fk_area_members_area_id_areas_id: "primaryAreaId",
 };
 
-// Deliberately permissive. The authority on what is a deliverable address is whether mail
-// arrives, and a stricter regex reliably rejects real addresses (plus tags, new TLDs,
-// apostrophes) while still admitting undeliverable ones. This only catches the obvious
-// typo; 320 is the column width.
+/** Deliberately permissive: catches the obvious typo, not undeliverable addresses. */
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Create an account with no password. The caller is an authenticated admin -- the route
-// enforces that -- so the failures here are about the *payload*, not about permission.
-//
-// Returns the created user in the same shape a session carries, so the route can mint an
-// invite for it without a second read.
 class Users {
+  /**
+   * Creates an account with no password. The route has already established that the
+   * caller is an admin, so every failure here is about the payload.
+   *
+   * @param {object} input
+   * @param {string} input.email
+   * @param {string} input.fullName
+   * @param {number|string} input.roleId Required by RF-USR-02.
+   * @param {number|string} input.contractTypeId Required; RF-AUS-04 reads caps from it.
+   * @param {number|string|null} [input.primaryAreaId]
+   * @param {string|null} [input.birthday]
+   * @param {boolean} [input.isAreaLeader] Requires primaryAreaId.
+   * @returns {Promise<object>} The user in the shape a session carries, so the route can
+   *   mint an invite without a second read.
+   * @throws {ApiError} 400 on a bad payload, 409 on a duplicate live email.
+   */
   async create({
     email,
     fullName,
@@ -62,8 +72,6 @@ class Users {
       );
     }
 
-    // Required by the schema and by RF-USR-02: a user with no role has no visibility rules
-    // to apply, and contract type is what RF-AUS-04 later reads absence caps from.
     const role = toId(roleId);
     const contractType = toId(contractTypeId);
     if (role === null) throw ApiError.badRequest("roleId is required.");
@@ -82,8 +90,6 @@ class Users {
       throw ApiError.badRequest("primaryAreaId must be a positive integer.");
     }
 
-    // A leader flag without an area has nowhere to apply. Accepting it silently would
-    // record a decision that never took effect.
     if (isAreaLeader && area === null) {
       throw ApiError.badRequest("isAreaLeader requires primaryAreaId.");
     }
@@ -99,9 +105,7 @@ class Users {
         isAreaLeader: Boolean(isAreaLeader),
       });
 
-      // password_hash is null on a freshly created account, but the row is emitted whole
-      // rather than picked apart: audit.js redacts by column name, so the rule lives in one
-      // place instead of in every emit call that happens to touch `users`.
+      // Emitted whole; audit.js redacts by column name so the rule lives in one place.
       await events.emit({
         action: "record_created",
         target: { table: "users", id: row.id },
@@ -122,9 +126,12 @@ class Users {
   }
 }
 
-// Ids arrive from JSON, so "7" and 7 both turn up. Number() alone would accept "7abc" as
-// NaN and true as 1; this returns null for anything that is not a positive integer, and
-// the caller decides whether that is a 400 or a legitimate absence.
+/**
+ * Coerces a JSON id to a positive integer, or null. Rejects "7abc" and booleans, which
+ * Number() would otherwise turn into NaN and 1.
+ *
+ * @returns {number | null}
+ */
 function toId(value) {
   if (typeof value === "boolean" || value === null || value === undefined)
     return null;
@@ -132,13 +139,15 @@ function toId(value) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-// Turn a constraint violation into the refusal the caller earned. Anything unrecognised is
-// re-thrown untouched: errorHandler logs a non-ApiError in full and hides it behind a 500,
-// which is the correct treatment for a database error nobody predicted.
+/**
+ * Turns a constraint violation into the refusal the caller earned. An unrecognised error
+ * is returned untouched, for errorHandler to log in full behind a 500.
+ *
+ * @returns {ApiError | Error}
+ */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
-    // The live-only partial index (uq_users_email_live) means this fires for an active
-    // account and stays silent for a soft-deleted one whose address is free again.
+    // uq_users_email_live is partial, so a soft-deleted account frees its address.
     return ApiError.conflict("A user with that email address already exists.");
   }
 

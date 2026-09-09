@@ -19,6 +19,21 @@
 // on disk because one piece of content has many names - that is what deduplication means
 // - so writing one of them here would pick an arbitrary winner and create a second,
 // disagreeing source of truth. The name belongs to the files row.
+//
+// Four invariants, each of which is easy to break from the outside:
+//
+//   - **Bytes first, rows second.** putContent() never touches the database. A crash
+//     between the two leaves orphaned content for a sweeper to reclaim; the reverse order
+//     leaves a files row pointing at bytes that do not exist, a permanent 500.
+//   - **There is no updateContent, and never will be.** Different bytes are a different
+//     hash. Renames and moves happen on the files row.
+//   - **Placement is recorded, not derived.** Most-free-space wins and file_locations
+//     remembers; `hash % n` would reshuffle the corpus whenever a disk is added, and
+//     consistent hashing only shrinks that.
+//   - **The .imagenuaq-volume marker is load-bearing.** A failed mount leaves an empty
+//     directory that would otherwise be written into. That is also why
+//     storage_volumes.is_mounted would be a mistake: mount state is runtime truth, and a
+//     stored copy of it is stale the moment it is written.
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -30,9 +45,10 @@ const MARKER_FILE = '.imagenuaq-volume';
 const TMP_DIR = 'tmp';
 const CONTENT_DIR = 'content';
 
-// Anything that reaches a path join is matched against this first, so traversal is
-// structurally impossible rather than filtered against. Same shape as the
-// files_hash_is_hex and file_locations_hash_is_hex checks in the schema.
+/**
+ * Matched before anything reaches a path join, so traversal is structurally impossible
+ * rather than filtered against. Same shape as the files_hash_is_hex check in the schema.
+ */
 const HASH_RE = /^[0-9a-f]{64}$/;
 
 export class StorageError extends Error {
@@ -47,9 +63,11 @@ let volumes = null;
 
 // --- Registry ---
 
-// `label:path` pairs separated by commas, where the label is storage_volumes.label. Split
-// on the FIRST colon only: a Windows mount path is `C:\storage`, and splitting on every
-// colon would eat the drive letter.
+/**
+ * Parses STORAGE_VOLUMES: comma-separated `label:path` pairs, split on the FIRST colon
+ * only — a Windows mount is `C:\storage` and splitting on every colon eats the drive
+ * letter. The label is storage_volumes.label.
+ */
 function parseSpec(spec) {
   const parsed = [];
 
@@ -79,12 +97,13 @@ function parseSpec(spec) {
   return parsed;
 }
 
-// The marker is the whole reason this is checked at boot. A disk that fails to mount
-// leaves an empty directory on the root filesystem, and without this the service writes
-// into it happily while recording that content as living on a disk that is not there.
-//
-// It is also why storage_volumes.is_mounted would be a mistake: mount state is runtime
-// truth, established here, and a stored copy of it is stale the moment it is written.
+/**
+ * Verifies a volume's marker file. Checked at boot because a disk that fails to mount
+ * leaves an empty directory on the root filesystem, and the service would otherwise write
+ * into it happily while recording that content as living on a disk that is not there.
+ *
+ * @throws When the marker is missing or names a different label.
+ */
 async function verifyMarker(volume) {
   const markerPath = path.join(volume.mountPath, MARKER_FILE);
   let marker;
@@ -109,10 +128,16 @@ async function verifyMarker(volume) {
   }
 }
 
-// Writes the marker and the directories. Deliberately separate from openVolumes(), and
-// deliberately not automatic: creating the marker on demand is exactly what would defeat
-// the check above. Call it once, by hand, when a disk is genuinely new - then insert the
-// matching storage_volumes row with the same label.
+/**
+ * Writes the marker and the directories for a genuinely new disk, then insert the
+ * matching storage_volumes row with the same label.
+ *
+ * Deliberately separate from openVolumes() and deliberately not automatic: creating the
+ * marker on demand is exactly what would defeat the check it exists for.
+ *
+ * @param {string} mountPath
+ * @param {string} label
+ */
 export async function initVolume(mountPath, label) {
   const root = path.resolve(mountPath);
   await fs.mkdir(path.join(root, TMP_DIR), { recursive: true });
@@ -132,8 +157,8 @@ export async function openVolumes() {
 
   for (const volume of parsed) {
     await verifyMarker(volume);
-    // Recreated rather than assumed: tmp/ is where an interrupted write leaves its
-    // partial file, and someone will eventually clear it out by hand.
+    // Recreated rather than assumed: tmp/ holds partial files from interrupted writes,
+    // and someone will eventually clear it out by hand.
     await fs.mkdir(path.join(volume.mountPath, TMP_DIR), { recursive: true });
   }
 
@@ -167,8 +192,7 @@ export async function listVolumes() {
       return {
         label: volume.label,
         mountPath: volume.mountPath,
-        // bavail, not bfree: bfree counts the blocks reserved for root, which this
-        // process cannot actually use.
+        // bavail, not bfree: bfree counts blocks reserved for root.
         freeBytes: stat.bavail * stat.bsize,
         totalBytes: stat.blocks * stat.bsize,
       };
@@ -176,15 +200,15 @@ export async function listVolumes() {
   );
 }
 
-// Most free space wins. Not `hash % n`: deriving placement from the hash means adding a
-// disk reshuffles everything already stored, and consistent hashing only shrinks that, it
-// does not remove it. file_locations records where content went, so adding a disk moves
-// nothing.
-//
-// `allow` is the list of labels the caller is willing to write to - in practice the
-// labels of the storage_volumes rows with is_writable = true. It is passed in rather than
-// read here because this tier does not touch the database; leaving it out means every
-// mounted volume is a candidate.
+/**
+ * Picks the volume with the most free space.
+ *
+ * @param {object} [options]
+ * @param {string[]|null} [options.allow] Labels the caller will write to — in practice
+ *   the storage_volumes rows with is_writable = true. Passed in because this tier does
+ *   not touch the database; omitted, every mounted volume is a candidate.
+ * @returns {Promise<object>}
+ */
 export async function pickVolume({ allow = null } = {}) {
   const candidates = (await listVolumes()).filter((v) => !allow || allow.includes(v.label));
 
@@ -213,7 +237,7 @@ export function contentPath(label, hash) {
   );
 }
 
-// Hashes and counts on the way past, so the bytes are read exactly once.
+/** Hashes and counts on the way past, so the bytes are read exactly once. */
 function meter(maxBytes) {
   const digest = createHash('sha256');
   let size = 0;
@@ -233,18 +257,19 @@ function meter(maxBytes) {
   return { stream, result: () => ({ hash: digest.digest('hex'), size }) };
 }
 
-// Writes bytes and returns where they landed, ready to become a files row and a
-// file_locations row. It does NOT touch the database: the caller commits only once this
-// resolves.
-//
-// Bytes first, rows second. A crash in between leaves orphaned content for the sweeper to
-// reclaim; the reverse order leaves a files row pointing at bytes that do not exist,
-// which is a permanent 500. That ordering is why placement is returned instead of
-// recorded here.
-//
-// `existed: true` means the content was already on that volume - the dedup path, and the
-// common one. The caller still inserts its own files row; what it can skip is the
-// file_locations row, which is already there.
+/**
+ * Writes bytes and returns where they landed, ready to become a files row and a
+ * file_locations row. Does NOT touch the database — the caller commits once this
+ * resolves.
+ *
+ * @param {*} source
+ * @param {object} [options]
+ * @param {number|null} [options.maxBytes]
+ * @param {string|null} [options.volumeLabel]
+ * @returns {Promise<object>} `existed: true` means the content was already on that
+ *   volume — the dedup path, and the common one. The caller still inserts its own files
+ *   row; what it can skip is the file_locations row.
+ */
 export async function putContent(source, { maxBytes = null, volumeLabel = null, allow = null } = {}) {
   const volume = volumeLabel ? findVolume(volumeLabel) : await pickVolume({ allow });
   const tmpPath = path.join(volume.mountPath, TMP_DIR, randomUUID());
@@ -269,8 +294,8 @@ export async function putContent(source, { maxBytes = null, volumeLabel = null, 
     }
 
     await fs.mkdir(path.dirname(target), { recursive: true });
-    // Atomic: same filesystem by construction, since tmp/ lives under the same mount.
-    // Overwriting is harmless anyway - an identical hash means identical bytes.
+    // Atomic: tmp/ lives under the same mount. Overwriting is harmless — an identical
+    // hash means identical bytes.
     await fs.rename(tmpPath, target);
 
     return { hash, size, volumeLabel: volume.label, existed: false };
@@ -294,8 +319,15 @@ export async function statContent(label, hash) {
   }
 }
 
-// Returns whether it removed anything, so a sweeper can tell "reclaimed" from "already
-// gone" instead of guessing. Only ever call it for a hash no live files row references.
+/**
+ * Removes content from one volume. Only ever call it for a hash no live files row
+ * references.
+ *
+ * @param {string} label
+ * @param {string} hash
+ * @returns {Promise<boolean>} Whether anything was removed, so a sweeper can tell
+ *   "reclaimed" from "already gone".
+ */
 export async function deleteContent(label, hash) {
   try {
     await fs.unlink(contentPath(label, hash));
@@ -305,6 +337,3 @@ export async function deleteContent(label, hash) {
     throw error;
   }
 }
-
-// There is no updateContent, and there never will be: different bytes are a different
-// hash and therefore different content. Renames and moves happen on the files row.

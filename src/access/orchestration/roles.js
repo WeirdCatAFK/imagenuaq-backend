@@ -22,6 +22,10 @@
 // `area_hierarchy` answer which records they may do it to. The case that cannot be expressed
 // is somebody who may edit in one area and only read in another; that is the case the
 // decision declines to support, not an omission.
+//
+// Two rules hold throughout: codes are compared literally, so nothing here case-folds
+// caller input, and a rename is a real hazard -- requireRole() compares `roles.name` and
+// every live JWT carries the old one for seven days.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -29,16 +33,16 @@ import { ApiError } from "../../utils/ApiError.js";
 const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
 
-// Column widths from the initial-schema and role-permissions migrations. Checking them
-// here turns Postgres's 22001 -- a 500 that names no field -- into a 400 that does.
+/** Column widths from initial-schema and role-permissions; a 22001 becomes a 400 here. */
 const ROLE_NAME_MAX = 50;
 const PERMISSION_CODE_MAX = 100;
 const PERMISSION_LABEL_MAX = 200;
 
-// The seeded catalogue is `resource.action`: project.read, absence.reason.read. Enforcing
-// the shape is not pedantry -- requirePermission() compares these strings literally, so
-// `Project Read` and `project.read` are two different permissions that look like one to
-// whoever grants them. Dots may repeat, which is what absence.reason.read needs.
+/**
+ * The seeded catalogue is `resource.action` -- project.read, absence.reason.read. Dots may
+ * repeat. requirePermission() compares these literally, so `Project Read` and
+ * `project.read` are two permissions that look like one to whoever grants them.
+ */
 const PERMISSION_CODE = /^[a-z0-9]+(\.[a-z0-9]+)+$/;
 
 class Roles {
@@ -86,14 +90,18 @@ class Roles {
     return shapeRole(role);
   }
 
-  // Partial, merged against the current row -- see Areas.update() for why the merge happens
-  // here and not by assembling a SET list in query.js.
-  //
-  // Renaming a role is allowed and is more dangerous than it looks: requireRole() compares
-  // `roles.name`, and every JWT already issued carries the OLD name for seven days. A rename
-  // therefore locks out everyone holding a live token until they log in again. That is a
-  // consequence of not re-reading the database on a verified token, documented in
-  // orchestration/auth.js, and the reason a rename is not something to do casually.
+  /**
+   * Updates only the keys the caller sent, merged against the current row.
+   *
+   * Renaming is allowed and is more dangerous than it looks: requireRole() compares
+   * `roles.name`, and every JWT already issued carries the OLD name for seven days, so a
+   * rename locks out everyone holding a live token until they log in again.
+   *
+   * @param {number|string} roleId
+   * @param {{ name?: string, description?: string|null }} changes
+   * @returns {Promise<object>}
+   * @throws {ApiError} 400 on a bad payload, 404 when the role does not exist.
+   */
   async update(roleId, { name, description }) {
     const id = requireId(roleId, "roleId");
     const current = await query.getRoleById(id);
@@ -116,9 +124,8 @@ class Roles {
       });
       if (!role) throw ApiError.notFound("Role not found.");
 
-      // Worth having in the trail beyond the general rule: renaming a role changes what
-      // requireRole() compares, so "why did everyone stop being able to do X" has an
-      // answer here and nowhere else.
+      // A rename changes what requireRole() compares, so "why did everyone stop being able
+      // to do X" has an answer here and nowhere else.
       await events.emit({
         action: "record_updated",
         target: { table: "roles", id: role.id },
@@ -132,12 +139,17 @@ class Roles {
     }
   }
 
-  // Refused while anyone still holds it, and the count is in the message because "409" on
-  // its own leaves the admin guessing how much work reassigning is.
-  //
-  // No automatic reassignment: `users.role_id` is NOT NULL, so the alternative to refusing
-  // is picking a role for those users, which silently grants or revokes access on their
-  // behalf. The foreign key would refuse too; this check exists to say WHY.
+  /**
+   * Deletes a role, refusing while anyone still holds it. The count is in the message
+   * because a bare 409 leaves the admin guessing how much reassigning is left.
+   *
+   * There is no automatic reassignment: `users.role_id` is NOT NULL, so the alternative
+   * to refusing is picking a role for those users, which silently grants or revokes access
+   * on their behalf. The foreign key would refuse too; this check exists to say why.
+   *
+   * @param {number|string} roleId
+   * @throws {ApiError} 404 when it does not exist, 409 while it is held.
+   */
   async delete(roleId) {
     const id = requireId(roleId, "roleId");
 
@@ -160,8 +172,7 @@ class Roles {
 
       return shapeRole(role);
     } catch (err) {
-      // The race the count above cannot close: a user assigned this role between the count
-      // and the delete. The foreign key catches it, and this turns it into the same 409.
+      // The race the count cannot close: a user assigned this role in between.
       if (err?.code === FOREIGN_KEY_VIOLATION) {
         throw ApiError.conflict(
           "That role is still held by at least one user; reassign them first.",
@@ -174,11 +185,9 @@ class Roles {
   // --- Permissions ---
 
   async createPermission({ code, label, description = null }) {
-    // Trimmed but NOT case-folded. Lower-casing the input first would let `Project.Read`
-    // through the pattern below and then collide with the seeded `project.read`, so the
-    // caller gets a 409 about a permission they did not think they were creating. The code
-    // is a machine name compared literally by requirePermission(); silently rewriting it is
-    // how a caller ends up holding something other than what they asked for.
+    // Trimmed but NOT case-folded. Lower-casing first would let `Project.Read` through the
+    // pattern and then collide with the seeded `project.read`, giving the caller a 409
+    // about a permission they did not think they were creating.
     const cleanCode = cleanText(code);
     const cleanLabel = cleanText(label);
 
@@ -284,10 +293,14 @@ class Roles {
     }
   }
 
-  // Deleting a permission revokes it from every role, by the cascade on role_permissions.
-  // That is survivable in a way deleting a role is not: requirePermission() fails closed on
-  // a code nobody holds, so the worst outcome is a route that refuses everyone, which is
-  // visible immediately. A user with no role, by contrast, cannot exist.
+  /**
+   * Deletes a permission, revoking it from every role by the cascade on role_permissions.
+   * Survivable in a way deleting a role is not: requirePermission() fails closed on a code
+   * nobody holds, so the worst outcome is a route that refuses everyone, visible at once.
+   *
+   * @param {number|string} permissionId
+   * @throws {ApiError} 404 when it does not exist.
+   */
   async deletePermission(permissionId) {
     const permission = await query.deletePermission(
       requireId(permissionId, "permissionId"),
@@ -306,8 +319,14 @@ class Roles {
     return (await query.getRolePermissions(id)).map(shapePermission);
   }
 
-  // `granted` is false when the role already held it. Not an error: the caller asked for
-  // the grant to exist and it does. The route turns the flag into 201 versus 200.
+  /**
+   * Grants a permission to a role.
+   *
+   * @param {number|string} roleId
+   * @param {number|string} permissionId
+   * @returns {Promise<object>} `granted` is false when the role already held it — not an
+   *   error, and what the route turns into 201 versus 200.
+   */
   async grant(roleId, permissionId) {
     const role = requireId(roleId, "roleId");
     const permission = requireId(permissionId, "permissionId");
@@ -322,10 +341,9 @@ class Roles {
     try {
       const row = await query.grantPermissionToRole(role, permission);
 
-      // Only when the grant is new. `permission_granted` and `permission_revoked` are their
-      // own action codes rather than record_created/deleted on role_permissions, because
-      // "who gave finance.read to whom, and when" is the question RF-USR-05 makes worth
-      // asking, and a generic verb over a join table buries it.
+      // `permission_granted` and `permission_revoked` are their own action codes rather
+      // than record_created/deleted on a join table: "who gave finance.read to whom, and
+      // when" is the question RF-USR-05 makes worth asking.
       if (row !== null) {
         await events.emit({
           action: "permission_granted",
@@ -356,14 +374,20 @@ class Roles {
     return { roleId: role, permissionId: permission, revoked: true };
   }
 
-  // Replace a role's whole grant set, by code rather than by id. Codes because they are
-  // what the requirement is written in and what requirePermission() compares -- an admin
-  // screen posting ids would be posting sequence values that differ per database, and the
-  // same request would grant different permissions on staging and in production.
-  //
-  // The set is resolved to ids here so query.js can do the replacement in one statement:
-  // a delete-then-insert pair leaves the role holding nothing in between, and a request
-  // arriving in that window is refused for a reason that has nothing to do with it.
+  /**
+   * Replaces a role's whole grant set, by code rather than by id — codes are what the
+   * requirement is written in and what requirePermission() compares, whereas ids are
+   * sequence values that differ per database, so the same request would grant different
+   * permissions on staging and in production.
+   *
+   * Resolved to ids here so query.js can replace in one statement: a delete-then-insert
+   * pair leaves the role holding nothing in between.
+   *
+   * @param {number|string} roleId
+   * @param {string[]} codes
+   * @returns {Promise<object>}
+   * @throws {ApiError} 400 when a code is unknown, 404 when the role does not exist.
+   */
   async setPermissions(roleId, codes) {
     const id = requireId(roleId, "roleId");
     if (!(await query.getRoleById(id))) {
@@ -374,14 +398,12 @@ class Roles {
       throw ApiError.badRequest("permissions must be an array of permission codes.");
     }
 
-    // Deduplicated, because the same code twice is one grant and would otherwise make the
-    // length comparison below report a phantom unknown code.
+    // Deduplicated: the same code twice is one grant, and would otherwise make the length
+    // comparison below report a phantom unknown code.
     const wanted = [
       ...new Set(
         codes.map((code) => {
-          // Trimmed only, for the same reason as createPermission(): a lookup that
-          // case-folds would make `Project.Read` resolve here and be refused there, which
-          // is worse than either behaviour on its own.
+          // Trimmed only, as in createPermission().
           const clean = cleanText(code);
           if (!clean) {
             throw ApiError.badRequest("permissions must be non-empty strings.");
@@ -391,9 +413,8 @@ class Roles {
       ),
     ];
 
-    // Resolved one by one rather than in a single IN (...): the caller deserves to be told
-    // WHICH code was wrong, and a count mismatch cannot say. The list is eleven rows today
-    // and is a catalogue, not a table that grows with usage.
+    // One by one rather than a single IN (...): the caller deserves to be told WHICH code
+    // was wrong, and a count mismatch cannot say. The catalogue is eleven rows.
     const ids = [];
     for (const code of wanted) {
       const permission = await query.getPermissionByCode(code);
@@ -403,10 +424,8 @@ class Roles {
       ids.push(permission.id);
     }
 
-    // Read the current set so the trail can record what actually changed. A single
-    // "permissions replaced" row would be cheaper and close to useless: the question an
-    // audit answers is which permission a role gained or lost, and a before/after pair of
-    // whole sets makes the reader diff them by eye.
+    // Read the current set so the trail records what actually changed. A single
+    // "permissions replaced" row would be cheaper and close to useless.
     const held = await query.getRolePermissions(id);
     const heldIds = new Set(held.map((permission) => permission.id));
     const wantedIds = new Set(ids);
@@ -418,7 +437,7 @@ class Roles {
       throw translate(err);
     }
 
-    // After the write, and only for the differences. Emitting before would record grants
+    // After the write, and only for the differences: emitting before would record grants
     // that a failed statement never made.
     for (const permissionId of ids) {
       if (heldIds.has(permissionId)) continue;
@@ -441,10 +460,12 @@ class Roles {
   }
 }
 
-// Trim, and turn an empty string into null -- see the same helper in orchestration/
-// areas.js. Duplicated rather than shared: the day one of these modules needs a different
-// rule, a shared helper is where the special case would go, and a special case in a helper
-// used by everything is how a validation rule stops being readable.
+/**
+ * Trims, and turns an empty string into null. Duplicated from orchestration/areas.js
+ * rather than shared: a shared helper is where the first special case would go.
+ *
+ * @returns {string | null}
+ */
 function cleanText(value) {
   if (typeof value !== "string") return value == null ? null : value;
   const trimmed = value.trim();
@@ -479,9 +500,13 @@ function shapePermission(row) {
   };
 }
 
-// Both catalogues take their unique constraint names from Postgres's defaults, because
-// both were declared with an inline UNIQUE in the initial-schema and role-permissions
-// migrations. Anything unrecognised is re-thrown untouched.
+/**
+ * Turns a constraint violation into the refusal the caller earned. Both catalogues take
+ * their unique constraint names from Postgres's defaults, having been declared with an
+ * inline UNIQUE. An unrecognised error is returned untouched.
+ *
+ * @returns {ApiError | Error}
+ */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     if (err.constraint === "permissions_code_key") {

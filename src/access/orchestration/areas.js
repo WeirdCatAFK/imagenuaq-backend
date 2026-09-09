@@ -10,21 +10,27 @@
 // consults the work of "todos los usuarios a su cargo", which is a subtree of areas, not
 // one area. getOrgChart() below is the read side of that, and the shape the frontend's
 // react-organizational-chart consumes.
+//
+// Three conventions hold throughout:
+//
+//   - **Membership arguments are (userId, areaId)**, matching query.js. Reversing them is
+//     not an error at any layer -- it writes the wrong row and returns successfully.
+//   - **Constraint violations are translated, not pre-flighted.** The constraint is the
+//     authority; a SELECT-then-write loses to two callers racing on the same name.
+//   - **Pure reads carry no try/catch.** translate() maps only 23505 and 23503, and a
+//     SELECT raises neither.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
-// Postgres error codes, as in orchestration/users.js. The constraint is the authority:
-// pre-flighting each value with its own SELECT loses to two callers creating the same area
-// at once, where both pass the check and one comes back as a 500.
 const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
 
-// Which constraint failed maps to which field the caller got wrong. Names come from the
-// migrations -- `uq_areas_name` from catalog-bootstrap, the area_hierarchy pair from
-// roles-and-areas, which took Postgres's default names for its inline REFERENCES. A
-// renamed constraint must be renamed here too; until then it falls through to the generic
-// message rather than naming the wrong field.
+/**
+ * Constraint name to the request field the caller got wrong. Names come from the
+ * migrations -- `uq_areas_name` from catalog-bootstrap, the area_hierarchy pair from
+ * roles-and-areas. An unlisted one falls through to the generic message.
+ */
 const FK_FIELDS = {
   area_hierarchy_child_area_id_fkey: "areaId",
   area_hierarchy_parent_area_id_fkey: "parentAreaId",
@@ -32,17 +38,23 @@ const FK_FIELDS = {
   fk_area_members_user_id_users_id: "userId",
 };
 
-// `areas.name` is varchar(200); `roles.name` is 50 and lives in roles.js. Checking here
-// rather than letting Postgres raise 22001 turns a 500 into a 400 that says which field.
+/** `areas.name` is varchar(200); checking here makes a 22001 into a 400 that names the field. */
 const NAME_MAX = 200;
 
 class Areas {
   // --- CRUD ---
 
-  // `leaderUserId` is optional and, when given, makes that user the area's first leader in
-  // the same statement. Two calls would leave an area nobody is responsible for whenever
-  // the second one failed, and the cleanup for that lives in a catch block that is itself
-  // allowed to fail.
+  /**
+   * Creates an area, optionally with its first leader in the same statement -- two calls
+   * would leave an area nobody is responsible for whenever the second failed.
+   *
+   * @param {object} input
+   * @param {string} input.name
+   * @param {string|null} [input.description]
+   * @param {number|string|null} [input.leaderUserId]
+   * @returns {Promise<object>}
+   * @throws {ApiError} 400 on a bad payload, 409 on a duplicate name.
+   */
   async create({ name, description = null, leaderUserId = null }) {
     const cleanName = cleanText(name);
     if (!cleanName || cleanName.length > NAME_MAX) {
@@ -83,10 +95,16 @@ class Areas {
     return areas.map(shapeArea);
   }
 
-  // A partial update: only the keys the caller sent are changed. The underlying statement
-  // writes every column, so the current row is read first and the two are merged here --
-  // building the SET list from whichever keys arrived would put string concatenation back
-  // into query.js, which is the one thing that module exists to prevent.
+  /**
+   * Updates only the keys the caller sent. The current row is read first and merged here;
+   * building the SET list from whichever keys arrived would put string concatenation back
+   * into query.js.
+   *
+   * @param {number|string} areaId
+   * @param {{ name?: string, description?: string|null }} changes
+   * @returns {Promise<object>}
+   * @throws {ApiError} 400 on a bad payload, 404 when the area does not exist.
+   */
   async update(areaId, { name, description }) {
     const id = requireId(areaId, "areaId");
     const current = await query.getAreaById(id);
@@ -109,9 +127,8 @@ class Areas {
       });
       if (!area) throw ApiError.notFound("Area not found.");
 
-      // `current` was read above to merge the partial update, so before_data costs nothing
-      // extra here -- which is the reason the event is emitted from this tier and not from
-      // the route, where the previous row is already gone.
+      // `current` was read to merge the update, so before_data costs nothing here -- the
+      // reason this is emitted from this tier and not the route, where it is already gone.
       await events.emit({
         action: "record_updated",
         target: { table: "areas", id: area.id },
@@ -125,16 +142,18 @@ class Areas {
     }
   }
 
-  // Children are promoted to roots by the ON DELETE CASCADE on area_hierarchy; people are
-  // not, because `users.primary_area_id` and `area_members.area_id` are NO ACTION. That
-  // foreign key is deliberately the gate: counting members here first would still race a
-  // concurrent assignment, and the database's answer is the only one that cannot.
-  //
-  // 23503 is caught here rather than in translate() because the code alone cannot say which
-  // direction was violated. Postgres reports the *referencing* table and constraint in both
-  // cases, so `fk_area_members_area_id_areas_id` means "no such area" when inserting a
-  // membership and "this area still has members" when deleting the area. Only the call site
-  // knows which it asked for.
+  /**
+   * Deletes an area. Children are promoted to roots by ON DELETE CASCADE on
+   * area_hierarchy; people are not, and the NO ACTION foreign key is deliberately the
+   * gate -- counting members first would still race a concurrent assignment.
+   *
+   * 23503 is caught here rather than in translate() because the code alone cannot say
+   * which direction was violated: Postgres names the referencing table either way, so
+   * only the call site knows whether it asked for a membership or a deletion.
+   *
+   * @param {number|string} areaId
+   * @throws {ApiError} 404 when it does not exist, 409 when people are still assigned.
+   */
   async delete(areaId) {
     const id = requireId(areaId, "areaId");
 
@@ -142,8 +161,7 @@ class Areas {
       const area = await query.deleteArea(id);
       if (!area) throw ApiError.notFound("Area not found.");
 
-      // The deleted row IS before_data; after_data null is what says it is gone. The
-      // migration's comment on the columns spells that convention out.
+      // The deleted row IS before_data; a null after_data is what says it is gone.
       await events.emit({
         action: "record_deleted",
         target: { table: "areas", id: area.id },
@@ -162,10 +180,6 @@ class Areas {
   }
 
   // --- Lookups ---
-  //
-  // No try/catch on the pure reads. translate() only maps 23505 and 23503, and a SELECT
-  // raises neither; wrapping them would mean re-throwing every real failure through a
-  // function that has nothing to say about it.
 
   async getById(areaId) {
     const area = await query.getAreaById(requireId(areaId, "areaId"));
@@ -181,8 +195,7 @@ class Areas {
 
   async getMembers(areaId) {
     const id = requireId(areaId, "areaId");
-    // Existence is checked separately: an area with nobody in it and an area that does not
-    // exist both return zero rows, and they are a 200 and a 404.
+    // Checked separately: an empty area and a missing one both return zero rows.
     const area = await query.getAreaById(id);
     if (!area) throw ApiError.notFound("Area not found.");
 
@@ -212,10 +225,6 @@ class Areas {
   }
 
   // --- Membership ---
-  //
-  // Note the argument order: (userId, areaId) throughout, matching query.js. An earlier
-  // draft of this file passed (areaId, userId) to queries declared the other way round,
-  // which is not an error at any layer -- it writes the wrong row and returns successfully.
 
   async setMembership(userId, areaId, isAreaLeader = false) {
     const user = requireId(userId, "userId");
@@ -228,10 +237,9 @@ class Areas {
         Boolean(isAreaLeader),
       );
 
-      // record_created for what is really an upsert. The trail records the resulting state
-      // and the object it applies to; distinguishing "joined" from "promoted" would need a
-      // read of the membership first, and the area's history read in order already shows
-      // which it was.
+      // record_created for what is really an upsert: the trail records the resulting state,
+      // and the area's history read in order already shows whether it was a join or a
+      // promotion.
       await events.emit({
         action: "record_created",
         target: { table: "area_members", id: area },
@@ -279,17 +287,19 @@ class Areas {
     return parent ? shapeArea(parent) : null;
   }
 
-  // Hang one area under another. Three refusals, in the order they can be checked:
-  //
-  //   404  either area does not exist
-  //   400  an area cannot be its own parent -- the CHECK would catch it, but as a 500
-  //   409  the proposed parent is already BELOW this area
-  //
-  // The third is the one the database cannot see. `area_hierarchy` constrains a single hop;
-  // A under B under A needs a trigger or a materialised closure, and both charge every
-  // write for something only a hand-written UPDATE can produce. This check is what keeps
-  // the table acyclic, so any second write path to it owes the same check -- the reader's
-  // CYCLE clause survives a loop, it does not repair one.
+  /**
+   * Hangs one area under another. The 409 is the refusal the database cannot see:
+   * `area_hierarchy` constrains a single hop, so A under B under A needs a trigger or a
+   * materialised closure, and both charge every write for what only a hand-written UPDATE
+   * can produce. Any second write path to that table owes the same check -- the reader's
+   * CYCLE clause survives a loop, it does not repair one.
+   *
+   * @param {number|string} childAreaId
+   * @param {number|string} parentAreaId
+   * @returns {Promise<object>}
+   * @throws {ApiError} 404 when either area is missing, 400 for self-parenting, 409 when
+   *   the proposed parent already sits below this area.
+   */
   async setParent(childAreaId, parentAreaId) {
     const child = requireId(childAreaId, "areaId");
     const parent = requireId(parentAreaId, "parentAreaId");
@@ -311,17 +321,15 @@ class Areas {
       );
     }
 
-    // Read before the upsert overwrites it. Re-parenting is the one change here whose
-    // previous value is not already in hand, and a move recorded without where the area
-    // came from cannot be read backwards.
+    // Read before the upsert overwrites it: a move recorded without where the area came
+    // from cannot be read backwards.
     const previousParent = await query.getAreaParent(child);
 
     try {
       const row = await query.setAreaParent(child, parent);
 
-      // Targeted at the area that moved, not at area_hierarchy: "where does this area hang"
-      // is a fact about the area, and somebody reading its history wants the move in the
-      // same list as its rename.
+      // Targeted at the area that moved, not at area_hierarchy: somebody reading an area's
+      // history wants the move in the same list as its rename.
       await events.emit({
         action: "record_updated",
         target: { table: "areas", id: child },
@@ -335,8 +343,14 @@ class Areas {
     }
   }
 
-  // Promote an area back to a root. Not an error when it already was one: the caller asked
-  // for it to have no parent and it has none, which is a 200 and not a 404.
+  /**
+   * Promotes an area back to a root. Not an error when it already was one.
+   *
+   * @param {number|string} areaId
+   * @returns {Promise<{ areaId: number, parentAreaId: null, changed: boolean }>}
+   *   `changed` distinguishes "it had a parent" from "it never did", which the caller
+   *   cannot see from parentAreaId being null either way.
+   */
   async clearParent(areaId) {
     const id = requireId(areaId, "areaId");
     if (!(await query.getAreaById(id))) {
@@ -345,9 +359,8 @@ class Areas {
 
     const row = await query.clearAreaParent(id);
 
-    // Only when something actually changed. An audit trail that records requests rather
-    // than changes fills with rows that say nothing happened, and the ones that matter get
-    // harder to find.
+    // Only when something actually changed: a trail that records requests rather than
+    // changes buries the rows that matter.
     if (row) {
       await events.emit({
         action: "record_updated",
@@ -357,24 +370,24 @@ class Areas {
       });
     }
 
-    // `changed` distinguishes "it had a parent and no longer does" from "it never had
-    // one", which the caller cannot see from parentAreaId being null either way.
     return { areaId: id, parentAreaId: null, changed: row !== null };
   }
 
   // --- The organisation chart ---
 
-  // The whole organisation as a forest, or one subtree when `rootAreaId` is given.
-  //
-  // Two queries, never one per node: the tree rows, then every member of every area in it.
-  // The nesting is assembled here rather than in SQL because shaping is this tier's job and
-  // query.js stays SQL-only -- and because a json_agg version would still have to be
-  // unpacked into the same objects on the way out.
-  //
-  // The result is the shape react-organizational-chart nests: every node carries its own
-  // children, so <Tree>/<TreeNode> recurse over it directly. `leaders` is a projection of
-  // `members`, not a separate set -- the chart labels a node with whoever heads it, and
-  // duplicating those rows is cheaper than making the frontend filter twice per node.
+  /**
+   * The whole organisation as a forest, or one subtree when `rootAreaId` is given.
+   *
+   * Two queries, never one per node: the tree rows, then every member of every area in
+   * it. The nesting is assembled here because shaping is this tier's job and query.js
+   * stays SQL-only. The result is the shape react-organizational-chart nests -- every
+   * node carries its children, and `leaders` is a projection of `members` rather than a
+   * separate set, so the frontend does not filter twice per node.
+   *
+   * @param {number|string|null} [rootAreaId]
+   * @returns {Promise<object[]>} The roots of this chart.
+   * @throws {ApiError} 404 when `rootAreaId` names no area.
+   */
   async getOrgChart(rootAreaId = null) {
     const root = rootAreaId === null ? null : requireId(rootAreaId, "areaId");
 
@@ -383,8 +396,7 @@ class Areas {
     }
 
     const rows = await query.getAreaTreeRows(root);
-    // An empty forest is legitimate -- a database with no areas in it yet. The empty-array
-    // parameter is handled in query.js rather than guarded here; see #idArray().
+    // An empty forest is legitimate; the empty-array parameter is handled by #idArray().
     const members = await query.getAreaMembersForAreas(rows.map((row) => row.id));
 
     const membersByArea = new Map();
@@ -410,10 +422,9 @@ class Areas {
       });
     }
 
-    // Attach in the order the walk produced, which is by depth: a node's parent is always
-    // already in the map by the time the node is reached. A parent that is NOT in the map
-    // means the walk started below it -- the subtree case -- so the node is a root of this
-    // chart even though it has a parent in the table.
+    // Attached in walk order, which is by depth, so a node's parent is always already in
+    // the map. A parent that is NOT in the map means the walk started below it -- the
+    // subtree case -- so the node is a root of this chart despite having one in the table.
     const roots = [];
     for (const row of rows) {
       const node = nodes.get(row.id);
@@ -428,18 +439,24 @@ class Areas {
   }
 }
 
-// Trim, and turn an empty string into null. A description the user cleared arrives as ""
-// and must not be stored as one: "" and NULL would then both mean "no description" and
-// every reader would have to test for both.
+/**
+ * Trims, and turns an empty string into null -- a cleared description must not be stored
+ * as "", or "" and NULL would both mean "none" and every reader would test for both.
+ *
+ * @returns {string | null}
+ */
 function cleanText(value) {
   if (typeof value !== "string") return value == null ? null : value;
   const trimmed = value.trim();
   return trimmed === "" ? null : trimmed;
 }
 
-// Ids arrive from JSON and from route parameters, so "7" and 7 both turn up. Number()
-// alone accepts "7abc" as NaN and true as 1; this is null for anything that is not a
-// positive integer.
+/**
+ * Coerces a JSON or route-parameter id to a positive integer, or null. Rejects "7abc"
+ * and booleans, which Number() would turn into NaN and 1.
+ *
+ * @returns {number | null}
+ */
 function toId(value) {
   if (typeof value === "boolean" || value === null || value === undefined)
     return null;
@@ -455,15 +472,21 @@ function requireId(value, field) {
   return id;
 }
 
-// null and undefined pass through; anything else must parse. The distinction matters:
-// "no leader given" and "leader given as garbage" are a 201 and a 400.
+/**
+ * Passes null and undefined through; anything else must parse. "No leader given" and
+ * "leader given as garbage" are a 201 and a 400.
+ *
+ * @throws {ApiError} 400 when `value` is present and not a positive integer.
+ */
 function optionalId(value, field) {
   if (value === null || value === undefined) return null;
   return requireId(value, field);
 }
 
-// snake_case rows in, camelCase JSON out. The boundary is here rather than in query.js
-// because the column names are the schema's business and the field names are the API's.
+/**
+ * snake_case row in, camelCase JSON out. The boundary is here because column names are
+ * the schema's business and field names are the API's.
+ */
 function shapeArea(row) {
   return { id: row.id, name: row.name, description: row.description };
 }
@@ -478,20 +501,22 @@ function shapeMember(row) {
   };
 }
 
-// Turn a constraint violation into the refusal the caller earned. Anything unrecognised is
-// re-thrown untouched: errorHandler logs a non-ApiError in full and hides it behind a 500,
-// which is the right treatment for a database error nobody predicted.
+/**
+ * Turns a constraint violation into the refusal the caller earned. An unrecognised error
+ * is returned untouched, for errorHandler to log in full behind a 500.
+ *
+ * @returns {ApiError | Error}
+ */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
-    // uq_areas_name, or the area_hierarchy primary key. The second cannot be reached
-    // through setAreaParent(), which upserts, but a future writer to this table can.
+    // uq_areas_name, or the area_hierarchy primary key -- unreachable through
+    // setParent(), which upserts, but a future writer to that table can hit it.
     return ApiError.conflict("An area with that name already exists.");
   }
 
   if (err?.code === FOREIGN_KEY_VIOLATION) {
-    // Always the "you named something that is not there" direction. The other direction --
-    // the row being deleted is still referenced -- reaches 23503 with the same constraint
-    // name, and is handled at the one call site that can tell them apart, delete().
+    // Always the "you named something that is not there" direction; the other reaches
+    // 23503 under the same constraint name and is handled in delete().
     const field = FK_FIELDS[err.constraint];
     return ApiError.badRequest(
       field ? `Unknown ${field}.` : "A referenced record does not exist.",
