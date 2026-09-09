@@ -386,6 +386,11 @@ class Query {
     return row ?? null;
   }
 
+  /** The whole catalogue, for a form that has to name one. Ordered for a <select>. */
+  async getContractTypes() {
+    return this.#rows("select id, name from contract_types order by name");
+  }
+
   /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
   async firstContractType() {
     const [row] = await this.#rows(

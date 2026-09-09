@@ -186,6 +186,14 @@ export function buildOpenApiDocument() {
           "coordination's.",
       },
       {
+        name: 'contract-types',
+        description:
+          'The schemes of employment RF-AUS-02 names, read-only. A form creating an ' +
+          'account has to name one, and the ids are per-database. Adding a scheme is a ' +
+          'migration; how many days each one grants is `contract_type_entitlements` ' +
+          '(RF-AUS-04), not this list.',
+      },
+      {
         name: 'roles',
         description:
           'The role catalogue and the permissions each role grants. `admin` and `finance` ' +
@@ -205,8 +213,9 @@ export function buildOpenApiDocument() {
           bearerFormat: 'JWT',
           description:
             'The `token` returned by `POST /api/auth/login` or `POST /api/auth/activate`. ' +
-            'HS256, valid seven days. Nothing re-reads the database on a verified token, ' +
-            'so a revoked account stays valid until it expires.',
+            'HS256, valid seven days -- but the user row is re-read on every request, so ' +
+            'a deleted account stops working at once, and role, area and name are always ' +
+            'the current ones rather than the ones the token was signed with.',
         },
       },
       schemas: {
@@ -579,6 +588,18 @@ export function buildOpenApiDocument() {
           },
           required: ['userId', 'areaId', 'isAreaLeader'],
         },
+        ContractType: {
+          type: 'object',
+          description:
+            'A scheme of employment (RF-AUS-02). The id differs per database -- it comes ' +
+            'from a sequence, not from the requirement -- so a client picks by name and ' +
+            'sends the id back, never the other way round.',
+          properties: {
+            id: { type: 'integer', example: 11 },
+            name: { type: 'string', maxLength: 200, example: 'Becario' },
+          },
+          required: ['id', 'name'],
+        },
         Role: {
           type: 'object',
           properties: {
@@ -587,9 +608,9 @@ export function buildOpenApiDocument() {
               type: 'string',
               maxLength: 50,
               description:
-                'The stable identifier requireRole() compares. Renaming a role locks out ' +
-                'everyone holding a live token until they log in again, because nothing ' +
-                're-reads the database on a verified one.',
+                'The stable identifier requireRole() compares. A rename takes effect on ' +
+                'the holder\'s next request, because verifyToken() reads `role` from the ' +
+                'user row rather than from the token.',
               example: 'area_lead',
             },
             description: { type: ['string', 'null'] },
@@ -1361,6 +1382,21 @@ export function buildOpenApiDocument() {
       // the grants these endpoints write are what requirePermission() reads, so gating them
       // on one would make an empty role_permissions unrecoverable over HTTP.
 
+      '/api/contract-types': {
+        get: {
+          tags: ['contract-types'],
+          summary: 'List every contract scheme',
+          description:
+            'Readable by any signed-in user. `users.contract_type_id` is NOT NULL, so the ' +
+            'form that creates an account has to name one of these -- and hard-coding the ' +
+            'ids is not an option, because they come from a sequence and differ per ' +
+            'database.',
+          responses: {
+            200: wrapped('Every scheme, by name.', 'contractTypes', 'ContractType', true),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
       '/api/roles': {
         get: {
           tags: ['roles'],
