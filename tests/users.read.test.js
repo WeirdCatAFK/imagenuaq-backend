@@ -110,7 +110,7 @@ describe('/api/users reads', () => {
       const member = await createPending({
         email: 'nuevo@uaq.mx',
         role: 'worker',
-        area: 'Diseño',
+        area: area.name,
       });
 
       const res = await server.get(`/api/users?areaId=${area.id}`, { token: adminToken });
@@ -174,7 +174,7 @@ describe('/api/users reads', () => {
       const member = await createPending({
         email: 'nuevo@uaq.mx',
         role: 'worker',
-        area: 'Diseño',
+        area: area.name,
         isAreaLeader: true,
       });
 

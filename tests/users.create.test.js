@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { startServer } from './helpers/server.js';
 import {
   reset,
+  resetCases,
   createPending,
   createActive,
   softDelete,
@@ -25,6 +26,8 @@ describe('POST /api/users', () => {
   let contractType;
   let disenoWeb;
 
+  const ACCOUNTS = ['coordinacion@uaq.mx'];
+
   before(async () => {
     server = await startServer();
     await reset();
@@ -41,12 +44,14 @@ describe('POST /api/users', () => {
     await server.close();
   });
 
-  // The admin row is truncated along with everything else, and the token keeps working:
-  // nothing re-reads the database on a verified token, so the role travels in the JWT for
-  // its full seven days. That is the documented trade behind requireRole() costing no
-  // query, and leaning on it here is what keeps this file to a single bcrypt comparison
-  // instead of one per test.
-  beforeEach(reset);
+  // The admin account is KEPT between cases, and it has to be: verifyToken() now re-reads
+  // the user row on every authenticated request, so truncating it -- which this file used
+  // to do -- revokes the session minted in before() and turns every case into a 401. That
+  // is the point of token_version working, not a regression.
+  //
+  // resetCases() removes everything a case created and leaves the login intact, so the file
+  // still pays for exactly one bcrypt comparison rather than one per test.
+  beforeEach(() => resetCases(ACCOUNTS));
 
   const valid = () => ({
     email: 'nuevo@uaq.mx',

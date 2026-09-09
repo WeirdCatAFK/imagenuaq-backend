@@ -108,6 +108,16 @@ export const roleId = (name) => query.getRoleIdByName(name);
 export const areaId = async (name) => (await query.findArea(name))?.id ?? null;
 export const contractTypeId = async () => (await query.firstContractType()).id;
 
+// Areas are looked up by their REAL name, which for one created by createArea() includes
+// TEST_PREFIX -- pass `area.name`, not the string handed to createArea. Returning null for
+// a name that resolves to nothing would create a user with no area and fail somewhere else
+// entirely, so this refuses instead. Seeded names ('Diseño Web') are found unprefixed.
+async function requireAreaId(name) {
+  const id = await areaId(name);
+  if (id === null) throw new Error(`Fixture area not found: ${name}`);
+  return id;
+}
+
 // A user exactly as POST /api/users leaves them: a row with no password, reachable only
 // through an invite.
 export async function createPending({
@@ -122,7 +132,7 @@ export async function createPending({
     fullName,
     roleId: await roleId(role),
     contractTypeId: await contractTypeId(),
-    primaryAreaId: area === null ? null : await areaId(area),
+    primaryAreaId: area === null ? null : await requireAreaId(area),
     birthday: null,
     isAreaLeader,
   });

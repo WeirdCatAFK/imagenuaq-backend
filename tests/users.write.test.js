@@ -112,7 +112,7 @@ describe('/api/users writes', () => {
     });
 
     test('an explicit null clears a nullable column', async () => {
-      const user = await someone({ area: 'Diseño' });
+      const user = await someone({ area: area.name });
 
       const res = await server.patch(`/api/users/${user.id}`, {
         token: adminToken,

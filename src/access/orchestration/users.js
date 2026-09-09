@@ -315,13 +315,18 @@ class Users {
    */
   async setPicture(userId, bytes, mime) {
     const id = requireId(userId, "userId");
-    if (!bytes || bytes.length === 0) {
-      throw ApiError.badRequest("An image body is required.");
-    }
+
+    // The type is checked BEFORE the body, and the order is load-bearing. Express 5 leaves
+    // req.body `undefined` when no parser claimed the request, so a Content-Type off the
+    // allow-list arrives here indistinguishable from no body at all -- and answering "an
+    // image body is required" to a caller who sent one is a refusal that cannot be acted on.
     if (!PICTURE_TYPES.includes(mime)) {
       throw ApiError.badRequest(
         `Content-Type must be one of: ${PICTURE_TYPES.join(", ")}.`,
       );
+    }
+    if (!bytes || bytes.length === 0) {
+      throw ApiError.badRequest("An image body is required.");
     }
 
     const had = (await query.getUserProfilePicture(id)) !== null;

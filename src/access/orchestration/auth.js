@@ -173,7 +173,6 @@ class Auth {
       roleId: user.role_id,
       role: user.role_name,
       areaId: user.primary_area_id ?? null,
-      tokenVersion: user.token_version,
     };
   }
 
@@ -188,6 +187,13 @@ class Auth {
    * @returns {Promise<string>}
    */
   async issueToken(user) {
+    // Read from the row rather than taken from the subject, for two reasons. It is what
+    // verifyToken() compares against, so it has to be the version at signing time and not
+    // whatever the caller happened to be holding; and keeping it out of the subject keeps
+    // `tokenVersion` an internal claim instead of a field on every session response. One
+    // primary-key lookup, on the two paths that already pay for bcrypt.
+    const row = await query.getAuthUserById(Number(user.id));
+
     return (
       new jose.SignJWT({
         purpose: PURPOSE_SESSION,
@@ -198,7 +204,7 @@ class Auth {
         areaId: user.areaId ?? null,
         // Compared against the row on every request. A bump elsewhere makes every token
         // minted before it stop verifying, which is the whole revocation mechanism.
-        tokenVersion: user.tokenVersion ?? 0,
+        tokenVersion: row?.token_version ?? 0,
       })
         .setProtectedHeader({ alg: "HS256" })
         // `sub` is the registered claim for the subject; jose requires a string.
@@ -340,7 +346,6 @@ class Auth {
       roleId: user.role_id,
       role: user.role_name,
       areaId: user.primary_area_id ?? null,
-      tokenVersion: user.token_version,
     };
 
     return { user: subject, token: await this.issueToken(subject) };

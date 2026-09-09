@@ -98,9 +98,10 @@ router.delete('/:id', async (req, res) => {
   res.json({ user: await users.softDelete(userId(req)) });
 });
 
-// express.raw() leaves an empty buffer when the Content-Type is off the allow-list, so an
-// unsupported image would otherwise arrive indistinguishable from no body at all. The
-// header is passed through and orchestration decides, which keeps the refusal in one place.
+// express.raw() ignores a request whose Content-Type is off its list, and Express 5 then
+// leaves req.body undefined -- so an unsupported type arrives here indistinguishable from
+// no body at all. The header is passed through and orchestration decides, which keeps the
+// refusal in one place and lets it check the type before the bytes.
 router.put('/:id/picture', picture, async (req, res) => {
   await users.setPicture(userId(req), req.body, req.headers['content-type']);
   res.status(204).end();
