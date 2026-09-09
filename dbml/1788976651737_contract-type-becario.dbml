@@ -1,0 +1,446 @@
+Table "roles" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(50) [unique, not null, note: 'admin, area_lead, worker, finance']
+  "description" text
+}
+
+Table "contract_types" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(200) [unique, not null]
+}
+
+Table "event_types" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null, note: 'horario, proyecto, ausencia, festivo']
+  "label" varchar(200) [not null]
+}
+
+Table "event_collections" {
+  "id" int8 [pk, not null, increment]
+  "key" varchar(200) [unique, not null, note: 'horario_daniel, vacaciones_contrato_x']
+  "name" varchar(300) [not null]
+  "description" text
+}
+
+Table "areas" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(200) [unique, not null]
+  "description" text
+}
+
+Table "users" {
+  "id" int8 [pk, not null, increment]
+  "primary_area_id" int8
+  "schedule_id" int8
+  "contract_type_id" int8 [not null]
+  "role_id" int8 [not null]
+  "email" varchar(320) [unique, not null]
+  "full_name" varchar(200) [not null]
+  "birthday" date
+  "password_hash" varchar(500)
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+  "token_version" int4 [not null, default: 0]
+  "profile_picture" bytea
+  "profile_picture_mime" varchar(100)
+
+  Indexes {
+    primary_area_id [type: btree, name: "users_idx_users_primary_area_id"]
+    role_id [type: btree, name: "users_index_2"]
+  }
+  Note: 'CHECK users_profile_picture_complete: num_nonnulls(profile_picture, profile_picture_mime) = ANY (ARRAY[0, 2])'
+}
+
+Table "area_members" {
+  "id" int8 [pk, not null, increment]
+  "area_id" int8 [not null]
+  "user_id" int8 [not null]
+  "is_area_leader" bool [not null]
+
+  Indexes {
+    (user_id, area_id) [type: btree, unique, name: "area_members_idx_area_members_user_id_area_id"]
+    area_id [type: btree, name: "area_members_idx_area_members_area_id"]
+  }
+}
+
+Table "events" {
+  "id" int8 [pk, not null, increment]
+  "event_type_id" int8 [not null]
+  "title" varchar(300) [not null]
+  "description" text
+  "all_day" bool [not null, default: false]
+  "starts_at" timestamptz [not null]
+  "ends_at" timestamptz [not null]
+  "timezone" text [not null, default: 'America/Mexico_City']
+  "rule" text [note: 'RFC 5545, e.g. FREQ=WEEKLY;BYDAY=MO,WE,FR;INTERVAL=1. NULL = single occurrence']
+  "recurrence_until" timestamptz
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    event_type_id [type: btree, name: "events_idx_events_event_type_id"]
+    (starts_at, ends_at) [type: btree, name: "events_idx_events_starts_at_ends_at"]
+  }
+  Note: '''starts_at/ends_at describe the FIRST occurrence. Recurring events are expanded at read time for the requested window.
+CHECK events_ends_after_starts: ends_at >= starts_at
+CHECK events_recurrence_end_stated_once: (recurrence_until IS NULL) OR (rule IS NULL) OR (rule !~~* \'%UNTIL=%\'::text)'''
+}
+
+Table "event_participants" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "area_id" int8
+  "user_id" int8
+
+  Indexes {
+    (area_id, event_id) [type: btree, unique, name: "event_participants_uq_event_participants_area"]
+    (user_id, event_id) [type: btree, unique, name: "event_participants_uq_event_participants_user"]
+    event_id [type: btree, name: "event_participants_idx_event_participants_event_id"]
+  }
+  Note: '''Exactly one of user_id / area_id set. Area rows fan out to all members at query time.
+CHECK event_participants_one_target: num_nonnulls(area_id, user_id) = 1'''
+}
+
+Table "event_exceptions" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "original_start" timestamptz [not null, note: 'Identifies which occurrence this overrides']
+  "is_cancelled" bool [not null, default: false]
+  "starts_at" timestamptz
+  "ends_at" timestamptz
+
+  Indexes {
+    (event_id, original_start) [type: btree, unique, name: "idx_event_exceptions_event_id_original_start"]
+  }
+  Note: '''CHECK event_exceptions_override_complete: is_cancelled OR ((starts_at IS NOT NULL) AND (ends_at IS NOT NULL))
+CHECK event_exceptions_ends_after_starts: (starts_at IS NULL) OR (ends_at IS NULL) OR (ends_at >= starts_at)'''
+}
+
+Table "collection_events" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "collection_id" int8 [not null]
+
+  Indexes {
+    (collection_id, event_id) [type: btree, unique, name: "idx_collection_events_collection_id_event_id"]
+  }
+}
+
+Table "absences" {
+  "event_id" int8 [pk, not null]
+  "reason" text [not null]
+  "approved_by" int8
+  "approved_at" timestamptz
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "document_file_id" int8
+  "absence_type_id" int8 [not null]
+  "status" varchar(20) [not null, default: 'requested', note: 'RF-AUS-14: solicitado, autorizado, rechazado, cancelado, gozado']
+
+  Indexes {
+    absence_type_id [type: btree, name: "idx_absences_absence_type_id"]
+    document_file_id [type: btree, name: "idx_absences_document_file_id"]
+    status [type: btree, name: "idx_absences_status"]
+  }
+  Note: '''CHECK absences_status_valid: (status)::text = ANY ((ARRAY[\'requested\'::character varying, \'approved\'::character varying, \'rejected\'::character varying, \'cancelled\'::character varying, \'taken\'::character varying])::text[])'''
+}
+
+Table "logs" {
+  "id" int8 [pk, not null, increment]
+  "user_id" int8
+  "action_id" int8 [not null]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "target_table" varchar(50) [note: 'Table the action was performed on. Not a foreign key: the target is a different table per row']
+  "target_id" int8 [note: 'Primary key of the affected row, within target_table']
+  "before_data" jsonb [note: 'Row before the change. NULL = the row was created']
+  "after_data" jsonb [note: 'Row after the change. NULL = the row was deleted']
+  "area_id" int8 [note: 'Area the actor belonged to when the action happened, from users.primary_area_id. Recorded, not derived: joining area_members at read time would answer where they are now. NULL = not recorded.']
+
+  Indexes {
+    action_id [type: btree, name: "idx_logs_action_id"]
+    (area_id, created_at) [type: btree, name: "idx_logs_area_id"]
+    created_at [type: btree, name: "idx_logs_created_at"]
+    (target_table, target_id) [type: btree, name: "idx_logs_target"]
+  }
+  Note: 'CHECK logs_target_complete: num_nonnulls(target_table, target_id) = ANY (ARRAY[0, 2])'
+}
+
+Table "storage_volumes" {
+  "id" int8 [pk, not null, increment]
+  "label" varchar(100) [unique, not null]
+  "location" varchar(500)
+  "is_writable" bool [not null, default: true]
+  "max_storage" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: '''One row per mounted disk, identified by label. The mount path is not authoritative here: it comes from STORAGE_VOLUMES in the environment, because the same disk mounts at a different path inside the container than on the host.
+CHECK storage_volumes_max_storage_positive: (max_storage IS NULL) OR (max_storage > 0)'''
+}
+
+Table "folders" {
+  "id" int8 [pk, not null, increment]
+  "parent_id" int8
+  "name" varchar(255) [not null]
+  "owner_id" int8 [not null]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    (parent_id, name) [type: btree, unique, name: "uq_folders_parent_name"]
+    (owner_id, name) [type: btree, unique, name: "uq_folders_root_name"]
+    owner_id [type: btree, name: "idx_folders_owner_id"]
+    parent_id [type: btree, name: "idx_folders_parent_id"]
+  }
+  Note: '''The tree. parent_id NULL is a root; there may be many, one per owner. Cycles are rejected by the folders_no_cycle trigger, which nothing declarative can express.
+CHECK folders_not_own_parent: parent_id IS DISTINCT FROM id'''
+}
+
+Table "files" {
+  "id" int8 [pk, not null, increment]
+  "folder_id" int8 [not null]
+  "author_id" int8 [not null]
+  "hash" bpchar(64) [not null]
+  "name" varchar(255) [not null]
+  "size" int8 [not null]
+  "mime" varchar(255)
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    (folder_id, name) [type: btree, unique, name: "uq_files_folder_name"]
+    author_id [type: btree, name: "idx_files_author_id"]
+    folder_id [type: btree, name: "idx_files_folder_id"]
+    hash [type: btree, name: "idx_files_hash"]
+  }
+  Note: '''One row per appearance of content in the tree. hash is deliberately not unique: two rows sharing it share one physical file on disk, which is what deduplication means.
+CHECK files_hash_is_hex: hash ~ \'^[0-9a-f]{64}$\'::text
+CHECK files_size_nonneg: size >= 0'''
+}
+
+Table "file_locations" {
+  "hash" bpchar(64) [not null]
+  "storage_volume_id" int8 [not null]
+  "verified_at" timestamptz
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    (hash, storage_volume_id) [pk, type: btree, name: "file_locations_pkey"]
+    storage_volume_id [type: btree, name: "idx_file_locations_volume"]
+  }
+  Note: '''Which volumes hold a given piece of content, keyed by hash rather than file id because the bytes are shared. Placement is recorded here and never derived from the hash: deriving it would reshuffle every existing file the moment a disk is added.
+CHECK file_locations_hash_is_hex: hash ~ \'^[0-9a-f]{64}$\'::text'''
+}
+
+Table "folder_areas" {
+  "folder_id" int8 [not null]
+  "area_id" int8 [not null]
+  "level" varchar(10) [not null]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    (folder_id, area_id) [pk, type: btree, name: "folder_areas_pkey"]
+    area_id [type: btree, name: "idx_folder_areas_area_id"]
+  }
+  Note: '''Area grants on a folder, inherited by everything beneath it. Additive; the nearest ancestor carrying a row wins.
+CHECK folder_areas_level_valid: (level)::text = ANY ((ARRAY[\'read\'::character varying, \'write\'::character varying])::text[])'''
+}
+
+Table "access_tokens" {
+  "id" int8 [pk, not null, increment]
+  "token_hash" bpchar(64) [unique, not null]
+  "folder_id" int8
+  "file_id" int8
+  "level" varchar(10) [not null]
+  "authorizer" int8 [not null]
+  "expires_at" timestamptz [not null]
+  "revoked_at" timestamptz
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    file_id [type: btree, name: "idx_access_tokens_file_id"]
+    folder_id [type: btree, name: "idx_access_tokens_folder_id"]
+  }
+  Note: '''Share links. Stores the hash of the token, never the token. Exactly one of folder_id / file_id is set. CHECK access_tokens_one_target: num_nonnulls(folder_id, file_id) = 1
+CHECK access_tokens_one_target: num_nonnulls(folder_id, file_id) = 1
+CHECK access_tokens_hash_is_hex: token_hash ~ \'^[0-9a-f]{64}$\'::text
+CHECK access_tokens_level_valid: (level)::text = ANY ((ARRAY[\'read\'::character varying, \'write\'::character varying])::text[])'''
+}
+
+Table "actions" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null, note: 'Stable machine name, e.g. user_login, file_upload, absence_approved']
+  "label" varchar(200) [not null]
+}
+
+Table "permissions" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(100) [unique, not null, note: 'Dotted resource.action, e.g. project.write. Stable machine name, like actions.code']
+  "label" varchar(200) [not null]
+  "description" text
+}
+
+Table "role_permissions" {
+  "role_id" int8 [not null]
+  "permission_id" int8 [not null]
+
+  Indexes {
+    (role_id, permission_id) [pk, type: btree, name: "role_permissions_pkey"]
+    permission_id [type: btree, name: "idx_role_permissions_permission_id"]
+  }
+  Note: 'Which permissions a role grants. Deleting either side removes the grant rather than leaving it dangling.'
+}
+
+Table "absence_types" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null, note: 'vacaciones, permiso_economico, incapacidad, dia_institucional']
+  "label" varchar(200) [not null]
+  "unit" varchar(10) [not null, note: 'How the allowance is counted for this type: day or hour. RF-AUS-03']
+  "consumes_balance" bool [not null, default: true, note: 'RF-AUS-09: false for institutional non-working days, which apply without drawing down an allowance']
+  "requires_document" bool [not null, default: false]
+  "is_active" bool [not null, default: true]
+  Note: '''CHECK absence_types_unit_valid: (unit)::text = ANY ((ARRAY[\'day\'::character varying, \'hour\'::character varying])::text[])'''
+}
+
+Table "contract_type_entitlements" {
+  "id" int8 [pk, not null, increment]
+  "contract_type_id" int8 [not null]
+  "absence_type_id" int8 [not null]
+  "amount" numeric(6,2) [not null]
+  "valid_from" date [not null]
+  "valid_to" date [note: 'NULL = still in force']
+
+  Indexes {
+    absence_type_id [type: btree, name: "idx_cte_absence_type_id"]
+    contract_type_id [type: btree, name: "idx_cte_contract_type_id"]
+  }
+  Note: '''RF-AUS-04. A cap change closes the current row with valid_to and inserts a new one; amount is never updated in place, so consumed history keeps the cap that was in force at the time.
+CHECK cte_valid_range: (valid_to IS NULL) OR (valid_to >= valid_from)
+CHECK cte_amount_nonneg: amount >= (0)::numeric
+INDEX cte_no_overlap USING gist (contract_type_id, absence_type_id, daterange(valid_from, valid_to, \'[]\'::text))'''
+}
+
+Table "leave_balances" {
+  "id" int8 [pk, not null, increment]
+  "user_id" int8 [not null]
+  "absence_type_id" int8 [not null]
+  "cycle_start" date [not null]
+  "cycle_end" date [not null]
+  "granted" numeric(6,2) [not null, note: 'Starts as a copy of the scheme cap; raised individually for RF-AUS-05 exceptions such as seniority days']
+  "used" numeric(6,2) [not null, default: 0]
+  "note" text
+
+  Indexes {
+    (user_id, absence_type_id, cycle_start) [type: btree, unique, name: "uq_leave_balances_user_type_cycle"]
+    user_id [type: btree, name: "idx_leave_balances_user_id"]
+  }
+  Note: '''One row per person, type and cycle. RF-AUS-15. The cycle is a date range rather than a year, so calendar-year and contract-anniversary cycles both fit.
+CHECK lb_cycle_range: cycle_end >= cycle_start
+CHECK lb_used_within: (used >= (0)::numeric) AND (used <= granted)
+CHECK lb_granted_nonneg: granted >= (0)::numeric'''
+}
+
+Table "absence_status_history" {
+  "id" int8 [pk, not null, increment]
+  "event_id" int8 [not null]
+  "status" varchar(20) [not null]
+  "changed_by" int8
+  "changed_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "note" text
+
+  Indexes {
+    event_id [type: btree, name: "idx_absence_status_history_event_id"]
+  }
+  Note: '''RF-AUS-14: user and date on every status change. Separate from logs because RF-AUS-13 restricts who may read the detail of a permit.
+CHECK ash_status_valid: (status)::text = ANY ((ARRAY[\'requested\'::character varying, \'approved\'::character varying, \'rejected\'::character varying, \'cancelled\'::character varying, \'taken\'::character varying])::text[])'''
+}
+
+Table "area_hierarchy" {
+  "child_area_id" int8 [pk, not null]
+  "parent_area_id" int8 [not null]
+
+  Indexes {
+    parent_area_id [type: btree, name: "idx_area_hierarchy_parent_area_id"]
+  }
+  Note: '''Which area hangs under which. A row per area that has a parent; no row means root. RF-USR-09, RF-USR-04.
+CHECK area_hierarchy_no_self: parent_area_id <> child_area_id'''
+}
+
+Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
+
+Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
+
+Ref "absences_absence_type_id_fkey":"absence_types"."id" < "absences"."absence_type_id"
+
+Ref "absences_document_file_id_fkey":"files"."id" < "absences"."document_file_id"
+
+Ref "fk_absences_approved_by_users_id":"users"."id" < "absences"."approved_by"
+
+Ref "fk_absences_event_id_events_id":"events"."id" < "absences"."event_id"
+
+Ref "access_tokens_authorizer_fkey":"users"."id" < "access_tokens"."authorizer"
+
+Ref "access_tokens_file_id_fkey":"files"."id" < "access_tokens"."file_id" [delete: cascade]
+
+Ref "access_tokens_folder_id_fkey":"folders"."id" < "access_tokens"."folder_id" [delete: cascade]
+
+Ref "area_hierarchy_child_area_id_fkey":"areas"."id" < "area_hierarchy"."child_area_id" [delete: cascade]
+
+Ref "area_hierarchy_parent_area_id_fkey":"areas"."id" < "area_hierarchy"."parent_area_id" [delete: cascade]
+
+Ref "fk_area_members_area_id_areas_id":"areas"."id" < "area_members"."area_id"
+
+Ref "fk_area_members_user_id_users_id":"users"."id" < "area_members"."user_id"
+
+Ref "fk_collection_events_collection_id_event_collections_id":"event_collections"."id" < "collection_events"."collection_id"
+
+Ref "fk_collection_events_event_id_events_id":"events"."id" < "collection_events"."event_id"
+
+Ref "contract_type_entitlements_absence_type_id_fkey":"absence_types"."id" < "contract_type_entitlements"."absence_type_id"
+
+Ref "contract_type_entitlements_contract_type_id_fkey":"contract_types"."id" < "contract_type_entitlements"."contract_type_id"
+
+Ref "fk_event_exceptions_event_id_events_id":"events"."id" < "event_exceptions"."event_id"
+
+Ref "fk_event_participants_area_id_areas_id":"areas"."id" < "event_participants"."area_id"
+
+Ref "fk_event_participants_event_id_events_id":"events"."id" < "event_participants"."event_id"
+
+Ref "fk_event_participants_user_id_users_id":"users"."id" < "event_participants"."user_id"
+
+Ref "fk_events_created_by_users_id":"users"."id" < "events"."created_by"
+
+Ref "fk_events_event_type_id_event_types_id":"event_types"."id" < "events"."event_type_id"
+
+Ref "file_locations_storage_volume_id_fkey":"storage_volumes"."id" < "file_locations"."storage_volume_id"
+
+Ref "files_author_id_fkey":"users"."id" < "files"."author_id"
+
+Ref "files_folder_id_fkey":"folders"."id" < "files"."folder_id"
+
+Ref "folder_areas_area_id_fkey":"areas"."id" < "folder_areas"."area_id" [delete: cascade]
+
+Ref "folder_areas_folder_id_fkey":"folders"."id" < "folder_areas"."folder_id" [delete: cascade]
+
+Ref "folders_owner_id_fkey":"users"."id" < "folders"."owner_id"
+
+Ref "folders_parent_id_fkey":"folders"."id" < "folders"."parent_id"
+
+Ref "leave_balances_absence_type_id_fkey":"absence_types"."id" < "leave_balances"."absence_type_id"
+
+Ref "leave_balances_user_id_fkey":"users"."id" < "leave_balances"."user_id"
+
+Ref "fk_logs_action_id_actions_id":"actions"."id" < "logs"."action_id"
+
+Ref "fk_logs_user_id_users_id":"users"."id" < "logs"."user_id"
+
+Ref "logs_area_id_fkey":"areas"."id" < "logs"."area_id"
+
+Ref "role_permissions_permission_id_fkey":"permissions"."id" < "role_permissions"."permission_id" [delete: cascade]
+
+Ref "role_permissions_role_id_fkey":"roles"."id" < "role_permissions"."role_id" [delete: cascade]
+
+Ref "fk_users_contract_type_id_contract_types_id":"contract_types"."id" < "users"."contract_type_id"
+
+Ref "fk_users_primary_area_id_areas_id":"areas"."id" < "users"."primary_area_id"
+
+Ref "fk_users_role_id_roles_id":"roles"."id" < "users"."role_id"
+
+Ref "fk_users_schedule_id_event_collections_id":"event_collections"."id" < "users"."schedule_id"
