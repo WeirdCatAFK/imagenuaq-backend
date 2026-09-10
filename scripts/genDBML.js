@@ -99,6 +99,19 @@ function dropLedger(schema) {
 //                  btree, comment, hash, or whitespace'. Dropped to the table note, since the
 //                  only one we have is the index behind an EXCLUDE constraint, which DBML
 //                  cannot express in any version.
+//
+// Two more survive the parser and break later, which is why assertChartDBCanRender() exists
+// alongside the parse check — neither of these is a parse error anywhere:
+//
+//   expression     an index over an expression rather than columns, such as lower(email) or
+//   indexes        coalesce(table_name, ''). It parses, then fails as ChartDB builds its model
+//                  with 'Index references non-existent column', because a DBML index names
+//                  columns and each is resolved against the table. Dropped to the note.
+//   expression     a column default carrying a call or a quoted literal, such as the
+//   defaults       nextval() behind requests.folio. It parses AND imports, and breaks when
+//                  ChartDB regenerates SQL from its model: everything after the first quoted
+//                  literal is dropped, so the default comes back out as `DEFAULT (SOL-)` and
+//                  the export fails to parse. Dropped to the note.
 function downgradeForChartDB(schema) {
   // Every CHECK ends up in its table's note, because 3.14 can express none of them. They
   // reach us by two different routes, though: a constraint over several columns arrives in
@@ -129,27 +142,59 @@ function downgradeForChartDB(schema) {
     }
   }
 
-  // 3.14's index grammar accepts btree and hash and nothing else, so a gist/gin/brin index
-  // stops the import dead. The one we have is not really an index anyway: it is what Postgres
-  // builds behind `cte_no_overlap`, the EXCLUDE constraint that stops two entitlement validity
-  // periods overlapping (RF-AUS-04), and no version of DBML can say EXCLUDE. Keeping it would
-  // also record a falsehood, because @dbml/connector splits an index's column list on commas
-  // without regard for parentheses, so `daterange(valid_from, valid_to, '[]'::text)` arrives
-  // as three separate expression columns. Joining the parts back with ', ' undoes that split —
-  // it is the same list the connector cut up — and the whole thing goes to the note, where it
-  // reads as documentation rather than as a schema object someone might try to reproduce.
+  // Two kinds of index cannot survive as an index, for unrelated reasons.
+  //
+  // An access method beyond btree or hash stops 3.14's grammar dead. The one we have is not
+  // really an index anyway: it is what Postgres builds behind `cte_no_overlap`, the EXCLUDE
+  // constraint that stops two entitlement validity periods overlapping (RF-AUS-04), and no
+  // version of DBML can say EXCLUDE.
+  //
+  // An index over an *expression* — `coalesce(table_name, '')` on `uq_sheets_item`,
+  // `lower(email)` on `uq_entity_contacts_email` — parses fine and then fails on import with
+  // 'Index references non-existent column', because DBML indexes name columns and ChartDB
+  // resolves each one against the table. The access method is irrelevant here; these are
+  // ordinary btree indexes. This is the third thing DBML cannot express, alongside partial
+  // predicates and EXCLUDE, and the only one that used to reach the file.
+  //
+  // Both are folded into the table note. Joining the parts back with ', ' undoes the split
+  // @dbml/connector performs on an index's column list, which cuts on commas without regard
+  // for parentheses: `daterange(valid_from, valid_to, '[]'::text)` arrives as three separate
+  // expression columns. In the note it reads as documentation rather than as a schema object
+  // someone might try to reproduce.
   for (const [key, indexes] of Object.entries(schema.indexes ?? {})) {
     const supported = [];
     for (const index of indexes) {
       const method = index.type?.toLowerCase();
-      if (!method || CHARTDB_INDEX_TYPES.has(method)) {
+      const methodOk = !method || CHARTDB_INDEX_TYPES.has(method);
+      const overColumns = !index.columns.some((c) => c.type === 'expression');
+      if (methodOk && overColumns) {
         supported.push(index);
         continue;
       }
       const columns = index.columns.map((c) => String(c.value).trim()).join(', ');
-      note(key, `INDEX ${index.name} USING ${method} (${columns})`);
+      const using = methodOk ? '' : ` USING ${method}`;
+      note(key, `INDEX ${index.name}${using} (${columns})`);
     }
     schema.indexes[key] = supported;
+  }
+
+  // ChartDB does not keep the DBML it imported: it regenerates SQL from its own model, and
+  // that generator drops everything after the first quoted literal in an expression default.
+  // `('SOL-'::text || to_char(nextval('requests_folio_seq'::regclass), 'FM000000'::text))`
+  // comes back out as `DEFAULT (SOL-)`, which fails to parse and takes the whole file with it.
+  // The expression is valid DBML and 3.14 parses it happily, so this is invisible to the
+  // parser check below — it surfaces only when ChartDB exports.
+  //
+  // Bare words (CURRENT_TIMESTAMP) and the JSON literals ({}, []) survive the round trip, so
+  // the line is drawn at a parenthesis or an apostrophe: a default carrying a call or a quoted
+  // literal comes off the column and goes to the note.
+  for (const [key, fields] of Object.entries(schema.fields ?? {})) {
+    for (const field of fields) {
+      if (field.dbdefault?.type !== 'expression') continue;
+      if (!/[(']/.test(field.dbdefault.value)) continue;
+      note(key, `DEFAULT ${field.name}: ${field.dbdefault.value}`);
+      delete field.dbdefault;
+    }
   }
 
   for (const [key, lines] of notes) {
@@ -175,7 +220,7 @@ function downgradeForChartDB(schema) {
 // file nobody can load. Bump the alias when ChartDB bumps its own.
 function assertChartDBCanParse(text) {
   try {
-    ChartDBParser.parse(text, 'dbml');
+    return ChartDBParser.parse(text, 'dbml');
   } catch (err) {
     const diag = err.diags?.[0] ?? err;
     const line = diag.location?.start?.line;
@@ -186,6 +231,44 @@ function assertChartDBCanParse(text) {
     console.error('  Add the construct to downgradeForChartDB() in this file.');
     process.exit(1);
   }
+}
+
+// Parsing is necessary and not sufficient, which the projects spine proved twice. `uq_sheets_item`,
+// an index over coalesce(table_name, ''), parsed cleanly in 3.14 and then threw 'Index references
+// non-existent column: COALESCE(table_name' when ChartDB built its model. `requests.folio`, whose
+// default calls nextval(), parsed and imported and only broke when ChartDB regenerated SQL from
+// what it had imported. Both are things ChartDB does *after* the parse, so both are done here too,
+// over the same parse tree, and the failure lands on the migration that caused it instead of in a
+// browser console days later.
+function assertChartDBCanRender(database) {
+  const offenders = [];
+  for (const schema of database.schemas ?? []) {
+    for (const table of schema.tables ?? []) {
+      const fields = new Set((table.fields ?? []).map((f) => f.name));
+      for (const index of table.indexes ?? []) {
+        for (const column of index.columns ?? []) {
+          if (column.type === 'column' && fields.has(column.value)) continue;
+          offenders.push(
+            `index ${table.name}.${index.name ?? '(unnamed)'} -> ${column.value}` +
+              ' (expression indexes belong in the table note)'
+          );
+        }
+      }
+      for (const field of table.fields ?? []) {
+        if (field.dbdefault?.type !== 'expression') continue;
+        if (!/[(']/.test(String(field.dbdefault.value))) continue;
+        offenders.push(
+          `default ${table.name}.${field.name} = ${field.dbdefault.value}` +
+            " (ChartDB's SQL export truncates it)"
+        );
+      }
+    }
+  }
+  if (!offenders.length) return;
+  console.error('Generated DBML parses but ChartDB cannot round-trip it:');
+  for (const offender of offenders) console.error(`  ${offender}`);
+  console.error('  Fold the construct into the table note in downgradeForChartDB().');
+  process.exit(1);
 }
 
 // The migration the database now sits on, which names the snapshot. Not "the migration that
@@ -216,7 +299,7 @@ const schema = downgradeForChartDB(
   dropLedger(await connector.fetchSchemaJson(withSchemas(url), 'postgres'))
 );
 const dbml = `${importer.generateDbml(schema).trim()}\n`;
-assertChartDBCanParse(dbml);
+assertChartDBCanRender(assertChartDBCanParse(dbml));
 
 const head = await headMigration(url);
 const counts = `${schema.tables.length} tables, ${schema.refs.length} refs`;

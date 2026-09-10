@@ -16,52 +16,48 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
-| **SOL, PRY, FLW, TSK, EST** | —                                                                                                                                                                                                                                       | **Propuesto**: la forma en `design/`, el porqué en §2, la cobertura en §3 |
+| SOL / PRY / EST                   | `entities`, `entity_contacts`, `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Implementado por`projects-spine`; falta la definición de formatos por UI            |
+| FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
+| TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
 | FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
 
-Los archivos de diseño se escriben a mano y no los toca `scripts/genDBML.js`: viven fuera
-de `dbml/`, que es salida generada. Todos importan en ChartDB con **Import DBML**.
+La migración `projects-spine` aterrizó la columna vertebral del MVP: once tablas que
+alcanzan para que una solicitud entre con folio, caiga en la bandeja de un área, se
+convierta en proyecto y pase por etapas con visto bueno. Lo que quedó fuera es la mitad
+*declarativa* de FLW y todo TSK, y §6 dice cómo entran sin volver a mover lo que ya está.
 
-Ojo: están en `docs/design/` del directorio contenedor `ImagenUAQ/`, **fuera de este
-repositorio**, junto a los requerimientos. Quien clone solo `imagenuaq-backend` no los
-tiene y los enlaces de abajo le quedan muertos.
-
-| Archivo                                                         | Alcance                                                                                   |
-| --------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| [`../docs/design/projects.dbml`](../docs/design/projects.dbml) | **MVP.** Proyectos y solicitudes, más los catálogos de los que dependen           |
-| [`../docs/design/tasks.dbml`](../docs/design/tasks.dbml)       | **MVP.** Tareas, para conectar a mano con el anterior                               |
-| [`../docs/design/spine.dbml`](../docs/design/spine.dbml)       | La columna vertebral completa, incluidos formatos y flujo. Referencia de a dónde va esto |
-
-El MVP recorta del `spine` dos cosas, y las secciones que las describen siguen siendo la
-referencia de cómo vuelven a entrar:
-
-- **Formatos** (`forms`, `form_versions`, `form_fields`, §2.2 y §2.3). `requests` queda
-  mínima: guarda la captura en `data jsonb` y el origen en `form_code` como texto suelto.
-  Eso ya cubre `RF-MIG-01` — las respuestas quedan en la base mientras el Excel sigue
-  vivo — sin comprometer todavía el modelo de formatos.
-- **Flujo** (`workflows`, `workflow_stages`, `project_stages`, `approvals`, §2.1 y §2.6).
-  El proyecto avanza por `status_id`. Las columnas que apuntan a una etapa
-  (`notes.project_stage_id`, `tasks.project_stage_id`, `project_field_values`) no existen
-  aún; entran con el módulo.
+La forma autoritativa es `dbml/current.dbml`, que `scripts/genDBML.js` regenera después de
+cada migración. Los `.dbml` escritos a mano que sirvieron de propuesta vivían en
+`docs/design/` del directorio contenedor `ImagenUAQ/`, **fuera de este repositorio**; ya no
+son la referencia de nada implementado, y quien clone solo `imagenuaq-backend` nunca los
+tuvo. Este documento es lo que queda de ellos.
 
 ## 1. La columna vertebral
 
 Cinco módulos que se leen como una sola cadena, y de los que cuelgan todos los demás:
 
 ```
-entities ─┬─ requests ──→ projects ─┬─ project_stages ──→ approvals
-          │   (form_versions,        ├─ tasks
-          │    data JSONB)           ├─ notes / time_entries
-          └─ entity_contacts         └─ project_field_values
+schemas → schema_versions ─┬─ sheets                     (RF-MIG-01: el Excel sigue vivo)
+                           │
+entities ─┬─ requests ─────┴──→ projects ─┬─ project_stages ──→ approvals
+          │   (data JSONB)                ├─ project_field_values
+          └─ entity_contacts              └─ tasks / notes / time_entries   (sin modelar)
 
-workflows → workflow_versions → workflow_stages ⇄ workflow_transitions   (grafo)
+statuses  (catálogo por área; projects.status_id, requests.status_id)
+
+workflows → workflow_versions → workflow_stages ⇄ workflow_transitions   (grafo, §6)
 ```
 
-Una solicitud entra por un formato (`form_versions`), recibe folio y cae en la bandeja del
-área (`RF-SOL-03`, `RF-SOL-04`). Una o varias solicitudes se convierten en proyecto
-(`RF-PRY-01`). El proyecto instancia la versión de un flujo: cada nodo por el que pasa es
-una fila en `project_stages`, y cada visto bueno una fila en `approvals` (`RF-FLW-03`,
-`RF-PRY-03`). Las tareas cuelgan del proyecto y, opcionalmente, de la etapa.
+Una solicitud entra por un formato (`schema_versions`), recibe folio y cae en la bandeja
+del área (`RF-SOL-03`, `RF-SOL-04`). Una o varias solicitudes se convierten en proyecto
+(`RF-PRY-01`). El proyecto pasa por etapas: cada una es una fila en `project_stages`, y
+cada visto bueno una fila en `approvals` (`RF-FLW-03`, `RF-PRY-03`). Las tareas colgarán
+del proyecto y, opcionalmente, de la etapa.
+
+Todo lo anterior existe salvo la última línea del diagrama: las etapas se crean hoy a
+mano, porque `workflows` y sus versiones son la mitad de FLW que no se migró (§6). Nada de
+lo que ya está cambia cuando entren — `project_stages` gana `workflow_stage_id` y el resto
+queda igual.
 
 ## 2. Decisiones de diseño
 
@@ -82,6 +78,11 @@ una etapa actual sino varias; la etapa actual es el conjunto de filas de `projec
 con `status = 'active'`. Poner esa columna es el error que obliga a rehacer el módulo
 cuando aparece el primer proyecto que va a diseño e imprenta a la vez.
 
+**Implementado así.** `projects-spine` creó `project_stages` sin `workflow_stage_id` —los
+nodos aún no existen— y sin puntero alguno en `projects`. La tabla lleva `seq`, que es
+orden de presentación y nada más: `project_stages.seq` no decide qué sigue, y el comentario
+de la columna lo dice para que no se relea como el contador que esta sección rechaza.
+
 ### 2.2 Formatos y flujos se versionan; las versiones publicadas son inmutables
 
 `RF-SOL-01` y `RF-FLW-02` piden que coordinación dé de alta formatos y flujos sin
@@ -89,8 +90,20 @@ desarrollo. Si esas definiciones se editan en su lugar, dos cosas se rompen: una
 vieja deja de poder mostrarse con los campos con los que se capturó, y un proyecto en
 vuelo cambia de flujo a media ejecución.
 
-Por eso `forms → form_versions → form_fields` y `workflows → workflow_versions → workflow_stages`. Editar publica una versión nueva; `requests.form_version_id` y
-`projects.workflow_version_id` apuntan a la versión con la que nacieron y nunca se mueven.
+Por eso `schemas → schema_versions` y `workflows → workflow_versions → workflow_stages`.
+Editar publica una versión nueva; `requests.schema_version_id` y
+`projects.schema_version_id` apuntan a la versión con la que nacieron y nunca se mueven.
+
+Las tablas se llaman `schemas` y `schema_versions`, no `forms` y `form_versions`: el mismo
+objeto describe el formato de captura **y** el destino de una importación de Excel
+(`sheets.schema_version_id`, §2.9), y llamarlo formato dejaría el segundo uso sin nombre.
+El costo del nombre es que "schema" ya significa otra cosa en Postgres; se aceptó porque
+ninguna de las dos acepciones aparece en las consultas de la otra.
+
+**La inmutabilidad es un trigger, no una convención.** `schema_versions_immutable` rechaza
+todo `UPDATE` sobre la tabla. Dejarla en la orquestación es dejarla al cuidado del próximo
+que escriba un `UPDATE`, y para cuando se note, la historia que protege ya se reescribió.
+Es el mismo criterio que `folders_no_cycle`.
 
 ### 2.3 El payload de la solicitud es JSONB; los campos que se buscan son columnas
 
@@ -105,8 +118,18 @@ Las dos cosas no quieren el mismo almacenamiento:
 - Lo que `RF-SOL-05` busca sube a columnas reales (`folio`, `title`, `entity_id`,
   `status_id`, `assignee_id`). Son las mismas para todos los formatos, así que no
   dependen de la definición dinámica.
-- `form_fields` sí son filas, no JSON: el constructor de formatos y el validador los
-  consultan y los ordenan.
+- La definición de los campos vive en `schema_versions.fields jsonb`, un arreglo ordenado.
+
+**Esto último invierte lo que esta sección decía.** El argumento original era que los
+campos debían ser filas (`form_fields`) porque el constructor de formatos y el validador
+los consultan y los ordenan. Los consultan, sí, pero **de una versión a la vez**, que es
+una sola lectura en JSONB; y nada busca a través de las definiciones de formatos
+distintos, que es lo único que las filas comprarían. El orden, que era el otro motivo, lo
+da el índice del arreglo sin una columna `sort_order`.
+
+Las filas vuelven el día que algo consulte campos entre formatos —un reporte de "qué
+formatos piden tiraje", por ejemplo—. Mientras tanto, el `CHECK jsonb_typeof(fields) =
+'array'` es lo que impide que la columna degenere en un objeto suelto.
 
 ### 2.4 Los valores que cruzan etapas son filas, no un JSONB acumulado
 
@@ -125,7 +148,7 @@ que aquí es una búsqueda por igualdad.
 `RF-SOL-02` pide que cada formato esté asociado al área a la que se dirigen sus
 solicitudes (el formato 02, papel institucional, cae primero a diseño gráfico).
 
-En vez de una tabla `form_target_areas` en paralelo, `form_versions.workflow_version_id`
+En vez de una tabla de áreas destino en paralelo, `schema_versions.workflow_version_id`
 apunta al flujo, y las etapas marcadas `is_entry` definen a qué áreas cae. Un solo lugar
 decide el enrutamiento, que es también lo que `RF-FLW-04` automatiza al dar el visto bueno.
 Es la misma lección de la migración `schema-proofing`: la jefatura de área estaba en tres
@@ -135,11 +158,23 @@ lugares y ninguno los mantenía de acuerdo.
 `workflow_version_id` nulo más un área de destino explícita, no reintroducir la tabla
 paralela.
 
+**Pendiente, con un puente.** `schema_versions` todavía no apunta a ningún flujo, porque
+los flujos no existen. Mientras tanto el enrutamiento lo lleva `requests.area_id`: la
+bandeja en la que la solicitud cayó, escrita al crearla. Es exactamente el "área de destino
+explícita" del párrafo anterior, así que cuando entre FLW la columna no estorba —pasa a ser
+el valor derivado de la etapa de entrada, y el único cambio es quién la escribe.
+
 ### 2.6 Las etapas se pueden repetir
 
 Un visto bueno rechazado devuelve el trabajo a diseño. Por eso `project_stages` no es
 única por `(project_id, workflow_stage_id)` sino por `(project_id, workflow_stage_id, attempt)`. Sin el contador, el reproceso o sobrescribe la historia o falla al insertar —
 y `RF-PRY-03` pide justamente esa historia.
+
+Sin nodos todavía, la clave implementada es `(project_id, area_id, seq, attempt)`: `seq`
+ocupa el lugar del nodo para distinguir dos etapas de la misma área —propuesta y luego
+ajustes— sin abusar de `attempt`, que significa otra cosa. Cuando entren los nodos, el
+índice se mueve a `workflow_stage_id` y `seq` queda como lo que ya es, orden de
+presentación.
 
 ### 2.7 El historial de estatus se registra en `logs`, no en una tabla propia
 
@@ -161,50 +196,103 @@ frontera contigua que vigilar, en vez de un filtro que recordar.
 Para las alertas de `RF-EST-03` y `RF-EST-04` ("lleva demasiado tiempo en el mismo
 estatus") se desnormaliza `status_since` en la fila. Recorrer la bitácora para contestar
 eso en cada consulta del tablero no escala, y el valor es reconstruible desde `logs` si
-llega a divergir.
+llega a divergir. Está implementado en `projects` y en `requests`; quien mueva
+`status_id` tiene que mover `status_since` en el mismo `UPDATE`, y eso es regla de
+orquestación, no del esquema.
+
+Ojo con el nombre: `project_stages.status` **no** es un `status_id` del catálogo. Es la
+máquina del flujo (`pending`, `active`, `waiting_external`, `done`, `cancelled`) y contesta
+si el área puede trabajar; `statuses` contesta qué muestra el tablero (`RF-EST-01`). Son dos
+preguntas distintas y por eso son dos columnas en dos tablas.
+
+### 2.8 La solicitud no es un proyecto temprano
+
+Es la fusión que casi todo borrador hace, y la que más cuesta deshacer. `RF-SOL-03` le da
+folio a la solicitud **en cuanto entra**, antes de que nadie decida que es trabajo;
+`RF-SOL-04` la pone en la bandeja del área; `RF-PRY-01` convierte **una o varias** en un
+proyecto. Con una sola tabla, la solicitud rechazada no tiene dónde vivir y el proyecto que
+nació de tres se queda con una.
+
+Por eso `requests` y `projects` son tablas distintas y la relación va del lado de la
+solicitud: `requests.project_id` nulo es una solicitud sin convertir, que es justo lo que
+la bandeja consulta. Muchas a uno es la dirección que `RF-PRY-01` enuncia y la contraria no
+tiene caso, así que no hay tabla puente.
+
+**El folio lo genera la base.** `requests.folio` tiene `DEFAULT` sobre la secuencia
+`requests_folio_seq`. Calcularlo en la orquestación con un `max() + 1` produce el mismo
+folio dos veces exactamente cuando dos solicitudes entran a la vez, y `RF-SOL-03` pide un
+identificador único. Reiniciarlo por año es cambiar la expresión del `DEFAULT`, no la
+forma.
+
+### 2.9 El Excel sigue vivo, y el sistema sabe cuál
+
+`RF-MIG-01` no pide importar y olvidar: pide que las respuestas queden en la base
+**mientras** el Excel actual se sigue usando, y `RF-MIG-02` pide poder traer lo que ya
+existe. `src/routes/spreadsheets.js` ya lee un libro por Graph; lo que no tenía era dónde
+anotar cuál libro, mapeado cómo, hacia qué formato.
+
+`sheets` es ese registro. Tres decisiones dentro:
+
+- **`drive_id` + `item_id`, no la URL.** Es el par que toman las llamadas a Graph; un
+  enlace compartido ni sobrevive a que muevan el archivo ni identifica una tabla dentro
+  del libro. `web_url` se guarda igual, porque es lo que un humano pega, pero es adorno.
+- **`column_map` apunta a un `schema_version_id`, no a un `schema_id`.** Un mapeo se
+  escribe contra las columnas de una versión concreta; apuntar a la identidad móvil lo
+  desalinearía en silencio el día que el formato gane un campo. Reapuntarlo tras publicar
+  una versión nueva es un acto deliberado, que es el costo correcto.
+- **`last_imported_at`**, para que una importación periódica sepa desde dónde seguir en vez
+  de releer el libro entero.
+
+`requests.source = 'sheet'` es el otro extremo del hilo, y el `CHECK requests_sheet_origin`
+impide que una solicitud capturada a mano diga venir de un libro.
 
 ## 3. Trazabilidad
 
-| RF                              | Cubierto por                                                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| RF-SOL-01                       | `forms`, `form_versions`, `form_fields`                                                                       |
-| RF-SOL-02                       | `form_versions.workflow_version_id` → `workflow_stages.is_entry` (§2.5)                                       |
-| RF-SOL-03                       | `requests.folio` (único)                                                                                         |
-| RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` (§2.3)                                                                          |
-| RF-SOL-06                       | `requests.data`, `requests.folder_id`                                                                           |
-| RF-SOL-07                       | `entities`, `entity_contacts`                                                                                   |
-| RF-SOL-08                       | `requests.source`                                                                                                 |
-| RF-PRY-01                       | `requests.project_id`                                                                                             |
-| RF-PRY-02                       | `projects`, `project_members`; las áreas participantes se derivan, no se guardan                               |
-| RF-PRY-03                       | `project_stages` + `approvals` + `logs`                                                                       |
-| RF-PRY-04                       | `time_entries`                                                                                                    |
-| RF-PRY-05                       | `notes.kind`                                                                                                      |
-| RF-PRY-06                       | `workflows` reutilizables; sin estructura nueva por eventualidad                                                  |
-| RF-PRY-07                       | `projects.has_cost`                                                                                               |
-| RF-PRY-08                       | `projects.period_id`, `carried_over`                                                                            |
-| RF-PRY-09                       | `project_materials.origin`                                                                                        |
-| RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1)                                                              |
-| RF-FLW-03                       | `approvals`                                                                                                       |
-| RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        |
-| RF-FLW-05                       | `approvals.approver_contact_id`, `requires_entity_approval`                                                     |
-| RF-FLW-06                       | `project_field_values` (§2.4)                                                                                    |
-| RF-FLW-07                       | `project_stages.status = 'waiting_external'`, `blocked_reason`                                                  |
-| RF-FLW-08                       | `priority`; sin orden por fecha de llegada                                                                        |
-| RF-FLW-09                       | Grafo con ramas paralelas (§2.1)                                                                                   |
-| RF-TSK-01 … RF-TSK-05          | `tasks`                                                                                                           |
-| RF-TSK-06, RF-TSK-07            | Consulta sobre`events` + `area_members`; sin tabla nueva                                                        |
-| RF-EST-01                       | `projects.status_id`                                                                                              |
-| RF-EST-02                       | `statuses.area_id`                                                                                                |
-| RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since`                                                                                  |
-| RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      |
-| RF-EST-06, RF-EST-10            | `notifications`                                                                                                   |
-| RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since`                                                                       |
-| RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         |
-| RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   |
-| RF-USR-03, RF-USR-04            | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella |
-| RF-USR-05, RF-USR-10            | `permissions` + `role_permissions` (§5.2)                                                                      |
-| RF-USR-07                       | `logs` con `target_table`/`target_id` (§5.3)                                                                 |
-| RF-USR-09                       | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla                             |
+La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
+✗ la tabla aún no está creada.
+
+| RF                              | Cubierto por                                                                                                        | Estado |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------ |
+| RF-SOL-01                       | `schemas`, `schema_versions.fields` (§2.2, §2.3)                                                             | ◑ falta la UI de armado |
+| RF-SOL-02                       | `requests.area_id` como puente; después`schema_versions` → flujo (§2.5)                                     | ◑ |
+| RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8)                                                   | ✔ |
+| RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3)                                                 | ✔ |
+| RF-SOL-06                       | `requests.data`, `requests.folder_id`                                                                           | ✔ |
+| RF-SOL-07                       | `entities`, `entity_contacts`                                                                                   | ✔ |
+| RF-SOL-08                       | `requests.source`                                                                                                 | ✔ |
+| RF-PRY-01                       | `requests.project_id` (§2.8)                                                                                      | ✔ |
+| RF-PRY-02                       | `projects`, `project_members`; las áreas participantes se derivan, no se guardan                               | ◑ falta`project_members` |
+| RF-PRY-03                       | `project_stages` + `approvals` + `logs`                                                                       | ✔ |
+| RF-PRY-04                       | `time_entries`                                                                                                    | ✗ |
+| RF-PRY-05                       | `notes.kind`                                                                                                      | ✗ |
+| RF-PRY-06                       | `workflows` reutilizables; sin estructura nueva por eventualidad                                                  | ✗ |
+| RF-PRY-07                       | `projects.has_cost`                                                                                               | ✔ |
+| RF-PRY-08                       | `projects.carried_over`; `period_id` espera a`periods` (CAL/FIN)                                            | ◑ |
+| RF-PRY-09                       | `project_materials.origin`                                                                                        | ✗ |
+| RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1, §6)                                                        | ✗ etapas a mano |
+| RF-FLW-03                       | `approvals`                                                                                                       | ✔ |
+| RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        | ✗ |
+| RF-FLW-05                       | `approvals.approver_contact_id`, una fila por lado                                                                | ◑ falta`requires_entity_approval`, que es del flujo |
+| RF-FLW-06                       | `project_field_values` (§2.4)                                                                                    | ✔ |
+| RF-FLW-07                       | `project_stages.status = 'waiting_external'` + `blocked_reason` (CHECK)                                        | ✔ |
+| RF-FLW-08                       | `projects.priority`, `requests.priority`; sin orden por fecha de llegada                                        | ✔ |
+| RF-FLW-09                       | Sin etapa actual: el conjunto de`project_stages` activas (§2.1)                                                 | ✔ |
+| RF-TSK-01 … RF-TSK-05          | `tasks`; hoy solo`project_stages.assigned_to`, una persona por etapa                                          | ◑ |
+| RF-TSK-06, RF-TSK-07            | Consulta sobre`events` + `area_members`; sin tabla nueva                                                        | ✔ |
+| RF-EST-01                       | `projects.status_id` → `statuses`                                                                              | ✔ |
+| RF-EST-02                       | `statuses.area_id`; el catálogo global viene sembrado, los de área los pone coordinación                       | ✔ |
+| RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since`                                                                                  | ◑ `status_since` sí, `alert_rules` no |
+| RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
+| RF-EST-06, RF-EST-10            | `notifications`                                                                                                   | ✗ |
+| RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
+| RF-MIG-01, RF-MIG-02            | `sheets` + `requests.data` (§2.9)                                                                              | ✔ |
+| RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
+| RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         | ◑ |
+| RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   | ✔ |
+| RF-USR-03, RF-USR-04            | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella | ✔ |
+| RF-USR-05, RF-USR-10            | `permissions` + `role_permissions` (§5.2)                                                                      | ✔ |
+| RF-USR-07                       | `logs` con `target_table`/`target_id` (§5.3)                                                                 | ✔ |
+| RF-USR-09                       | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla                             | ✔ |
 
 `RF-TSK-07` y `RF-CAL-06` cruzan con ausencias: la ocupación del área debe descontar las
 ausencias autorizadas. Se resuelven leyendo `events` (público) y **nunca** `absences`
@@ -213,11 +301,15 @@ fechas y duración pero nunca el motivo.
 
 ## 4. Puntos de enganche de los módulos restantes
 
-Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ellos:
+Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ellos. Desde
+`projects-spine`, los enganches marcados existen de verdad y no son promesas:
 
-- **FIN** — `projects.expected_invoice_count`, `entities` como destinatario del cobro,
-  `project_field_values` para el número de orden que `RF-IMP-08` pasa a facturación
-  imprenta. Faltan `providers`, `quotes`, `invoices`, `oficios`, `payments`.
+- **FIN** — `entities` (existe) como destinatario del cobro y `project_field_values`
+  (existe) para el número de orden que `RF-IMP-08` pasa a facturación imprenta. Faltan
+  `projects.expected_invoice_count`, `providers`, `quotes`, `invoices`, `oficios`,
+  `payments`. Ojo con §5.6: el despachador de eventos deja que una escritura tenga éxito
+  sin su fila de bitácora, y para FIN la forma que no puede perder una es un CTE que
+  escriba en `logs` en la misma sentencia que el cambio.
 - **INV** — independiente del proyecto salvo por préstamos ligados a uno. Faltan
   `inventory_items`, `inventory_loans`, `inventory_movements`, y para `RF-INV-07` las
   licencias compartidas con su bitácora de sesiones.
@@ -549,3 +641,35 @@ escribía nunca, así que no se pierde dato alguno.
 camino de vuelta es el Down de esta migración: reponer `avatar_file_id`, migrar los bytes a
 `files` y soltar la columna. Ningún `RF-*` pide la foto de perfil; conviene saberlo antes de
 defenderla.
+
+## 6. Lo que falta de la columna vertebral, y cómo entra
+
+`projects-spine` dejó FLW a medias y TSK sin empezar. No es un descuido: es el recorte que
+permitió migrar algo usable sin comprometer el editor por nodos, que es la pieza más cara
+de `RF-FLW-02`. Lo que sigue es el camino de vuelta, escrito ahora para que no se invente
+después.
+
+**FLW declarativo.** `workflows → workflow_versions → workflow_stages ⇄ workflow_transitions`,
+con `position_x`/`position_y` en el nodo para que el diagrama sobreviva al guardado (§2.1),
+`is_entry` para el enrutamiento (§2.5) y `requires_entity_approval` para el visto bueno de
+doble parte (`RF-FLW-05`). Sobre lo ya migrado, tres cambios y ninguno más:
+
+- `project_stages` gana `workflow_stage_id`, y el índice único pasa de
+  `(project_id, area_id, seq, attempt)` a `(project_id, workflow_stage_id, attempt)` (§2.6).
+- `schema_versions` gana `workflow_version_id`, y `requests.area_id` deja de escribirse a
+  mano para derivarse de la etapa de entrada (§2.5).
+- `projects` gana `workflow_version_id`, la versión con la que nació (§2.2).
+
+**TSK.** `tasks`, `project_members`, `time_entries` y `notes`, todas colgando de `projects`
+y opcionalmente de `project_stages`. Son tablas nuevas que agregan; ninguna altera lo que
+ya está. `project_stages.assigned_to` —una persona por etapa— sigue siendo el primer reparto
+del responsable de área (`RF-TSK-01`) y no se elimina cuando lleguen las tareas: son dos
+granularidades distintas, no dos versiones de la misma.
+
+**EST.** `alert_rules` y `notifications`, que son lo único que falta para `RF-EST-03`,
+`RF-EST-04`, `RF-EST-06`, `RF-EST-09` y `RF-EST-10`; `status_since` ya está puesto y es la
+mitad cara.
+
+**Lo que no debe cambiar al hacer nada de lo anterior**, porque revertirlo cuesta el módulo
+entero: `projects` no gana una etapa actual (§2.1), `requests` y `projects` siguen siendo
+tablas distintas (§2.8) y una `schema_versions` publicada no se edita (§2.2).
