@@ -1,7 +1,8 @@
 # Datamodel
 
-Aquí estarán los diccionarios de datos y la descripción de las dinámicas por las que se
-consume la api.
+El diccionario de datos —las 38 tablas y la vista, columna por columna— está en §7. Lo de
+antes es el porqué: §1 la forma general, §2 las decisiones caras de revertir, §3 la
+trazabilidad contra los requerimientos, §5 los huecos ya cerrados y §6 lo que falta.
 
 Los identificadores (tablas, columnas, valores de catálogo) van en inglés, como el resto
 del código; la prosa de este documento va en español, como el resto de la documentación de
@@ -673,3 +674,633 @@ mitad cara.
 **Lo que no debe cambiar al hacer nada de lo anterior**, porque revertirlo cuesta el módulo
 entero: `projects` no gana una etapa actual (§2.1), `requests` y `projects` siguen siendo
 tablas distintas (§2.8) y una `schema_versions` publicada no se edita (§2.2).
+
+## 7. Diccionario de datos
+
+Las 38 tablas y la vista, tal como están en la base hoy. Es la referencia de "qué guarda
+esta columna"; el porqué está en §2 y el estado de cada módulo en §1.
+
+Convenciones de las tablas de abajo:
+
+- **Tipo** es el tipo real de Postgres. `bigint` en una llave primaria siempre es
+  `GENERATED ALWAYS AS IDENTITY`, así que no se repite en cada fila.
+- **Nulo** dice si la columna admite `NULL`.
+- **Predet.** es el `DEFAULT`; vacío significa que no tiene.
+- Las llaves foráneas se anotan en la descripción como `→ tabla.columna`.
+- Los `CHECK`, los índices parciales y las restricciones `EXCLUDE` **no** aparecen aquí:
+  viven en el `.sql` de su migración, que es el único lugar donde se leen completos. El
+  diccionario dice qué guarda cada columna, no todo lo que la restringe.
+
+Esta sección se escribe a mano y se contrasta contra la base. Para verificarla después de
+una migración, `dbml/current.dbml` es la instantánea generada y `npm run migrate:status`
+dice si la base está al día.
+
+### 7.1 USR — personas, áreas y autorización
+
+#### `users`
+
+Cuenta de una persona del equipo. Las crea un administrador; nadie se registra solo
+(`RF-USR-01`, `RF-USR-02`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `primary_area_id` | bigint | sí | | Área principal, la que se estampa en la bitácora → `areas.id` |
+| `schedule_id` | bigint | sí | | Horario laboral como colección de eventos → `event_collections.id` |
+| `contract_type_id` | bigint | no | | Esquema de contratación; decide los topes de ausencia → `contract_types.id` |
+| `role_id` | bigint | no | | Rol global, no por área (§5.2) → `roles.id` |
+| `email` | varchar(320) | no | | Identidad de acceso. Único **entre las cuentas vivas**: el índice es parcial sobre `deleted_at IS NULL` |
+| `full_name` | varchar(200) | no | | Nombre para mostrar |
+| `birthday` | date | sí | | Cumpleaños |
+| `password_hash` | varchar(500) | sí | | bcrypt, costo 12. `NULL` significa **invitación sin canjear**: es lo que hace válido el token de alta, y llenarlo lo consume |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta de la cuenta |
+| `deleted_at` | timestamptz | sí | | Baja lógica. Libera el correo para una cuenta nueva |
+| `token_version` | int | no | `0` | Contador de revocación (§5.7). `verifyToken()` lo compara contra el claim en cada petición; subirlo invalida toda sesión anterior |
+| `profile_picture` | bytea | sí | | Foto de perfil. Deuda declarada (§5.8): debería vivir en `files` cuando I8 encienda el almacén |
+| `profile_picture_mime` | varchar(100) | sí | | Tipo MIME de la foto. Va con la anterior: ambas o ninguna |
+
+#### `roles`
+
+Catálogo de roles. Es global y se queda global; qué puede hacer cada uno lo dicen
+`role_permissions` (`RF-USR-02`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(50) | no | | Único. `admin`, `area_lead`, `worker`, `finance` |
+| `description` | text | sí | | Para qué es el rol |
+
+#### `permissions`
+
+Catálogo de permisos. Lectura y escritura son permisos **independientes**, que es lo que
+`RF-USR-05` exige.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `code` | varchar(100) | no | | Único. `recurso.accion`, p. ej. `project.write` |
+| `label` | varchar(200) | no | | Nombre visible |
+| `description` | text | sí | | Qué habilita, con su `RF-*` |
+
+#### `role_permissions`
+
+Qué permisos tiene cada rol. Editable en caliente desde `PUT /api/roles/:id/permissions`,
+por eso los permisos **no** viajan en el JWT.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `role_id` | bigint | no | | Parte de la llave primaria → `roles.id` |
+| `permission_id` | bigint | no | | Parte de la llave primaria → `permissions.id` |
+
+#### `areas`
+
+Área o coordinación. Las dos son la misma tabla; lo que las distingue es su lugar en
+`area_hierarchy` (`RF-USR-09`, §5.5).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(200) | no | | Único |
+| `description` | text | sí | | A qué se dedica |
+
+#### `area_hierarchy`
+
+El organigrama. `child_area_id` es la llave primaria **completa** —un solo padre por
+área—, y eso es lo que hace que el árbol se pueda dibujar.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `child_area_id` | bigint | no | | Llave primaria; el área subordinada → `areas.id` |
+| `parent_area_id` | bigint | no | | El área de la que cuelga → `areas.id` |
+
+#### `area_members`
+
+Quién pertenece a qué área. Es muchos a muchos: alguien puede estar en dos áreas y liderar
+solo una (`RF-USR-03`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `area_id` | bigint | no | | → `areas.id` |
+| `user_id` | bigint | no | | → `users.id`. Único junto con `area_id` |
+| `is_area_leader` | boolean | no | | Si lidera **esta** área. La jefatura vive aquí y en ningún otro lado (§5.5) |
+
+#### `contract_types`
+
+Esquemas de contratación: honorarios, eventual, base de confianza, base sindicalizada y
+becario. Son condiciones de empleo (`RF-AUS-02`), así que agregar uno es una migración, no
+un endpoint; lo configurable es `contract_type_entitlements`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(200) | no | | Único |
+
+### 7.2 CAL / AUS — calendario, ausencias y saldos
+
+#### `events`
+
+Todo lo que ocupa tiempo: horarios, etapas de proyecto, ausencias y días festivos.
+`starts_at`/`ends_at` describen la **primera** ocurrencia; las recurrencias se expanden al
+leer, para la ventana pedida.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `event_type_id` | bigint | no | | → `event_types.id` |
+| `title` | varchar(300) | no | | Título visible |
+| `description` | text | sí | | Detalle libre |
+| `all_day` | boolean | no | `false` | Evento de día completo |
+| `starts_at` | timestamptz | no | | Inicio de la primera ocurrencia |
+| `ends_at` | timestamptz | no | | Fin de la primera ocurrencia |
+| `timezone` | text | no | `America/Mexico_City` | Zona con la que se expande la recurrencia |
+| `rule` | text | sí | | Regla RFC 5545, p. ej. `FREQ=WEEKLY;BYDAY=MO,WE,FR`. `NULL` = ocurrencia única |
+| `recurrence_until` | timestamptz | sí | | Fin de la recurrencia |
+| `created_by` | bigint | sí | | Quién lo creó → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta del registro |
+
+#### `event_types`
+
+Catálogo del tipo de evento.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `code` | varchar(50) | no | | Único. `horario`, `proyecto`, `ausencia`, `festivo` |
+| `label` | varchar(200) | no | | Nombre visible |
+
+#### `event_participants`
+
+A quién le aplica un evento. Exactamente uno de `user_id` / `area_id` va lleno; las filas
+de área se abren a sus integrantes al consultar.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `event_id` | bigint | no | | → `events.id` |
+| `area_id` | bigint | sí | | Participante colectivo → `areas.id` |
+| `user_id` | bigint | sí | | Participante individual → `users.id` |
+
+#### `event_exceptions`
+
+Una ocurrencia concreta de un evento recurrente que se movió o se canceló, sin tocar la
+serie.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `event_id` | bigint | no | | Serie a la que pertenece → `events.id` |
+| `original_start` | timestamptz | no | | Qué ocurrencia sustituye. Único junto con `event_id` |
+| `is_cancelled` | boolean | no | `false` | La ocurrencia no sucede |
+| `starts_at` | timestamptz | sí | | Nuevo inicio, si se movió |
+| `ends_at` | timestamptz | sí | | Nuevo fin, si se movió |
+
+#### `event_collections`
+
+Un conjunto de eventos con nombre: el horario de una persona, el calendario de un
+proyecto, el periodo vacacional de un esquema.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `key` | varchar(200) | no | | Único. `horario_daniel`, `vacaciones_contrato_x` |
+| `name` | varchar(300) | no | | Nombre visible |
+| `description` | text | sí | | Para qué es |
+
+#### `collection_events`
+
+Qué eventos integran una colección.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `event_id` | bigint | no | | → `events.id` |
+| `collection_id` | bigint | no | | → `event_collections.id`. Único junto con `event_id` |
+
+#### `absences`
+
+El permiso en sí. **Contiene lo restringido** por `RF-AUS-13` —el motivo y el respaldo
+documental—, así que nada relacionado con disponibilidad lee esta tabla: para eso está la
+vista `absence_availability`. La llave primaria es el evento, no un id propio: una ausencia
+*es* un evento con detalle.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `event_id` | bigint | no | | Llave primaria → `events.id` |
+| `reason` | text | no | | **Restringido** (`RF-AUS-13`): el motivo del permiso |
+| `approved_by` | bigint | sí | | Quién autorizó → `users.id` |
+| `approved_at` | timestamptz | sí | | Cuándo se autorizó |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se solicitó |
+| `document_file_id` | bigint | sí | | **Restringido**: respaldo documental → `files.id` |
+| `absence_type_id` | bigint | no | | → `absence_types.id` |
+| `status` | varchar(20) | no | `requested` | `requested`, `approved`, `rejected`, `cancelled`, `taken` (`RF-AUS-14`) |
+
+#### `absence_types`
+
+Catálogo de tipos de ausencia, configurable desde la aplicación (`RF-AUS-03`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `code` | varchar(50) | no | | Único. `vacaciones`, `permiso_economico`, `incapacidad`, `dia_institucional` |
+| `label` | varchar(200) | no | | Nombre visible |
+| `unit` | varchar(10) | no | | Unidad de conteo: `day` u `hour` |
+| `consumes_balance` | boolean | no | `true` | `false` para días institucionales, que aplican sin descontar saldo (`RF-AUS-09`) |
+| `requires_document` | boolean | no | `false` | Si exige respaldo documental |
+| `is_active` | boolean | no | `true` | Si se puede seguir solicitando |
+
+#### `contract_type_entitlements`
+
+El tope de días por (esquema × tipo × periodo de vigencia). Cambiar un tope **cierra** la
+fila con `valid_to` e inserta otra; nunca se actualiza `amount`, para que lo ya consumido
+siga explicándose con el tope vigente entonces (`RF-AUS-04`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `contract_type_id` | bigint | no | | → `contract_types.id` |
+| `absence_type_id` | bigint | no | | → `absence_types.id` |
+| `amount` | numeric(6,2) | no | | Tope del periodo |
+| `valid_from` | date | no | | Inicio de vigencia |
+| `valid_to` | date | sí | | Fin de vigencia. `NULL` = sigue vigente |
+
+Una restricción `EXCLUDE` (`cte_no_overlap`) impide que dos periodos del mismo esquema y
+tipo se traslapen, porque entonces "el tope en la fecha D" sería ambiguo. No es expresable
+en DBML: se lee en la migración.
+
+#### `leave_balances`
+
+Saldo por persona, tipo y ciclo. El ciclo es un par de fechas y no un año, porque el
+sindicalizado no corre por año calendario.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `user_id` | bigint | no | | → `users.id` |
+| `absence_type_id` | bigint | no | | → `absence_types.id` |
+| `cycle_start` | date | no | | Inicio del ciclo. Único junto con `user_id` y `absence_type_id` |
+| `cycle_end` | date | no | | Fin del ciclo |
+| `granted` | numeric(6,2) | no | | Otorgado. Nace como copia del tope del esquema y se sube individualmente para las excepciones de `RF-AUS-05`, como los días por antigüedad |
+| `used` | numeric(6,2) | no | `0` | Consumido. No puede exceder `granted` |
+| `note` | text | sí | | Por qué se otorgó algo distinto al tope |
+
+#### `absence_status_history`
+
+Quién cambió el estatus de un permiso y cuándo. Es la excepción deliberada a §2.7: vive
+aquí y no en `logs` por confidencialidad, para que lo restringido quede en una frontera
+contigua.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `event_id` | bigint | no | | Permiso afectado → `absences.event_id`, en cascada |
+| `status` | varchar(20) | no | | El estatus al que pasó |
+| `changed_by` | bigint | sí | | Quién lo cambió → `users.id` |
+| `changed_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo |
+| `note` | text | sí | | Comentario del cambio |
+
+#### `absence_availability` (vista)
+
+Quién falta y cuándo, **sin** el motivo ni el respaldo. Es la costura que hace que
+`RF-AUS-12` y `RF-AUS-13` puedan convivir: filtra los permisos a `approved` y `taken`, y
+expone solo fechas, persona y área. Todo lo que calcule disponibilidad (`RF-TSK-06`,
+`RF-TSK-07`, `RF-CAL-05`, `RF-CAL-06`) y la notificación de `RF-EST-10` leen esto y nunca
+`absences`.
+
+| Columna | Tipo | Descripción |
+| --- | --- | --- |
+| `event_id` | bigint | El evento de la ausencia |
+| `starts_at` | timestamptz | Inicio de la primera ocurrencia |
+| `ends_at` | timestamptz | Fin de la primera ocurrencia |
+| `all_day` | boolean | Día completo |
+| `timezone` | text | Zona del evento |
+| `rule` | text | Recurrencia RFC 5545, si la hay |
+| `recurrence_until` | timestamptz | Fin de la recurrencia |
+| `user_id` | bigint | Quién falta |
+| `area_id` | bigint | Área a la que aplica, si el participante es colectivo |
+
+### 7.3 ARC — carpetas, archivos y almacenamiento
+
+El almacén invierte lo habitual: **Postgres es el sistema de archivos y los discos son una
+bolsa de bytes indexada por SHA-256**. La identidad es el contenido; el nombre, la ruta y el
+dueño son columnas. No hay actualización de un archivo: otros bytes son otro hash.
+
+#### `folders`
+
+Carpeta. El árbol es propio del sistema, no de Drive (`RF-ARC-02`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `parent_id` | bigint | sí | | Carpeta padre; `NULL` = raíz → `folders.id` |
+| `name` | varchar(255) | no | | Nombre. Único entre hermanas vivas; en la raíz, único por dueño |
+| `owner_id` | bigint | no | | Dueño → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+Un trigger (`folders_no_cycle`) rechaza que una carpeta sea su propia ancestra, cosa que
+ninguna restricción declarativa puede atrapar.
+
+#### `files`
+
+Un archivo dentro de una carpeta. La fila es el nombre y el lugar; los bytes se ubican por
+`hash`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `folder_id` | bigint | no | | Carpeta contenedora → `folders.id` |
+| `author_id` | bigint | no | | Quién lo subió → `users.id` |
+| `hash` | char(64) | no | | SHA-256 del contenido, hex minúsculas. **No** es único: dos filas con el mismo hash es justo lo que significa deduplicar |
+| `name` | varchar(255) | no | | Nombre visible. Único dentro de la carpeta |
+| `size` | bigint | no | | Tamaño en bytes |
+| `mime` | varchar(255) | sí | | Tipo MIME |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `file_locations`
+
+En qué disco están unos bytes. La colocación se **registra**, no se deriva: `hash % n`
+rebarajaría todo el acervo al agregar un disco.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `hash` | char(64) | no | | Parte de la llave primaria; el contenido |
+| `storage_volume_id` | bigint | no | | Parte de la llave primaria → `storage_volumes.id` |
+| `verified_at` | timestamptz | sí | | Última verificación de que los bytes siguen ahí |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se escribieron |
+
+#### `storage_volumes`
+
+Un disco montado. La base guarda **la etiqueta**, no la ruta: el mismo disco se monta en
+rutas distintas en el host y en el contenedor.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `label` | varchar(100) | no | | Único. La mitad izquierda de `STORAGE_VOLUMES` (`etiqueta:ruta`) |
+| `location` | varchar(500) | sí | | Ruta de referencia; informativa |
+| `is_writable` | boolean | no | `true` | Si admite escrituras nuevas |
+| `max_storage` | bigint | sí | | Tope en bytes; `NULL` = sin tope |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+
+#### `folder_areas`
+
+Qué área ve qué carpeta y con qué nivel. Es lo que da `RF-USR-03` sobre archivos.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `folder_id` | bigint | no | | Parte de la llave primaria → `folders.id` |
+| `area_id` | bigint | no | | Parte de la llave primaria → `areas.id` |
+| `level` | varchar(10) | no | | Nivel de acceso concedido |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+
+#### `access_tokens`
+
+Enlace de compartición. Es lo que cumple `RF-ARC-03` y `RF-EXT-03`: el externo ve y nunca
+edita, sustituye ni borra. Apunta a una carpeta **o** a un archivo, no a ambos.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `token_hash` | char(64) | no | | Único. Hash del token; el token en claro solo lo tiene quien recibió el enlace |
+| `folder_id` | bigint | sí | | Carpeta compartida → `folders.id` |
+| `file_id` | bigint | sí | | Archivo compartido → `files.id` |
+| `level` | varchar(10) | no | | Nivel concedido |
+| `authorizer` | bigint | no | | Quién emitió el enlace → `users.id` |
+| `expires_at` | timestamptz | no | | Caducidad |
+| `revoked_at` | timestamptz | sí | | Revocación anticipada |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Emisión |
+
+### 7.4 Bitácora
+
+#### `logs`
+
+Quién hizo qué, sobre qué y desde qué área (`RF-USR-07`). La escribe únicamente
+`access/orchestration/audit.js`, suscrito a los eventos que emite la orquestación; el actor
+no es un argumento, sale del `AsyncLocalStorage` de la petición.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `user_id` | bigint | sí | | Quién actuó → `users.id`. `NULL` fuera de una petición (un script) o cuando el correo no corresponde a ninguna cuenta |
+| `action_id` | bigint | no | | Qué hizo → `actions.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo |
+| `target_table` | varchar(50) | sí | | Tabla afectada. **No** es llave foránea: el objetivo es otra tabla en cada fila |
+| `target_id` | bigint | sí | | Llave primaria de la fila afectada, dentro de `target_table` |
+| `before_data` | jsonb | sí | | La fila antes. `NULL` = se creó. Las columnas que casan con `/password\|secret\|token\|hash\|salt/i` se borran antes de guardar |
+| `after_data` | jsonb | sí | | La fila después. `NULL` = se eliminó |
+| `area_id` | bigint | sí | | Área del actor **en ese momento**, tomada de `users.primary_area_id` dentro del propio INSERT → `areas.id`. `NULL` = no registrada, nunca "sin área" |
+
+#### `actions`
+
+Catálogo cerrado de acciones. Emitir un código que no está aquí lanza excepción en vez de
+saltarse la fila: un hueco silencioso en una bitácora es peor que uno ruidoso.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `code` | varchar(50) | no | | Único. `record_created`, `status_changed`, `user_login`… Los cuatro `record_*` son agnósticos de la tabla, y por eso las tablas nuevas no necesitan códigos nuevos |
+| `label` | varchar(200) | no | | Nombre visible |
+
+### 7.5 SOL / PRY / FLW / EST — solicitudes, proyectos, etapas y estatus
+
+#### `entities`
+
+La entidad solicitante: una facultad, una dependencia, una coordinación o alguien externo
+(`RF-SOL-07`). Persiste entre solicitudes; sus contactos cambian y viven aparte.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(300) | no | | Único entre las vivas |
+| `kind` | varchar(20) | sí | | `facultad`, `dependencia`, `coordinacion`, `externo` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `entity_contacts`
+
+La persona con la que se trata. Es también la identidad del externo para `RF-EXT-01` y
+quien firma el lado externo del visto bueno de `RF-FLW-05`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `entity_id` | bigint | no | | → `entities.id` |
+| `full_name` | varchar(200) | no | | Nombre |
+| `email` | varchar(320) | sí | | Correo. Único por entidad, comparado en minúsculas, para que la misma persona no acabe en dos filas |
+| `phone` | varchar(50) | sí | | Teléfono |
+| `job_title` | varchar(200) | sí | | Puesto o cargo |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `schemas`
+
+Identidad estable de un formato de solicitud (`RF-SOL-01`). Su contenido vive en
+`schema_versions`; esta fila solo lo nombra.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `code` | varchar(50) | no | | Único. `formato_02`, `papel_institucional` |
+| `name` | varchar(300) | no | | Nombre visible |
+| `is_active` | boolean | no | `true` | Si se puede seguir usando para capturar |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+
+#### `schema_versions`
+
+Cómo se veía el formato cuando se capturó algo con él. **Inmutable una vez publicada**
+(§2.2): editar publica una versión nueva, y un trigger rechaza todo `UPDATE` sobre la tabla.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `schema_id` | bigint | no | | → `schemas.id` |
+| `version` | int | no | | Consecutivo desde 1. Único junto con `schema_id` |
+| `fields` | jsonb | no | `[]` | Arreglo **ordenado** de definiciones de campo: `key`, `label`, `type`, `required`, `options`. El orden de captura es el orden del arreglo |
+| `published_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Publicación |
+| `published_by` | bigint | sí | | Quién publicó → `users.id` |
+
+#### `sheets`
+
+El libro de Excel que sigue vivo durante la transición, y cómo sus columnas caen en un
+formato (`RF-MIG-01`, `RF-MIG-02`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(300) | no | | Cómo se le dice al libro |
+| `drive_id` | varchar(255) | no | | Drive de Graph. Junto con `item_id` y `table_name` identifica el libro; único entre los vivos |
+| `item_id` | varchar(255) | no | | Elemento de Graph |
+| `table_name` | varchar(200) | sí | | Tabla dentro del libro. `NULL` = la primera o única |
+| `web_url` | text | sí | | Enlace que un humano pega. Decorativo: la llave es el par drive/item |
+| `schema_version_id` | bigint | no | | Formato destino → `schema_versions.id`. Apunta a la **versión**, no al formato, porque el mapeo se escribe contra columnas concretas |
+| `column_map` | jsonb | no | `{}` | Encabezado del Excel → campo de `schema_versions.fields` o columna promovida de `requests` |
+| `last_imported_at` | timestamptz | sí | | Hasta dónde llegó la última importación, para que la siguiente sepa desde dónde seguir |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `statuses`
+
+Catálogo de estatus, con dimensión de área (`RF-EST-02`). `area_id` nulo es el catálogo
+global, que es el punto de partida de todas las áreas y viene sembrado con los siete que
+nombra `RF-EST-01`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `area_id` | bigint | sí | | Área dueña del estatus → `areas.id`. `NULL` = global |
+| `code` | varchar(50) | no | | `recibido`, `en_proceso`, `esperando_vb`… Único dentro del área, y único entre los globales |
+| `label` | varchar(200) | no | | Nombre visible |
+| `sort_order` | int | no | `0` | Orden de presentación |
+| `is_terminal` | boolean | no | `false` | Si el registro se considera cerrado. `RF-EST-05` valida el cierre contra esto |
+| `is_active` | boolean | no | `true` | Si se puede seguir asignando |
+
+#### `requests`
+
+La solicitud. Existe desde que entra, tenga o no proyecto (§2.8): `project_id` nulo es
+exactamente lo que consulta la bandeja del área.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `folio` | varchar(50) | no | secuencia | Único y consultable (`RF-SOL-03`). Lo genera `requests_folio_seq` con formato `SOL-000001`, no la orquestación |
+| `schema_version_id` | bigint | no | | Formato con el que se capturó → `schema_versions.id` |
+| `project_id` | bigint | sí | | Proyecto al que se convirtió → `projects.id`. `NULL` = sin convertir. Varias solicitudes pueden apuntar al mismo (`RF-PRY-01`) |
+| `entity_id` | bigint | sí | | Quién solicita → `entities.id` |
+| `contact_id` | bigint | sí | | Con quién se trata → `entity_contacts.id` |
+| `area_id` | bigint | sí | | Bandeja en la que cayó → `areas.id`. Puente hasta que el flujo enrute (§2.5) |
+| `title` | varchar(300) | no | | Nombre corto de lo solicitado |
+| `data` | jsonb | no | `{}` | **La captura completa** (`RF-SOL-06`), con la forma que dicte `schema_versions.fields`. Lo que `RF-SOL-05` busca sube a columnas reales en vez de quedarse aquí |
+| `status_id` | bigint | no | | → `statuses.id` |
+| `status_since` | timestamptz | no | `CURRENT_TIMESTAMP` | Desde cuándo lleva ese estatus. Lo mueve quien mueve `status_id` |
+| `assignee_id` | bigint | sí | | Responsable → `users.id` |
+| `priority` | int | no | `0` | Prioridad manual. Mayor es más urgente; no hay FIFO (`RF-FLW-08`) |
+| `source` | varchar(20) | no | `form` | `form`, `email`, `sheet`, `manual`. Las que llegan por correo se registran a mano en el mismo formato (`RF-SOL-08`) |
+| `sheet_id` | bigint | sí | | Libro del que se importó → `sheets.id`. Solo puede ir lleno si `source = 'sheet'` |
+| `folder_id` | bigint | sí | | Carpeta con lo que adjuntó el solicitante → `folders.id` |
+| `created_by` | bigint | sí | | Quién la capturó → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Entrada |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `projects`
+
+El proyecto (`RF-PRY-02`). Las áreas participantes **se derivan** de sus etapas y no se
+guardan, y no hay etapa actual: eso es el conjunto de `project_stages` activas (§2.1).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `key` | varchar(50) | no | | Identificador corto y legible; sirve como nombre de carpeta. Se asigna, no se genera. Único entre los vivos, y restringido a mayúsculas, dígitos, `-` y `_` |
+| `title` | varchar(300) | no | | Nombre del proyecto |
+| `description` | text | sí | | Detalle |
+| `entity_id` | bigint | sí | | Quién lo pidió → `entities.id` |
+| `contact_id` | bigint | sí | | Con quién se trata → `entity_contacts.id` |
+| `schema_version_id` | bigint | sí | | Formato del que nació → `schema_versions.id` |
+| `status_id` | bigint | no | | Estatus visible → `statuses.id` (`RF-EST-01`) |
+| `status_since` | timestamptz | no | `CURRENT_TIMESTAMP` | Desde cuándo. Desnormalizado para que la alerta de `RF-EST-03`/`RF-EST-04` no recorra la bitácora |
+| `priority` | int | no | `0` | Prioridad manual por urgencia (`RF-FLW-08`) |
+| `has_cost` | boolean | no | `false` | Con costo o sin costo; el tratamiento financiero difiere (`RF-PRY-07`) |
+| `carried_over` | boolean | no | `false` | Rezagado de un periodo anterior (`RF-PRY-08`). El `period_id` espera a que exista `periods` |
+| `starts_on` | date | sí | | Inicio previsto |
+| `due_on` | date | sí | | Compromiso de entrega. No puede ser anterior a `starts_on` |
+| `folder_id` | bigint | sí | | Carpeta del proyecto → `folders.id` (`RF-ARC-01`) |
+| `event_collection_id` | bigint | sí | | Para que aparezca en el calendario como una colección → `event_collections.id` |
+| `created_by` | bigint | sí | | Quién lo creó → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `closed_at` | timestamptz | sí | | Cierre |
+| `archived_at` | timestamptz | sí | | Archivado: sale del tablero. Distinto de eliminar |
+| `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `project_stages`
+
+Cada paso por el que pasa el proyecto (`RF-FLW-01`, `RF-PRY-03`). Varias pueden estar
+activas a la vez, que es `RF-FLW-09`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `project_id` | bigint | no | | → `projects.id` |
+| `area_id` | bigint | no | | Área que la atiende → `areas.id` |
+| `title` | varchar(300) | no | | Qué se hace en esta etapa |
+| `seq` | int | no | `1` | Orden de presentación dentro del proyecto. **No decide qué sigue** |
+| `attempt` | int | no | `1` | Reintento. Un visto bueno rechazado devuelve el trabajo y la etapa se repite (§2.6). Único junto con `project_id`, `area_id` y `seq` |
+| `status` | varchar(20) | no | `pending` | `pending`, `active`, `waiting_external`, `done`, `cancelled`. Es la máquina del flujo, distinta del estatus visible del proyecto |
+| `blocked_reason` | text | sí | | Motivo del bloqueo. **Obligatorio** cuando `status = 'waiting_external'` (`RF-FLW-07`) |
+| `assigned_to` | bigint | sí | | A quién se le asignó → `users.id`. Es el primer reparto del responsable de área (`RF-TSK-01`), no el desglose en tareas |
+| `event_id` | bigint | sí | | Para que aparezca en el calendario como tiempo de desarrollo previsto → `events.id` |
+| `started_at` | timestamptz | sí | | Inicio real |
+| `ended_at` | timestamptz | sí | | Fin real. No puede ser anterior a `started_at` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+
+#### `approvals`
+
+El visto bueno (`RF-FLW-03`). Es objeto de negocio y no traza, porque `RF-EST-05` pregunta
+por **los que faltan** y una bitácora no se puede consultar por ausencia. El visto bueno de
+doble parte de `RF-FLW-05` son dos filas, una por lado.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `project_stage_id` | bigint | no | | Etapa que se aprueba → `project_stages.id`, en cascada |
+| `decision` | varchar(20) | no | | `approved` o `rejected` |
+| `approver_user_id` | bigint | sí | | Firmante interno → `users.id` |
+| `approver_contact_id` | bigint | sí | | Firmante externo → `entity_contacts.id`. Exactamente uno de los dos va lleno |
+| `comment` | text | sí | | Comentario opcional de la decisión |
+| `decided_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se firmó |
+
+#### `project_field_values`
+
+Los datos que una etapa produce y otra consume sin recaptura (`RF-FLW-06`, `RF-IMP-08`): el
+número de orden que genera diseño y que imprenta ocupa para facturar. También es donde se
+capturan a mano los folios que generan el SIN y el sistema financiero (`RF-MIG-04`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `project_id` | bigint | no | | → `projects.id`, en cascada |
+| `key` | varchar(100) | no | | Nombre del dato: `numero_orden`, `folio_sin`, `pantone`. Único por proyecto |
+| `value` | text | no | | El valor. Indexado junto con `key` porque la búsqueda es por igualdad |
+| `produced_by_stage_id` | bigint | sí | | Qué etapa lo generó → `project_stages.id`. Es lo que un JSONB acumulado no puede decir |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+| `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Última corrección |
