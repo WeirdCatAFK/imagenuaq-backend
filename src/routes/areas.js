@@ -75,10 +75,12 @@ router.get("/:id/members", async (req, res) => {
 // whole change, and it is at that point that it starts to mean something different.
 router.use(requireRole("admin"));
 
-// POST /api/areas -- create an area, optionally with its first leader.
+// POST /api/areas -- create an area, optionally with its first leader and its parent.
 //
-// `leaderUserId` is handled in one statement rather than by a follow-up call, so a failure
-// cannot leave an area nobody is responsible for. See createAreaWithLeader() in query.js.
+// `leaderUserId` and `parentAreaId` are written in the same statement as the area rather
+// than by follow-up calls, so a failure cannot leave an area nobody is responsible for or a
+// root nobody meant. Omitting `parentAreaId` hangs the area under DEFAULT_AREA (.env); an
+// explicit null makes it a root. See createArea() in query.js.
 router.post("/", async (req, res) => {
   const area = await areas.create(req.body ?? {});
   res.status(201).json({ area });

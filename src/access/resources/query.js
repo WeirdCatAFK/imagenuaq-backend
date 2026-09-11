@@ -523,18 +523,20 @@ class Query {
 
   // --- Areas ---
 
-  async createArea({ name, description }) {
-    const [row] = await this.#rows(
-      `insert into areas (name, description)
-        values ($1, $2)
-        returning id, name, description`,
-      [name, description],
-    );
-    return row;
-  }
-
-  /** Creates an area and its first leader in one statement, so neither can be orphaned. */
-  async createAreaWithLeader({ name, description, userId }) {
+  /**
+   * Creates an area and, when given, its first leader and its parent, in one
+   * data-modifying CTE -- the same shape as createUser(). Neither side write can be left
+   * behind by a failure of the other.
+   *
+   * @param {object} input
+   * @param {string} input.name
+   * @param {string|null} input.description
+   * @param {number|null} [input.userId] First leader; null writes no membership.
+   * @param {number|null} [input.parentAreaId] Null leaves the area a root.
+   * @returns {Promise<object>} The area row plus `parent_area_id` as written.
+   */
+  async createArea({ name, description, userId = null, parentAreaId = null }) {
+    // The ::bigint casts are required; Postgres cannot infer a type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into areas (name, description)
@@ -545,9 +547,16 @@ class Query {
          insert into area_members (user_id, area_id, is_area_leader)
          select $3::bigint, created.id, true
            from created
+          where $3::bigint is not null
+       ),
+       parent as (
+         insert into area_hierarchy (child_area_id, parent_area_id)
+         select created.id, $4::bigint
+           from created
+          where $4::bigint is not null
        )
-       select id, name, description from created`,
-      [name, description, userId],
+       select id, name, description, $4::bigint as parent_area_id from created`,
+      [name, description, userId, parentAreaId],
     );
     return row;
   }

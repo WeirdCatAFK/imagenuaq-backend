@@ -66,15 +66,25 @@ export const TEST_PERMISSION_PREFIX = 'zz.test.';
 //
 // Order matters and is the foreign keys read backwards: area_hierarchy and area_members
 // reference areas and users, users reference areas, so the referencing rows go first.
-// area_hierarchy and area_members are emptied wholesale because nothing seeds them -- every
-// row in either belongs to a test.
+// area_members is emptied wholesale because nothing seeds it -- every row belongs to a
+// test. area_hierarchy is not: coordinacion-root hangs each seeded area under
+// `Coordinación`, and the DEFAULT_AREA cases read the chart expecting that seed intact, so
+// only rows that touch a test area, or that a test wrote between seeded areas, are removed.
+// (A test that re-parents a seeded area away from Coordinación loses that seeded link --
+// the upsert overwrote it -- and none does.)
 //
 // role_permissions is NOT: section 8 of catalog-bootstrap seeds every permission onto
 // `admin` and finance.read onto `finance`, and wiping those would leave the rest of the run
 // testing an authorisation model the migrations never produce. Only grants on test-created
 // roles are removed; a test permission's grants go with it through the cascade.
 export async function resetCases(keepEmails = []) {
-  await sql('delete from area_hierarchy');
+  await sql(
+    `delete from area_hierarchy h
+      using areas c, areas p
+      where c.id = h.child_area_id and p.id = h.parent_area_id
+        and (c.name like $1 or p.name like $1 or p.name <> 'Coordinación')`,
+    [`${TEST_PREFIX}%`],
+  );
   await sql('delete from area_members');
   // Before the users delete, not after: logs.user_id references users with NO ACTION, so
   // once the audit trail started writing (RF-USR-07) every case leaves rows here and the

@@ -452,6 +452,12 @@ export function buildOpenApiDocument() {
             id: { type: 'integer', example: 3 },
             name: { type: 'string', example: 'Diseño Gráfico' },
             description: { type: ['string', 'null'], example: null },
+            parentAreaId: {
+              type: ['integer', 'null'],
+              description:
+                'Present on the create response only: the parent the area was written ' +
+                'under, or null for a root. The chart carries it on every node.',
+            },
           },
           required: ['id', 'name', 'description'],
         },
@@ -465,6 +471,13 @@ export function buildOpenApiDocument() {
               description:
                 'Optional. Written in the same statement as the area, so a failure cannot ' +
                 'leave an area nobody is responsible for.',
+            },
+            parentAreaId: {
+              type: ['integer', 'null'],
+              description:
+                'Optional. Omitted: the area hangs under the one DEFAULT_AREA names in ' +
+                '.env (or is a root when that is unset or matches nothing). An id: that ' +
+                'parent. An explicit null: a root. Written in the same statement as the area.',
             },
           },
           required: ['name'],
@@ -1146,13 +1159,15 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Create an area',
           description:
-            'Admin only. RF-USR-09: new areas and coordinations without a deploy. Passing ' +
-            '`leaderUserId` writes the area and its first leader in one statement.',
+            'Admin only. RF-USR-09: new areas and coordinations without a deploy. ' +
+            '`leaderUserId` and `parentAreaId` are written in the same statement as the ' +
+            'area. Omit `parentAreaId` to hang it under DEFAULT_AREA; send null for a root.',
           requestBody: jsonBody('CreateAreaRequest'),
           responses: {
-            201: wrapped('The created area.', 'area', 'Area'),
+            201: wrapped('The created area, with `parentAreaId` as written.', 'area', 'Area'),
             400: errorResponse(
-              'The name is missing or too long, or leaderUserId names no user.',
+              'The name is missing or too long, leaderUserId names no user, or ' +
+                'parentAreaId names no area.',
               'Area name is required (200 characters or fewer).',
             ),
             401: UNAUTHORIZED,

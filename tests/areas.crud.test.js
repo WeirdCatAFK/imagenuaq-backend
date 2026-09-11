@@ -8,6 +8,7 @@ import {
   createArea,
   createActive,
   tokenFor,
+  areaId,
   TEST_PREFIX,
 } from './helpers/fixtures.js';
 
@@ -173,6 +174,130 @@ describe('/api/areas', () => {
 
       assert.equal(res.status, 409);
       assert.equal(res.body.error.message, 'An area with that name already exists.');
+    });
+
+    // Where a new area hangs. .env.test pins DEFAULT_AREA=Coordinación, which is the seeded
+    // root since coordinacion-root, so these cases do not depend on the developer's .env.
+    // The request distinguishes omitted from null: omitted takes the default, null asks
+    // for a root -- and the difference is the whole contract, so both are asserted.
+    describe('the default parent (DEFAULT_AREA)', () => {
+      const parentOf = async (id) => {
+        const chart = await server.get('/api/areas/orgchart', { token: adminToken });
+        assert.equal(chart.status, 200);
+        const walk = (nodes) => {
+          for (const node of nodes) {
+            if (node.id === id) return node.parentAreaId;
+            const found = walk(node.children);
+            if (found !== undefined) return found;
+          }
+          return undefined;
+        };
+        return walk(chart.body.roots);
+      };
+
+      test('omitting parentAreaId hangs the area under DEFAULT_AREA', async () => {
+        const coordinacion = await areaId(process.env.DEFAULT_AREA);
+        assert.ok(coordinacion, 'DEFAULT_AREA must name a seeded area in .env.test');
+
+        const res = await server.post('/api/areas', {
+          token: adminToken,
+          body: { name: `${TEST_PREFIX}Por Omisión` },
+        });
+
+        assert.equal(res.status, 201);
+        assert.equal(res.body.area.parentAreaId, coordinacion);
+        assert.equal(await parentOf(res.body.area.id), coordinacion);
+      });
+
+      test('a parentAreaId is written in the same statement', async () => {
+        const parent = await createArea('Padre Explícito');
+
+        const res = await server.post('/api/areas', {
+          token: adminToken,
+          body: { name: `${TEST_PREFIX}Hija`, parentAreaId: parent.id },
+        });
+
+        assert.equal(res.status, 201);
+        assert.equal(res.body.area.parentAreaId, parent.id);
+        assert.equal(await parentOf(res.body.area.id), parent.id);
+      });
+
+      test('an explicit null parentAreaId makes a root', async () => {
+        const res = await server.post('/api/areas', {
+          token: adminToken,
+          body: { name: `${TEST_PREFIX}Raíz`, parentAreaId: null },
+        });
+
+        assert.equal(res.status, 201);
+        assert.equal(res.body.area.parentAreaId, null);
+        assert.equal(await parentOf(res.body.area.id), null);
+      });
+
+      test('leaderUserId and parentAreaId land together', async () => {
+        const lead = await createActive({ email: 'lider2@uaq.mx', role: 'area_lead' });
+        const parent = await createArea('Padre Con Líder');
+
+        const res = await server.post('/api/areas', {
+          token: adminToken,
+          body: { name: `${TEST_PREFIX}Ambos`, leaderUserId: lead.id, parentAreaId: parent.id },
+        });
+        assert.equal(res.status, 201);
+        assert.equal(res.body.area.parentAreaId, parent.id);
+
+        const members = await server.get(`/api/areas/${res.body.area.id}/members`, {
+          token: adminToken,
+        });
+        assert.equal(members.body.members.length, 1);
+        assert.equal(members.body.members[0].isAreaLeader, true);
+      });
+
+      test('a parentAreaId that names no area is 400', async () => {
+        const res = await server.post('/api/areas', {
+          token: adminToken,
+          body: { name: `${TEST_PREFIX}Huérfana`, parentAreaId: 999999 },
+        });
+
+        assert.equal(res.status, 400);
+        assert.equal(res.body.error.message, 'Unknown parentAreaId.');
+      });
+
+      test('a malformed parentAreaId is 400', async () => {
+        const res = await server.post('/api/areas', {
+          token: adminToken,
+          body: { name: `${TEST_PREFIX}Mal Padre`, parentAreaId: 'arriba' },
+        });
+
+        assert.equal(res.status, 400);
+        assert.equal(res.body.error.message, 'parentAreaId must be a positive integer.');
+      });
+
+      // The variable is read per request, not at boot, so a case can take it away. Two
+      // shapes of "no default": unset, and set to a name no area has. Both fall through
+      // to a root silently -- that is the decision, and the assertion is that nothing
+      // refuses.
+      for (const [label, value] of [
+        ['unset', undefined],
+        ['naming no area', `${TEST_PREFIX}no existe`],
+      ]) {
+        test(`with DEFAULT_AREA ${label}, an omitted parentAreaId makes a root`, async () => {
+          const saved = process.env.DEFAULT_AREA;
+          if (value === undefined) delete process.env.DEFAULT_AREA;
+          else process.env.DEFAULT_AREA = value;
+
+          try {
+            const res = await server.post('/api/areas', {
+              token: adminToken,
+              body: { name: `${TEST_PREFIX}Sin Default` },
+            });
+
+            assert.equal(res.status, 201);
+            assert.equal(res.body.area.parentAreaId, null);
+            assert.equal(await parentOf(res.body.area.id), null);
+          } finally {
+            process.env.DEFAULT_AREA = saved;
+          }
+        });
+      }
     });
   });
 

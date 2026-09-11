@@ -5,6 +5,9 @@
 // Password: read from the ADMIN_PASSWORD environment variable, or prompted for when this
 // runs on a terminal. Never pass it as an argument -- argv is readable through `ps` on a
 // shared host and lands in shell history.
+// Area: --area, or without it the area DEFAULT_AREA names in .env, or none when that is
+// unset or matches nothing. A named --area that matches nothing is refused; the default
+// falling through to "none" is not, by decision -- see Areas.defaultArea().
 //
 // Why this is a script and not an endpoint.
 //
@@ -29,6 +32,7 @@
 import { openStore, closeStore } from '../src/access/primitives/database.js';
 import query from '../src/access/resources/query.js';
 import auth from '../src/access/orchestration/auth.js';
+import areas from '../src/access/orchestration/areas.js';
 
 const ADMIN_ROLE = 'admin';
 
@@ -156,7 +160,7 @@ try {
     }
 
     const areaRef = arg('area');
-    const area = areaRef ? await query.findArea(areaRef) : null;
+    const area = areaRef ? await query.findArea(areaRef) : await areas.defaultArea();
     if (areaRef && !area) fail(`No area matches "${areaRef}".`);
 
     const created = await query.createUser({
@@ -171,9 +175,10 @@ try {
 
     const after = await query.countLiveUsersWithRole(ADMIN_ROLE);
     const defaulted = contractRef ? '' : ' (default -- first in the catalog)';
+    const areaDefaulted = area && !areaRef ? ' (default -- DEFAULT_AREA)' : '';
     console.log(`\n  Admin created: ${email} (id ${created.id}).`);
     console.log(`  Contract type: ${contract.name}${defaulted}.`);
-    console.log(`  Area: ${area ? area.name : 'none'}.`);
+    console.log(`  Area: ${area ? area.name : 'none'}${areaDefaulted}.`);
     console.log(`  Live admins: ${before} -> ${after}.\n`);
   }
 } catch (err) {

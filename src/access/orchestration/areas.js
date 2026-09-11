@@ -11,6 +11,13 @@
 // one area. getOrgChart() below is the read side of that, and the shape the frontend's
 // react-organizational-chart consumes.
 //
+// New areas are not roots by default. An area created without naming a parent hangs under
+// the area DEFAULT_AREA names in .env -- coordination, in the seeded organisation -- so
+// the chart stays one tree as it grows (RF-USR-09) and RF-USR-04's "todos los usuarios a su
+// cargo" keeps meaning everybody. The request distinguishes *omitted* from *null*: omitted
+// takes the default, an explicit null asks for a root. When the variable is unset or names
+// no area there is no default and the area is a root; that fallback is silent by decision.
+//
 // Three conventions hold throughout:
 //
 //   - **Membership arguments are (userId, areaId)**, matching query.js. Reversing them is
@@ -45,17 +52,20 @@ class Areas {
   // --- CRUD ---
 
   /**
-   * Creates an area, optionally with its first leader in the same statement -- two calls
-   * would leave an area nobody is responsible for whenever the second failed.
+   * Creates an area, with its first leader and its parent in the same statement -- a
+   * second call for either would leave an area nobody is responsible for, or a root
+   * nobody meant to create, whenever it failed.
    *
    * @param {object} input
    * @param {string} input.name
    * @param {string|null} [input.description]
    * @param {number|string|null} [input.leaderUserId]
-   * @returns {Promise<object>}
-   * @throws {ApiError} 400 on a bad payload, 409 on a duplicate name.
+   * @param {number|string|null} [input.parentAreaId] Omitted: the DEFAULT_AREA area.
+   *   Null: a root. No cycle check -- a new area has no descendants to close one with.
+   * @returns {Promise<object>} The area, plus `parentAreaId` as written.
+   * @throws {ApiError} 400 on a bad payload or an unknown parent, 409 on a duplicate name.
    */
-  async create({ name, description = null, leaderUserId = null }) {
+  async create({ name, description = null, leaderUserId = null, parentAreaId }) {
     const cleanName = cleanText(name);
     if (!cleanName || cleanName.length > NAME_MAX) {
       throw ApiError.badRequest(
@@ -64,19 +74,18 @@ class Areas {
     }
 
     const leader = optionalId(leaderUserId, "leaderUserId");
+    const parent =
+      parentAreaId === undefined
+        ? ((await this.defaultArea())?.id ?? null)
+        : optionalId(parentAreaId, "parentAreaId");
 
     try {
-      const area =
-        leader === null
-          ? await query.createArea({
-              name: cleanName,
-              description: cleanText(description),
-            })
-          : await query.createAreaWithLeader({
-              name: cleanName,
-              description: cleanText(description),
-              userId: leader,
-            });
+      const area = await query.createArea({
+        name: cleanName,
+        description: cleanText(description),
+        userId: leader,
+        parentAreaId: parent,
+      });
 
       await events.emit({
         action: "record_created",
@@ -84,10 +93,22 @@ class Areas {
         after: area,
       });
 
-      return shapeArea(area);
+      return { ...shapeArea(area), parentAreaId: area.parent_area_id ?? null };
     } catch (err) {
       throw translate(err);
     }
+  }
+
+  /**
+   * The area DEFAULT_AREA names, or null when it is unset, empty, or matches nothing.
+   * Read per call rather than at boot: the catalogue is edited at runtime (RF-USR-09), so a
+   * rename after start-up must be seen. Also used by scripts/createAdmin.js.
+   *
+   * @returns {Promise<{ id: number, name: string } | null>}
+   */
+  async defaultArea() {
+    const ref = cleanText(process.env.DEFAULT_AREA);
+    return ref === null ? null : query.findArea(ref);
   }
 
   async get() {

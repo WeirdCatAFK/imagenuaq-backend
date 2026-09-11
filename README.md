@@ -202,7 +202,7 @@ Writes need `admin`.
 | GET    | `/api/areas/:id`                   | session | One area                                                     |
 | GET    | `/api/areas/:id/orgchart`          | session | The subtree under one area — the read`RF-USR-04` asks for  |
 | GET    | `/api/areas/:id/members`           | session | Leaders first, then by name                                  |
-| POST   | `/api/areas`                       | admin   | `{ name, description?, leaderUserId? }`                    |
+| POST   | `/api/areas`                       | admin   | `{ name, description?, leaderUserId?, parentAreaId? }`     |
 | PATCH  | `/api/areas/:id`                   | admin   | Partial; absent keys are left alone                          |
 | DELETE | `/api/areas/:id`                   | admin   | 409 while anyone is still assigned to it                     |
 | PUT    | `/api/areas/:id/parent`            | admin   | `{ parentAreaId }`; 409 if the move would close a cycle     |
@@ -211,7 +211,12 @@ Writes need `admin`.
 | DELETE | `/api/areas/:id/members/:userId`   | admin   | Removes the membership, not the account                      |
 
 An area with no `area_hierarchy` row is a root, so the chart is a **forest**, not a single
-tree. Each area has at most one parent — that is the primary key — which is what makes the
+tree — but the seeded organisation is one: `coordinacion-root` renames the seeded
+`Secretaría Particular` to `Coordinación` and hangs the other six under it, and a `POST
+/api/areas` that omits `parentAreaId` hangs the new area under whatever `DEFAULT_AREA` in
+`.env` names (matched by name, accent included). An explicit `parentAreaId: null` asks for
+a root. When the variable is unset or matches no area there is simply no default, and the
+area is a root — that fallback is silent by decision. Each area has at most one parent — that is the primary key — which is what makes the
 result renderable: every node carries its own `children`, and the frontend's
 `react-organizational-chart` recurses over the response with no reshaping. `depth` is
 computed by the recursive walk rather than stored, because depth is a consequence of where
@@ -308,6 +313,10 @@ The gate is possession of `DATABASE_URL` — whoever has that can already do thi
 
 Omit `ADMIN_PASSWORD` on a terminal and it prompts with the echo off. Never pass the
 password as an argument: `argv` is readable through `ps` and lands in shell history.
+
+Omit `--area` and the admin goes into the area `DEFAULT_AREA` names in `.env` — the same
+variable `POST /api/areas` reads for a new area's parent — or into no area when that is
+unset or matches nothing. A `--area` that matches nothing is refused instead.
 
 ## Tests
 

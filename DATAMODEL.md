@@ -293,7 +293,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-USR-03, RF-USR-04            | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella | ✔ |
 | RF-USR-05, RF-USR-10            | `permissions` + `role_permissions` (§5.2)                                                                      | ✔ |
 | RF-USR-07                       | `logs` con `target_table`/`target_id` (§5.3)                                                                 | ✔ |
-| RF-USR-09                       | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla                             | ✔ |
+| RF-USR-09                       | `areas` + `area_hierarchy` (§5.5): un área y una coordinación son la misma tabla; `Coordinación` es la raíz sembrada y `DEFAULT_AREA` el padre por omisión | ✔ |
 
 `RF-TSK-07` y `RF-CAL-06` cruzan con ausencias: la ocupación del área debe descontar las
 ausencias autorizadas. Se resuelven leyendo `events` (público) y **nunca** `absences`
@@ -514,6 +514,18 @@ se haya movido a mano, que es justamente el estado del que intenta salir quien r
 El rol sigue siendo global, y eso está decidido y no pendiente: `area_members` y
 `area_hierarchy` contestan sobre qué registros ve cada quien, `role_permissions` contesta qué
 puede hacer. Ver §5.2.
+
+**El árbol tiene raíz.** `catalog-bootstrap` §4 leyó "Coordinación" y "Secretaría
+Particular" como la misma oficina y la sembró como una de las siete áreas, sin nada arriba.
+`coordinacion-root` revisa eso en un solo punto: la coordinación es el nivel que consulta el
+trabajo de "todos los usuarios a su cargo" (`RF-USR-04`), y en la jerarquía eso es el
+subárbol *bajo* ella, así que tiene que ser un nodo encima de las áreas y no junto a ellas.
+La migración renombra la fila sembrada a `Coordinación` —no la duplica— y cuelga de ella
+toda área que era raíz. De ahí en adelante la regla no vive en el esquema: `DEFAULT_AREA` en
+`.env` nombra el área bajo la que cae un área creada sin `parentAreaId` (un `null` explícito
+pide una raíz) y el área en la que `admin:create` pone a un administrador sin `--area`.
+Si la variable no está o no coincide con ninguna área no hay predeterminado y la nueva área
+es raíz, sin aviso: decisión, no descuido.
 
 ### 5.6 La bitácora existía pero nadie escribía en ella — cerrado
 
