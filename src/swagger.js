@@ -711,8 +711,10 @@ export function buildOpenApiDocument() {
           'No token provided.',
         ),
         Forbidden: errorResponse(
-          'Authenticated, and still not allowed. Area leads direct the work of their area ' +
-            '(RF-USR-04) but staffing it is not theirs to decide.',
+          'Authenticated, and still not allowed. Two messages: `Insufficient role for this ' +
+            'resource.` from a route gated on the role name (users, roles), and `Missing ' +
+            'permission: <code>.` from one gated on a permission the role does not hold ' +
+            '(areas writes need `area.manage`).',
           'Insufficient role for this resource.',
         ),
       },
@@ -1137,10 +1139,9 @@ export function buildOpenApiDocument() {
 
       // --- areas ---
       //
-      // Reads need only a session; writes need 'admin'. Not `area.manage`, even though
-      // RF-USR-09 put that code in the catalogue: role_permissions is empty until somebody
-      // uses PUT /api/roles/{id}/permissions, and a permission gate would refuse everyone
-      // including the admin who has to fill it.
+      // Reads need only a session (RF-USR-03); writes need the `area.manage` permission,
+      // which catalog-bootstrap grants `admin` and PUT /api/roles/{id}/permissions can grant
+      // anyone else. The first router on the permission model -- see routes/areas.js.
 
       '/api/areas': {
         get: {
@@ -1159,7 +1160,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Create an area',
           description:
-            'Admin only. RF-USR-09: new areas and coordinations without a deploy. ' +
+            'Needs area.manage. RF-USR-09: new areas and coordinations without a deploy. ' +
             '`leaderUserId` and `parentAreaId` are written in the same statement as the ' +
             'area. Omit `parentAreaId` to hang it under DEFAULT_AREA; send null for a root.',
           requestBody: jsonBody('CreateAreaRequest'),
@@ -1213,7 +1214,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Rename an area or change its description',
           description:
-            'Admin only. Partial: keys absent from the body are left as they are.',
+            'Needs area.manage. Partial: keys absent from the body are left as they are.',
           parameters: [pathId('id', 'areas.id')],
           requestBody: jsonBody('UpdateAreaRequest'),
           responses: {
@@ -1232,7 +1233,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Delete an area',
           description:
-            'Admin only, and a hard delete -- `areas` has no deleted_at. Child areas are ' +
+            'Needs area.manage, and a hard delete -- `areas` has no deleted_at. Child areas are ' +
             'promoted to roots of the chart by the cascade on `area_hierarchy`; people are ' +
             'not, so an area with members or with users whose primary area it is cannot be ' +
             'deleted at all.',
@@ -1288,7 +1289,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Hang this area under another one',
           description:
-            'Admin only. PUT and not POST: an area has at most one parent, so this replaces ' +
+            'Needs area.manage. PUT and not POST: an area has at most one parent, so this replaces ' +
             'a single value rather than adding one more relation -- the child is the whole ' +
             'primary key of `area_hierarchy`.\n\n' +
             'A move that would close a cycle is refused with 409. The table constrains one ' +
@@ -1327,7 +1328,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Promote an area back to a root of the chart',
           description:
-            'Admin only. Not an error when the area was already a root: `changed` says ' +
+            'Needs area.manage. Not an error when the area was already a root: `changed` says ' +
             'which of the two happened.',
           parameters: [pathId('id', 'areas.id')],
           responses: {
@@ -1344,7 +1345,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Add a user to an area, or change whether they lead it',
           description:
-            'Admin only, and one route for both because they are one upsert -- the client ' +
+            'Needs area.manage, and one route for both because they are one upsert -- the client ' +
             'should not have to know which of the two it is doing. A user can be in several ' +
             'areas and lead only some of them, which is why leadership lives here rather ' +
             'than on `areas`.',
@@ -1374,7 +1375,7 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Remove a user from an area',
           description:
-            'Admin only. This removes the membership, not the account -- and not ' +
+            'Needs area.manage. This removes the membership, not the account -- and not ' +
             '`users.primary_area_id`, which is a separate column with a separate meaning.',
           parameters: [pathId('id', 'areas.id'), pathId('userId', 'users.id')],
           responses: {

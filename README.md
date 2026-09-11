@@ -193,7 +193,8 @@ yet.
 ### Areas and the organisation chart
 
 Reads need only a session — RF-USR-03 gives everyone sight of their colleagues' work.
-Writes need `admin`.
+Writes need the `area.manage` permission, which `admin` holds from the seed and any other
+role can be granted through `PUT /api/roles/:id/permissions`.
 
 | Method | Route                                | Auth    | Notes                                                        |
 | ------ | ------------------------------------ | ------- | ------------------------------------------------------------ |
@@ -202,13 +203,13 @@ Writes need `admin`.
 | GET    | `/api/areas/:id`                   | session | One area                                                     |
 | GET    | `/api/areas/:id/orgchart`          | session | The subtree under one area — the read`RF-USR-04` asks for  |
 | GET    | `/api/areas/:id/members`           | session | Leaders first, then by name                                  |
-| POST   | `/api/areas`                       | admin   | `{ name, description?, leaderUserId?, parentAreaId? }`     |
-| PATCH  | `/api/areas/:id`                   | admin   | Partial; absent keys are left alone                          |
-| DELETE | `/api/areas/:id`                   | admin   | 409 while anyone is still assigned to it                     |
-| PUT    | `/api/areas/:id/parent`            | admin   | `{ parentAreaId }`; 409 if the move would close a cycle     |
-| DELETE | `/api/areas/:id/parent`            | admin   | Promote the area back to a root                              |
-| PUT    | `/api/areas/:id/members/:userId`   | admin   | `{ isAreaLeader? }`; an upsert, so it also promotes/demotes |
-| DELETE | `/api/areas/:id/members/:userId`   | admin   | Removes the membership, not the account                      |
+| POST   | `/api/areas`                       | area.manage | `{ name, description?, leaderUserId?, parentAreaId? }`     |
+| PATCH  | `/api/areas/:id`                   | area.manage | Partial; absent keys are left alone                          |
+| DELETE | `/api/areas/:id`                   | area.manage | 409 while anyone is still assigned to it                     |
+| PUT    | `/api/areas/:id/parent`            | area.manage | `{ parentAreaId }`; 409 if the move would close a cycle     |
+| DELETE | `/api/areas/:id/parent`            | area.manage | Promote the area back to a root                              |
+| PUT    | `/api/areas/:id/members/:userId`   | area.manage | `{ isAreaLeader? }`; an upsert, so it also promotes/demotes |
+| DELETE | `/api/areas/:id/members/:userId`   | area.manage | Removes the membership, not the account                      |
 
 An area with no `area_hierarchy` row is a root, so the chart is a **forest**, not a single
 tree — but the seeded organisation is one: `coordinacion-root` renames the seeded
@@ -251,6 +252,17 @@ permission, because it is the role the others are configured from and an empty o
 deadlock; `finance` holds `finance.read`, because that grant *is* the role under
 `RF-USR-08`. `worker` and `area_lead` hold nothing on purpose — theirs is coordination's
 policy decision (`RF-USR-05`), and `PUT /api/roles/:id/permissions` is where it gets made.
+
+A grant opens whatever `requirePermission()` guards, and the rule for where that goes is
+**one code per router block, not per endpoint**: each router is a read block and a write
+block, each behind one `router.use()`, so `resource.read` and `resource.write` are the whole
+vocabulary for a resource. A third code appears only where a requirement forces one slice
+of a router to answer differently (`absence.reason.read`, `RF-AUS-13`), on those routes
+alone. Which *records* a person may touch is not a permission — that is their area and the
+subtree under it. `/api/areas` is the first router on this model (`area.manage` on its
+writes). `/api/roles` and the writes of `/api/users` stay on the `admin` role name on
+purpose: they edit the grants everything else reads, and a grant that can revoke itself is
+a lockout.
 
 Renaming a role is heavier than it looks. `requireRole()` compares `roles.name`, and every
 token already issued carries the old name for up to seven days, because nothing re-reads the
@@ -317,6 +329,11 @@ password as an argument: `argv` is readable through `ps` and lands in shell hist
 Omit `--area` and the admin goes into the area `DEFAULT_AREA` names in `.env` — the same
 variable `POST /api/areas` reads for a new area's parent — or into no area when that is
 unset or matches nothing. A `--area` that matches nothing is refused instead.
+
+Either way it leaves the `admin` role holding **every** permission in the catalogue. The
+seed grants all of them, but grants are edited at runtime, so an admin can strip their own
+role and a code added later is granted to nobody; both are the lockout in a different coat.
+What it restores is written to the audit trail with no actor.
 
 ## Tests
 

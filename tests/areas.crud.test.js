@@ -82,9 +82,55 @@ describe('/api/areas', () => {
         const res = await call(server, workerToken);
 
         assert.equal(res.status, 403);
-        assert.equal(res.body.error.message, 'Insufficient role for this resource.');
+        assert.equal(res.body.error.message, 'Missing permission: area.manage.');
       });
     }
+
+    // The write block is gated on the permission, not on the role's name (RF-USR-05): a
+    // role nobody seeded, granted area.manage through the API, passes; take the grant
+    // away and the very next request is refused. That second half is the point --
+    // requirePermission() reads role_permissions per request, never from the token, so the
+    // token minted while the grant stood does not keep it.
+    test('a role granted area.manage may write, and loses it the moment it is revoked', async () => {
+      const created = await server.post('/api/roles', {
+        token: adminToken,
+        body: { name: `${TEST_PREFIX}gestor de áreas` },
+      });
+      assert.equal(created.status, 201);
+      const role = created.body.role;
+
+      const granted = await server.put(`/api/roles/${role.id}/permissions`, {
+        token: adminToken,
+        body: { permissions: ['area.manage'] },
+      });
+      assert.equal(granted.status, 200);
+
+      await createActive({ email: 'gestor@uaq.mx', role: role.name });
+      const gestorToken = await tokenFor(server, 'gestor@uaq.mx');
+
+      const allowed = await server.post('/api/areas', {
+        token: gestorToken,
+        body: { name: `${TEST_PREFIX}Creada por gestor` },
+      });
+      assert.equal(allowed.status, 201);
+
+      const revoked = await server.put(`/api/roles/${role.id}/permissions`, {
+        token: adminToken,
+        body: { permissions: [] },
+      });
+      assert.equal(revoked.status, 200);
+
+      const refused = await server.post('/api/areas', {
+        token: gestorToken,
+        body: { name: `${TEST_PREFIX}Ya no` },
+      });
+      assert.equal(refused.status, 403);
+      assert.equal(refused.body.error.message, 'Missing permission: area.manage.');
+
+      // Reads were never behind the grant (RF-USR-03), so they survive the revocation.
+      const stillReads = await server.get('/api/areas', { token: gestorToken });
+      assert.equal(stillReads.status, 200);
+    });
   });
 
   describe('POST /api/areas', () => {

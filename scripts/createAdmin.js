@@ -28,11 +28,21 @@
 // their password. That is the lockout path, and it is deliberately something the API
 // cannot do: raising somebody to coordination is the one operation whose only safe gate is
 // access to the server itself.
+//
+// Either way, the admin role leaves holding EVERY permission in the catalogue. The seed
+// grants it all of them, but grants are edited at runtime (RF-USR-05): an admin can strip
+// their own role through PUT /api/roles/:id/permissions, and a code added later through
+// POST /api/roles/permissions is granted to nobody. An "admin" without area.manage is the
+// lockout in a different coat, so the grant set is repaired here, through
+// Roles.setPermissions() so that what was restored lands in the audit trail with no actor
+// -- which is the honest record of a change made from the terminal.
 
 import { openStore, closeStore } from '../src/access/primitives/database.js';
 import query from '../src/access/resources/query.js';
 import auth from '../src/access/orchestration/auth.js';
 import areas from '../src/access/orchestration/areas.js';
+import roles from '../src/access/orchestration/roles.js';
+import audit from '../src/access/orchestration/audit.js';
 
 const ADMIN_ROLE = 'admin';
 
@@ -113,6 +123,10 @@ if (!email || !fullName) {
 
 openStore();
 
+// api.js subscribes the trail when it builds; nothing here builds an Api, so the grants
+// restored below would otherwise be announced to nobody. Subscribed in the open, on purpose.
+audit.subscribe();
+
 try {
   const role = await query.getRoleIdByName(ADMIN_ROLE);
   if (role === null) {
@@ -132,6 +146,15 @@ try {
     fail('Password must be at least 8 characters long.');
   }
 
+  // Before the account, so that if this fails nothing else was touched.
+  const catalogue = await query.getPermissions();
+  const heldBefore = (await query.getRolePermissions(role)).length;
+  await roles.setPermissions(role, catalogue.map((permission) => permission.code));
+  const restored = catalogue.length - heldBefore;
+  const permissionsLine =
+    `  Permissions: ${ADMIN_ROLE} holds all ${catalogue.length}` +
+    (restored > 0 ? ` (${restored} restored).` : '.');
+
   const existing = await query.getAuthUserByEmail(email);
 
   if (existing) {
@@ -144,6 +167,7 @@ try {
     const after = await query.countLiveUsersWithRole(ADMIN_ROLE);
     console.log(`\n  ${email} (id ${existing.id}) is now an admin.`);
     console.log(`  Role: ${existing.role_name} -> ${ADMIN_ROLE}. Password reset.`);
+    console.log(permissionsLine);
     console.log(`  Live admins: ${before} -> ${after}.\n`);
   } else {
     const contractRef = arg('contract');
@@ -179,6 +203,7 @@ try {
     console.log(`\n  Admin created: ${email} (id ${created.id}).`);
     console.log(`  Contract type: ${contract.name}${defaulted}.`);
     console.log(`  Area: ${area ? area.name : 'none'}${areaDefaulted}.`);
+    console.log(permissionsLine);
     console.log(`  Live admins: ${before} -> ${after}.\n`);
   }
 } catch (err) {

@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import areas from "../access/orchestration/areas.js";
-import { authenticate, requireRole } from "../middlewares/auth.js";
+import { authenticate, requirePermission } from "../middlewares/auth.js";
 import { ApiError } from "../utils/ApiError.js";
 
 const router = Router();
@@ -52,28 +52,32 @@ router.get("/:id/members", async (req, res) => {
   res.json({ members: await areas.getMembers(areaId(req)) });
 });
 
-// --- Everything below is coordination's ---
+// --- Writes: whoever holds area.manage ---
 //
-// 'admin' is roles.name for coordinación/secretaría particular, the third level of
-// RF-USR-02, and the same gate routes/users.js uses. Area leads direct the work of their
-// area (RF-USR-04) but creating areas and moving them under one another is the
-// organisation's shape, not theirs.
+// The first router on the permission model, and the shape every later one copies:
+// permissions mirror the router's BLOCKS, not its endpoints. One `resource.read` code
+// gates the read block, one write code gates everything below, each mounted once with
+// router.use(). A route appended at the bottom is write-gated by omission. A third code
+// appears only where an RF forces a slice of the router to answer differently (the
+// absence motive under RF-AUS-13 is the standing example), cited where it is declared and
+// applied on those routes alone. Which records somebody may touch is never a permission
+// -- that is area_members and area_hierarchy, applied in orchestration.
 //
-// Not requirePermission('area.manage'), even though RF-USR-09 put that code in the
-// catalogue and section 8 of catalog-bootstrap does grant it to `admin`. Two reasons, and
-// the second is the one that decides it:
+// `area.manage` is what section 8 of catalog-bootstrap grants `admin`, so admin behaviour
+// is unchanged by this line. What changed is that it is no longer the only answer: a role
+// granted the code through PUT /api/roles/:id/permissions passes here on its next request,
+// without a deploy (RF-USR-05, RF-USR-09). Area leads direct the work of their area
+// (RF-USR-04), but the organisation's shape is coordination's, and coordination decides who
+// else may edit it by granting this.
 //
-//   - It matches routes/users.js, so the two administrative routers are gated the same way
-//     and there is one answer to "who may administer this system", not two.
-//   - `worker` and `area_lead` are seeded with NO grants, deliberately: which of them may
-//     manage areas is coordination's policy decision, not a developer's. Gating on
-//     area.manage today would therefore behave identically to this line while reading as
-//     though a policy had been chosen.
+// The read block above stays on the session alone, not `area.read`: RF-USR-03 gives every
+// member of an area sight of their colleagues, and no role exists yet that should be
+// refused it. That code arrives with the external requester (RF-EXT-03).
 //
-// When coordination does grant area.manage to somebody other than admin -- PUT
-// /api/roles/:id/permissions is how -- swapping this line for requirePermission is the
-// whole change, and it is at that point that it starts to mean something different.
-router.use(requireRole("admin"));
+// routes/roles.js and the write half of routes/users.js deliberately do NOT follow this
+// pattern -- see the comment there: the grants those endpoints write are what this line
+// reads, and gating them on one of them lets an admin lock everyone out, self included.
+router.use(requirePermission("area.manage"));
 
 // POST /api/areas -- create an area, optionally with its first leader and its parent.
 //

@@ -390,7 +390,12 @@ cada área. Se descartó. El rol dice **qué puede hacer** una persona y el áre
 qué registros**, y son dos preguntas separadas:
 
 - `RF-USR-05` —qué puede hacer— la contesta `role_permissions`, y no cambia de un área a
-  otra: quien puede editar proyectos, puede editar proyectos.
+  otra: quien puede editar proyectos, puede editar proyectos. En la API los códigos siguen
+  los **bloques** de cada router, no sus endpoints: un `recurso.read` para el bloque de
+  lecturas y un código de escritura para el de escrituras, montados una vez cada uno; un
+  tercer código solo donde un `RF-*` obliga a que una parte del router conteste distinto
+  (`absence.reason.read`, `RF-AUS-13`). `/api/areas` es el primero en aplicarlo
+  (`area.manage` sobre sus escrituras).
 - `RF-USR-03` y `RF-USR-04` —sobre qué registros— las contesta `area_members`, cruzada con
   `area_hierarchy` cuando hay que bajar por el organigrama (§5.5). Ahí sí sigue siendo
   cierto que alguien encabeza un área y es integrante de otra: eso vive en

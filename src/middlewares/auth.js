@@ -70,17 +70,23 @@ export const requireRole = (...roles) => {
 // per request because the codes are read live rather than carried in the token -- see
 // issueToken(): the catalog is editable at runtime (RF-USR-05), so a set frozen into a
 // week-long token would keep granting a permission that coordination has since revoked.
+//
+// One query per REQUEST, not per guard. Routers mount one of these at each block boundary
+// (reads, then writes -- see routes/areas.js), so a write passes through two; the first
+// loads the role's codes onto req.permissions and the second is a Set lookup.
 export const requirePermission = (...codes) => {
   return async (req, _res, next) => {
     if (!req.user) {
       throw new Error('requirePermission() used without authenticate() before it.');
     }
 
-    const granted = await auth.permissionsFor(req.user.roleId);
+    if (!req.permissions) {
+      req.permissions = new Set(await auth.permissionsFor(req.user.roleId));
+    }
 
     // Every listed code must be held, not any of them. Read and write are independent
     // permissions (RF-USR-05), so a handler that does both has to ask for both.
-    const missing = codes.filter((code) => !granted.includes(code));
+    const missing = codes.filter((code) => !req.permissions.has(code));
     if (missing.length > 0) {
       throw ApiError.forbidden(`Missing permission: ${missing.join(', ')}.`);
     }

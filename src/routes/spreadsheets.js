@@ -3,8 +3,14 @@ import {
   getSpreadsheetTables,
   getSpreadsheetRows,
 } from '../access/resources/spreadsheets.js';
+import { authenticate, requireRole } from '../middlewares/auth.js';
 
 const router = express.Router();
+
+// Scratch routes against Microsoft Graph, but mounted on the public API all the same: nothing
+// here may answer without a session. Admin because the feature belongs to nobody yet.
+router.use(authenticate);
+router.use(requireRole('admin'));
 
 /**
  * Ruta de prueba para obtener las tablas de un Excel.

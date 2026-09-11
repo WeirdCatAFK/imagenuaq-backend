@@ -65,9 +65,10 @@ router.delete("/:id", async (req, res) => {
 // PUT /api/roles/:id/permissions -- replace the role's whole grant set, by code.
 //
 // This is the endpoint that fills `role_permissions`, which the role-permissions migration
-// left empty on purpose (RF-USR-05: which role gets what is coordination's decision, not a
-// developer's). Until it is used, requirePermission() refuses everyone and every guarded
-// route in this API falls back to requireRole().
+// left empty for `worker` and `area_lead` on purpose (RF-USR-05: which role gets what is
+// coordination's decision, not a developer's). What a grant written here opens is whatever
+// requirePermission() guards -- routes/areas.js is the first, and the comment on its write
+// block is the pattern.
 router.put("/:id/permissions", async (req, res) => {
   const { permissions } = req.body ?? {};
   res.json({

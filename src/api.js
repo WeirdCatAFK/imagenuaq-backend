@@ -53,8 +53,9 @@ export default class Api {
   build() {
     // The audit trail listens for domain events (RF-USR-07). Subscribed here rather than as
     // an import side effect so that building an Api is what turns it on, and a tool that
-    // imports orchestration without serving HTTP -- scripts/createAdmin.js -- does not
-    // quietly acquire a listener. The dispatcher keys subscribers by name, so a second Api
+    // imports orchestration without serving HTTP does not quietly acquire a listener
+    // (scripts/createAdmin.js subscribes itself, in the open, for the grants it restores).
+    // The dispatcher keys subscribers by name, so a second Api
     // in the same process replaces this one instead of logging everything twice.
     audit.subscribe();
 
