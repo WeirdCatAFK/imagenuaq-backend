@@ -159,6 +159,28 @@ describe('/api/roles', () => {
       assert.equal(res.body.role.id, created.body.role.id);
     });
 
+    // requireRole('admin') compares the name, so renaming or deleting the row is the
+    // lockout scripts/createAdmin.js exists to undo. Refused before the holder count: the
+    // reason is the role, not who has it.
+    test('renaming the admin role is 403', async () => {
+      const res = await server.patch(`/api/roles/${await roleId('admin')}`, {
+        token: adminToken,
+        body: { name: name('otro') },
+      });
+
+      assert.equal(res.status, 403);
+      assert.equal(res.body.error.message, 'The admin role cannot be edited.');
+    });
+
+    test('deleting the admin role is 403', async () => {
+      const res = await server.delete(`/api/roles/${await roleId('admin')}`, {
+        token: adminToken,
+      });
+
+      assert.equal(res.status, 403);
+      assert.equal(res.body.error.message, 'The admin role cannot be deleted.');
+    });
+
     // users.role_id is NOT NULL and there is no defensible default to move holders to, so
     // this is refused rather than resolved. The count is in the message on purpose.
     test('deleting a role that users still hold is 409 with the count', async () => {

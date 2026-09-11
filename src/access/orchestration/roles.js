@@ -33,6 +33,13 @@ import { ApiError } from "../../utils/ApiError.js";
 const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
 
+/**
+ * The one role requireRole() names by string: routes/roles.js and the write half of
+ * routes/users.js are gated on it, so renaming or deleting the row locks every
+ * administrator out of administering -- the lockout scripts/createAdmin.js exists for.
+ */
+const ADMIN_ROLE = "admin";
+
 /** Column widths from initial-schema and role-permissions; a 22001 becomes a 400 here. */
 const ROLE_NAME_MAX = 50;
 const PERMISSION_CODE_MAX = 100;
@@ -100,12 +107,16 @@ class Roles {
    * @param {number|string} roleId
    * @param {{ name?: string, description?: string|null }} changes
    * @returns {Promise<object>}
-   * @throws {ApiError} 400 on a bad payload, 404 when the role does not exist.
+   * @throws {ApiError} 400 on a bad payload, 403 for the admin role, 404 when the role
+   *   does not exist.
    */
   async update(roleId, { name, description }) {
     const id = requireId(roleId, "roleId");
     const current = await query.getRoleById(id);
     if (!current) throw ApiError.notFound("Role not found.");
+    if (current.name === ADMIN_ROLE) {
+      throw ApiError.forbidden("The admin role cannot be edited.");
+    }
 
     const nextName = name === undefined ? current.name : cleanText(name);
     if (!nextName || nextName.length > ROLE_NAME_MAX) {
@@ -148,10 +159,17 @@ class Roles {
    * on their behalf. The foreign key would refuse too; this check exists to say why.
    *
    * @param {number|string} roleId
-   * @throws {ApiError} 404 when it does not exist, 409 while it is held.
+   * @throws {ApiError} 403 for the admin role, 404 when it does not exist, 409 while it
+   *   is held.
    */
   async delete(roleId) {
     const id = requireId(roleId, "roleId");
+
+    const current = await query.getRoleById(id);
+    if (!current) throw ApiError.notFound("Role not found.");
+    if (current.name === ADMIN_ROLE) {
+      throw ApiError.forbidden("The admin role cannot be deleted.");
+    }
 
     const holders = await query.countUsersWithRole(id);
     if (holders > 0) {
