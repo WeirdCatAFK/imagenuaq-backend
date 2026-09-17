@@ -57,6 +57,7 @@ class Microsoft {
    * @returns {Promise<{ url: string }>}
    */
   async connectUrl(userId) {
+    requireConfigured();
     const state = await auth.issueConnectState(userId);
     return { url: authorizeUrl({ state }) };
   }
@@ -206,6 +207,20 @@ class Microsoft {
       after: row,
     });
     return row;
+  }
+}
+
+/**
+ * The sign-in cannot start without an app registration. Checked here rather than left to
+ * the primitive's throw so the answer is a 503 naming the variables, not a 500 hiding them.
+ *
+ * @throws {ApiError} 503 when MS_CLIENT_ID or MS_CLIENT_SECRET is unset.
+ */
+function requireConfigured() {
+  if (!process.env.MS_CLIENT_ID || !process.env.MS_CLIENT_SECRET) {
+    throw ApiError.unavailable(
+      "Microsoft sign-in is not configured on this server: set MS_CLIENT_ID and MS_CLIENT_SECRET in .env (see .env.example).",
+    );
   }
 }
 

@@ -1846,6 +1846,10 @@ export function buildOpenApiDocument() {
             200: jsonResponse('Where to send the browser.', 'MicrosoftConnectUrl'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
+            503: errorResponse(
+              'No app registration in .env; nothing to sign into.',
+              'Microsoft sign-in is not configured on this server: set MS_CLIENT_ID and MS_CLIENT_SECRET in .env (see .env.example).',
+            ),
           },
         },
       },

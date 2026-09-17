@@ -84,6 +84,21 @@ describe('/api/microsoft', () => {
     });
   });
 
+  describe('POST /connect without an app registration', () => {
+    test('is a 503 naming the variables, not a 500', async () => {
+      const saved = process.env.MS_CLIENT_ID;
+      delete process.env.MS_CLIENT_ID;
+      try {
+        const res = await server.post('/api/microsoft/connect', { token: adminToken });
+
+        assert.equal(res.status, 503);
+        assert.match(res.body.error.message, /MS_CLIENT_ID and MS_CLIENT_SECRET/);
+      } finally {
+        process.env.MS_CLIENT_ID = saved;
+      }
+    });
+  });
+
   describe('GET /callback', () => {
     // A session token is signed with the same key and passes every structural check; only
     // the purpose claim keeps it from being accepted as a state. Same trick as invites.
