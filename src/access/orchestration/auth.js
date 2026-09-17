@@ -44,6 +44,10 @@ const TOKEN_TTL = "7d";
 /** Token purposes. Each verifier demands its own and rejects the other. */
 const PURPOSE_SESSION = "session";
 const PURPOSE_INVITE = "invite";
+const PURPOSE_MS_CONNECT = "ms_connect";
+
+/** How long a Microsoft sign-in may take between leaving here and coming back. */
+const MS_CONNECT_TTL = "10m";
 
 /** Invite lifetime. Shorter than a session: it travels by email or chat and lingers. */
 const INVITE_TTL = "3d";
@@ -285,6 +289,57 @@ class Auth {
       .setAudience(audience())
       .setExpirationTime(INVITE_TTL)
       .sign(jwtSecret());
+  }
+
+  /**
+   * The `state` for a Microsoft sign-in (RF-MIG-01, orchestration/microsoft.js). The
+   * browser leaves for Microsoft and comes back to a public callback with no session
+   * header, so this is how the callback learns who was connecting: a short-lived token
+   * naming the subject, signed with the session key. Its purpose claim keeps it from being
+   * accepted anywhere a session or an invite is, and vice versa.
+   *
+   * @param {number} userId
+   * @returns {Promise<string>}
+   */
+  async issueConnectState(userId) {
+    return new jose.SignJWT({ purpose: PURPOSE_MS_CONNECT })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(String(userId))
+      .setIssuedAt()
+      .setIssuer(issuer())
+      .setAudience(audience())
+      .setExpirationTime(MS_CONNECT_TTL)
+      .sign(jwtSecret());
+  }
+
+  /**
+   * Verifies a `state` issued by issueConnectState() and returns the user id it names.
+   *
+   * @param {string} state
+   * @returns {Promise<number>}
+   * @throws {ApiError} 401 on a missing, tampered, expired or wrong-purpose state.
+   */
+  async verifyConnectState(state) {
+    if (typeof state !== "string" || state === "") {
+      throw ApiError.unauthorized("Invalid or expired sign-in state.");
+    }
+
+    let payload;
+    try {
+      ({ payload } = await jose.jwtVerify(state, jwtSecret(), {
+        issuer: issuer(),
+        audience: audience(),
+      }));
+    } catch (err) {
+      if (!(err instanceof jose.errors.JOSEError)) throw err;
+      throw ApiError.unauthorized("Invalid or expired sign-in state.");
+    }
+
+    if (payload.purpose !== PURPOSE_MS_CONNECT) {
+      throw ApiError.unauthorized("Invalid or expired sign-in state.");
+    }
+
+    return Number(payload.sub);
   }
 
   /**
