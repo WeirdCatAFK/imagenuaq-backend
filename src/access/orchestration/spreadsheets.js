@@ -137,7 +137,7 @@ class Spreadsheets {
   }
 
   /**
-   * The header row of a registered table, read live.
+   * The header row of a registered table plus a few rows under it, read live.
    *
    * @throws {ApiError} 404 when the sheet is gone here or in Microsoft 365, and whatever
    *   accessTokenFor() refuses -- including the 409 that says the account needs reconnecting.

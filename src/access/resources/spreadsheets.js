@@ -16,6 +16,10 @@
 // Graph documents -- base64url of the URL with a `u!` prefix.
 import { graphGet } from "../primitives/microsoftGraph.js";
 
+// How many body rows a preview carries under the header row: enough to recognise the
+// tracker, few enough that a table of thousands of rows costs one small Graph call.
+const SAMPLE_ROWS = 5;
+
 /**
  * The drive/item pair behind a share link.
  *
@@ -62,14 +66,19 @@ export async function listTables(accessToken, driveId, itemId) {
 
 /**
  * The header row of a table, or of a worksheet's used range when no table carries that
- * name. Cells come back as whatever Excel holds -- strings, numbers, empty strings for
- * blanks -- untouched; deciding what a blank header means is the mapping's business.
+ * name, plus the first SAMPLE_ROWS rows under it. Cells come back as whatever Excel holds
+ * -- strings, numbers, empty strings for blanks -- untouched; deciding what a blank header
+ * means is the mapping's business.
+ *
+ * A table's body is paged through /rows with $top so a long tracker is never downloaded
+ * whole; a worksheet's used range already arrives in one piece and is sliced here.
  *
  * @param {string} accessToken
  * @param {string} driveId
  * @param {string} itemId
  * @param {string | null} tableName Null: the first worksheet.
- * @returns {Promise<{ kind: 'table' | 'worksheet', name: string, headers: unknown[] }>}
+ * @returns {Promise<{ kind: 'table' | 'worksheet', name: string, headers: unknown[],
+ *   rows: unknown[][] } | null>} Null when no table or worksheet has that name.
  */
 export async function readHeaders(accessToken, driveId, itemId, tableName) {
   const base = workbook(driveId, itemId);
@@ -77,11 +86,18 @@ export async function readHeaders(accessToken, driveId, itemId, tableName) {
 
   const table = tableName === null ? null : tables.find((t) => t.name === tableName);
   if (table) {
-    const range = await graphGet(
-      accessToken,
-      `${base}/tables/${encodeURIComponent(table.name)}/headerRowRange`,
-    );
-    return { kind: "table", name: table.name, headers: range.values?.[0] ?? [] };
+    const tablePath = `${base}/tables/${encodeURIComponent(table.name)}`;
+    const [range, body] = await Promise.all([
+      graphGet(accessToken, `${tablePath}/headerRowRange`),
+      graphGet(accessToken, `${tablePath}/rows?$top=${SAMPLE_ROWS}`),
+    ]);
+    return {
+      kind: "table",
+      name: table.name,
+      headers: range.values?.[0] ?? [],
+      // Each table row is its own object holding a one-row matrix.
+      rows: (body.value ?? []).map((row) => row.values?.[0] ?? []),
+    };
   }
 
   const sheet =
@@ -92,7 +108,13 @@ export async function readHeaders(accessToken, driveId, itemId, tableName) {
     accessToken,
     `${base}/worksheets/${encodeURIComponent(sheet.name)}/usedRange?$select=values`,
   );
-  return { kind: "worksheet", name: sheet.name, headers: range.values?.[0] ?? [] };
+  const values = range.values ?? [];
+  return {
+    kind: "worksheet",
+    name: sheet.name,
+    headers: values[0] ?? [],
+    rows: values.slice(1, 1 + SAMPLE_ROWS),
+  };
 }
 
 function workbook(driveId, itemId) {

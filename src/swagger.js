@@ -868,8 +868,15 @@ export function buildOpenApiDocument() {
               items: {},
               description: 'The header row as Excel holds it: strings, numbers, empty strings for blanks.',
             },
+            rows: {
+              type: 'array',
+              items: { type: 'array', items: {} },
+              description:
+                'Up to five rows under the header, same cell semantics, so a person can ' +
+                'recognise the tracker by its data and not only by its column names.',
+            },
           },
-          required: ['sheet', 'kind', 'name', 'headers'],
+          required: ['sheet', 'kind', 'name', 'headers', 'rows'],
         },
       },
       responses: {
@@ -2077,16 +2084,16 @@ export function buildOpenApiDocument() {
       '/api/spreadsheets/{id}/preview': {
         get: {
           tags: ['spreadsheets'],
-          summary: 'Read the header row live',
+          summary: 'Read the header row and a sample of the data live',
           description:
             'Needs spreadsheet.read and, since it reads as the account, the account must be ' +
             'the caller\'s or the caller must be admin. The header row of the table, or ' +
-            'the first row of the worksheet\'s used range, straight from Microsoft 365 -- ' +
-            'so a person can see they registered the right thing, and so the mapping ' +
-            'iteration has something to map.',
+            'the first row of the worksheet\'s used range, plus up to five rows under it, ' +
+            'straight from Microsoft 365 -- so a person can see they registered the right ' +
+            'thing, and so the mapping iteration has something to map.',
           parameters: [pathId('id', 'sheets.id')],
           responses: {
-            200: jsonResponse('The header row.', 'SheetPreview'),
+            200: jsonResponse('The header row and up to five rows of data.', 'SheetPreview'),
             400: errorResponse('A malformed id.', 'Invalid spreadsheet id.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
