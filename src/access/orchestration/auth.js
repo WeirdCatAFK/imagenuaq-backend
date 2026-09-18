@@ -102,6 +102,50 @@ class Auth {
   }
 
   /**
+   * A person changing their own password: the current one is checked first, so a session
+   * left open on a shared machine cannot be turned into a permanent takeover.
+   *
+   * `token_version` is deliberately NOT bumped. Bumping it would sign the caller out of
+   * the very session they are using, and the frontend would have to log them in again
+   * with the new password to carry on; the trade is that other open sessions keep working
+   * until they expire. "Sign out everywhere" is a separate action when it is wanted.
+   *
+   * @param {number} userId The caller's own id, from the session.
+   * @param {string} currentPassword
+   * @param {string} newPassword
+   * @throws {ApiError} 400 when a field is missing or the new one is too short, 401 when
+   *   the current password is wrong, 404 when no live row matched.
+   */
+  async changePassword(userId, currentPassword, newPassword) {
+    if (!currentPassword || !newPassword) {
+      throw ApiError.badRequest("Current and new passwords are required.");
+    }
+
+    const user = await query.getAuthUserById(userId);
+    if (!user) throw ApiError.notFound("User not found.");
+
+    // The placeholder keeps a never-activated account costing the same as a wrong guess,
+    // as in authenticate(); such an account cannot reach here with a session anyway.
+    const matches = await bcrypt.compare(
+      currentPassword,
+      user.password_hash ?? ABSENT_USER_HASH,
+    );
+    if (!user.password_hash || !matches) {
+      throw ApiError.unauthorized("Current password is incorrect.");
+    }
+
+    await this.setPassword(user.id, newPassword);
+
+    // Only the fact of the change; audit.js would redact the hash in any case.
+    await events.emit({
+      action: "record_updated",
+      target: { table: "users", id: user.id },
+      before: { password_changed: false },
+      after: { password_changed: true },
+    });
+  }
+
+  /**
    * Hashes without writing, for scripts/createAdmin.js, which moves the role and the
    * password in one statement and so cannot go through setPassword(). Exists to keep the
    * cost factor in a single place.

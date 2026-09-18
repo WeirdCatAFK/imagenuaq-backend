@@ -275,10 +275,29 @@ class Users {
         after: auditable(row),
       });
 
-      return shapeUser(row, true);
+      // RETURNING gives the bare row; the role name is joined in so the response has the
+      // same shape as getById() and a client can merge it over what it already holds.
+      const role = await query.getRoleById(row.role_id);
+      return shapeUser({ ...row, role_name: role?.name ?? null }, true);
     } catch (err) {
       throw translate(err);
     }
+  }
+
+  /**
+   * The subset of update() a person may apply to their own record: name, address and
+   * birthday. Contract type, area and schedule are conditions of employment that
+   * coordination sets (RF-USR-02, RF-AUS-02), so they are dropped here rather than
+   * refused -- a client that sends them gets the same answer as one that did not, and
+   * cannot use the response to probe which keys are privileged.
+   *
+   * @param {number|string} userId The caller's own id, taken from the session.
+   * @param {object} changes
+   * @returns {Promise<object>} The full shape, as update() returns it.
+   * @throws {ApiError} 400 on a bad payload, 404 when missing, 409 on a duplicate email.
+   */
+  async updateProfile(userId, { fullName, email, birthday } = {}) {
+    return this.update(userId, { fullName, email, birthday });
   }
 
   /**
@@ -396,12 +415,24 @@ function shapeUser(row, asAdmin) {
 
   if (asAdmin) {
     shaped.contractTypeId = row.contract_type_id;
-    shaped.birthday = row.birthday;
+    shaped.birthday = dateOnly(row.birthday);
     shaped.createdAt = row.created_at;
     shaped.deletedAt = row.deleted_at ?? null;
   }
 
   return shaped;
+}
+
+/**
+ * A `date` column as the "YYYY-MM-DD" it was stored as. The driver hands a date back as a
+ * Date at local midnight, which serialises as a timestamp in another zone -- a birthday
+ * read from Bogotá would land on the day before.
+ */
+function dateOnly(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value.slice(0, 10);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
 }
 
 /** One of a user's areas, as the list and detail reads both carry it. */

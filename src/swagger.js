@@ -315,6 +315,26 @@ export function buildOpenApiDocument() {
           },
           required: ['token', 'password'],
         },
+        UpdateProfileRequest: {
+          type: 'object',
+          description:
+            'Every key optional; an absent key keeps its value. Contract type, area and ' +
+            'schedule are dropped if sent -- they are conditions of employment coordination ' +
+            'sets through PATCH /api/users/{id}.',
+          properties: {
+            fullName: { type: 'string', maxLength: 200, example: 'Ana Ruiz' },
+            email: { type: 'string', format: 'email', maxLength: 320 },
+            birthday: { type: ['string', 'null'], format: 'date', example: '1990-05-04' },
+          },
+        },
+        ChangePasswordRequest: {
+          type: 'object',
+          properties: {
+            currentPassword: { type: 'string', format: 'password' },
+            newPassword: { type: 'string', format: 'password', minLength: 8 },
+          },
+          required: ['currentPassword', 'newPassword'],
+        },
         CreateUserRequest: {
           type: 'object',
           properties: {
@@ -1011,6 +1031,112 @@ export function buildOpenApiDocument() {
               },
             },
             401: { $ref: '#/components/responses/Unauthorized' },
+          },
+        },
+        patch: {
+          tags: ['auth'],
+          summary: 'Edit your own name, address or birthday',
+          description:
+            'The id is taken from the session, never from a parameter, so there is no path ' +
+            'by which one person reaches another row. The same token keeps working with the new name: ' +
+            'verifyToken() re-reads the row on every request.',
+          requestBody: jsonBody('UpdateProfileRequest'),
+          responses: {
+            200: wrapped('The record as it now stands.', 'user', 'UserAdmin'),
+            400: errorResponse(
+              'An empty name, a malformed address, or one over the length limit.',
+              'A valid email address is required.',
+            ),
+            401: UNAUTHORIZED,
+            409: errorResponse(
+              'The address belongs to another live account.',
+              'A user with that email address already exists.',
+            ),
+          },
+        },
+      },
+      '/api/auth/me/profile': {
+        get: {
+          tags: ['auth'],
+          summary: 'Your own record, in full',
+          description:
+            'The shape an admin sees, with birthday and contract type: the narrower shape ' +
+            'hides those from colleagues (RF-USR-03), not from the person they describe.',
+          responses: {
+            200: wrapped('The record behind the session.', 'user', 'UserAdmin'),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/auth/me/password': {
+        put: {
+          tags: ['auth'],
+          summary: 'Change your own password',
+          description:
+            'The current password is checked first, so an unattended session cannot be ' +
+            'turned into a permanent takeover. Other open sessions are NOT signed out: ' +
+            'token_version is left alone so the session making the change survives it.',
+          requestBody: jsonBody('ChangePasswordRequest'),
+          responses: {
+            204: { description: 'Changed. The old password no longer logs in.' },
+            400: errorResponse(
+              'A field is missing, or the new password is under eight characters.',
+              'Password must be at least 8 characters long.',
+            ),
+            401: errorResponse(
+              'No session, or the current password does not match.',
+              'Current password is incorrect.',
+            ),
+          },
+        },
+      },
+      '/api/auth/me/picture': {
+        get: {
+          tags: ['auth'],
+          summary: 'Your own profile picture',
+          responses: {
+            200: {
+              description: 'The image bytes, as the type they were uploaded with.',
+              content: {
+                'image/png': { schema: { type: 'string', format: 'binary' } },
+                'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+                'image/webp': { schema: { type: 'string', format: 'binary' } },
+              },
+            },
+            401: UNAUTHORIZED,
+            404: errorResponse('No picture set.', 'No profile picture set.'),
+          },
+        },
+        put: {
+          tags: ['auth'],
+          summary: 'Replace your own profile picture',
+          description:
+            'The body is the raw image, not multipart, as on PUT /api/users/{id}/picture. ' +
+            'Capped at 2 MB.',
+          requestBody: {
+            required: true,
+            content: {
+              'image/png': { schema: { type: 'string', format: 'binary' } },
+              'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+              'image/webp': { schema: { type: 'string', format: 'binary' } },
+            },
+          },
+          responses: {
+            204: { description: 'Stored.' },
+            400: errorResponse(
+              'The body is empty or the type is not one of the three accepted.',
+              'Content-Type must be one of: image/png, image/jpeg, image/webp.',
+            ),
+            401: UNAUTHORIZED,
+            413: errorResponse('The image is larger than 2 MB.'),
+          },
+        },
+        delete: {
+          tags: ['auth'],
+          summary: 'Remove your own profile picture',
+          responses: {
+            204: { description: 'Removed, or there was nothing to remove.' },
+            401: UNAUTHORIZED,
           },
         },
       },
