@@ -37,6 +37,9 @@ describe('/api/spreadsheets and /api/microsoft are guarded', () => {
     ['DELETE', '/api/spreadsheets/1'],
     ['POST', '/api/microsoft/connect'],
     ['DELETE', '/api/microsoft/accounts/1'],
+    ['GET', '/api/microsoft/app'],
+    ['PUT', '/api/microsoft/app'],
+    ['DELETE', '/api/microsoft/app'],
   ];
 
   for (const [method, path] of [...READS, ...WRITES]) {

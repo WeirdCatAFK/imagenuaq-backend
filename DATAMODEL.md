@@ -18,7 +18,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `entities`, `entity_contacts`, `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Implementado por`projects-spine`; falta la definición de formatos por UI            |
-| MIG                               | `microsoft_accounts`, `sheets`                                                                                                                                                                   | Registro de libros implementado por`microsoft-accounts`; falta el mapeo de columnas (§2.10) |
+| MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`                                                                                                                                                  | Registro de libros implementado por`microsoft-accounts` y `microsoft-app`; falta el mapeo de columnas (§2.10) |
 | FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
 | FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
@@ -280,6 +280,15 @@ Tres decisiones dentro:
 Quién puede usar qué cuenta es regla de registros, no permiso: la persona que la conectó y
 `admin`, aplicada en `orchestration/microsoft.js`. Los códigos `spreadsheet.read` y
 `spreadsheet.write` dicen si alguien toca la función; aquello dice qué filas.
+
+**El registro de aplicación también es dato** (`microsoft_app`, migración `microsoft-app`).
+Las concesiones se hacen a una aplicación registrada en el portal de Entra — tenant, client
+id y secreto — y ésos tres valores viven en una fila que un administrador guarda desde el
+frontend, con el secreto cifrado bajo la misma `MS_TOKEN_KEY`. Es una sola fila con
+`CHECK (id = 1)`, no una tabla genérica de configuración: un almacén clave/valor sería un
+mecanismo inventado para un único uso. `.env` (`MS_*`) queda como respaldo cuando la fila no
+existe, y es lo que usa la suite de pruebas. Crear el registro en sí sigue siendo un acto en
+el portal: Microsoft no ofrece API para ello.
 
 ## 3. Trazabilidad
 
@@ -1232,6 +1241,20 @@ formato (`RF-MIG-01`, `RF-MIG-02`).
 | `last_imported_at` | timestamptz | sí | | Hasta dónde llegó la última importación, para que la siguiente sepa desde dónde seguir |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 | `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `microsoft_app`
+
+El registro de aplicación de Azure con el que se inicia sesión en Microsoft (§2.10). Una
+sola fila; si no existe se leen `MS_TENANT_ID`, `MS_CLIENT_ID` y `MS_CLIENT_SECRET` de `.env`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | smallint | no | `1` | Siempre `1` (`CHECK`): es un singleton |
+| `tenant_id` | varchar(64) | no | `common` | `common`, `organizations` o el id del tenant de la UAQ |
+| `client_id` | varchar(64) | no | | Application (client) ID del portal. No es secreto: viaja en cada URL de autorización |
+| `client_secret_enc` | bytea | no | | Secreto de cliente cifrado con `MS_TOKEN_KEY`. Nunca se devuelve; redactado en `logs` |
+| `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Último guardado |
+| `updated_by` | bigint | sí | | Quién lo guardó → `users.id` |
 
 #### `microsoft_accounts`
 

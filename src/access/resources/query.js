@@ -1016,6 +1016,54 @@ class Query {
     return rows;
   }
 
+  // --- Microsoft app registration (RF-MIG-01) ---
+
+  /** The one row, with who last saved it, or null when the registration lives in .env. */
+  async getMicrosoftApp() {
+    const [row] = await this.#rows(
+      `select a.*, u.full_name as updated_by_name
+         from microsoft_app a
+         left join users u on u.id = a.updated_by
+        where a.id = 1`,
+      [],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Creates or replaces the registration. `clientSecretEnc` null keeps the stored secret,
+   * which is how a form that never shows the secret can save the other two fields.
+   *
+   * @param {{ tenantId: string, clientId: string, clientSecretEnc: Buffer | null,
+   *   updatedBy: number | null }} app
+   * @returns {Promise<object | null>} The row, or null when there was no secret to keep.
+   */
+  async setMicrosoftApp({ tenantId, clientId, clientSecretEnc, updatedBy }) {
+    const [row] = await this.#rows(
+      // The stored secret is folded in BEFORE the insert is attempted: NOT NULL is checked
+      // on the proposed row, ahead of ON CONFLICT, so a coalesce in the DO UPDATE never runs.
+      `insert into microsoft_app (id, tenant_id, client_id, client_secret_enc, updated_by)
+       values (1, $1, $2,
+               coalesce($3::bytea, (select client_secret_enc from microsoft_app where id = 1)),
+               $4::bigint)
+       on conflict (id) do update
+         set tenant_id         = excluded.tenant_id,
+             client_id         = excluded.client_id,
+             client_secret_enc = excluded.client_secret_enc,
+             updated_at        = current_timestamp,
+             updated_by        = excluded.updated_by
+       returning *`,
+      [tenantId, clientId, clientSecretEnc, updatedBy],
+    );
+    return row ?? null;
+  }
+
+  /** @returns {Promise<object | null>} The row that was removed, or null. */
+  async deleteMicrosoftApp() {
+    const [row] = await this.#rows(`delete from microsoft_app where id = 1 returning *`, []);
+    return row ?? null;
+  }
+
   // --- Microsoft accounts (RF-MIG-01) ---
 
   /**

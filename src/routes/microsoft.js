@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import microsoft from "../access/orchestration/microsoft.js";
-import { authenticate, requirePermission } from "../middlewares/auth.js";
+import { authenticate, requirePermission, requireRole } from "../middlewares/auth.js";
 import { ApiError } from "../utils/ApiError.js";
 
 const router = Router();
@@ -31,7 +31,9 @@ router.get("/callback", async (req, res) => {
     await microsoft.completeConnect({ code, state });
   } catch (err) {
     if (!(err instanceof ApiError)) throw err;
-    return res.redirect(errorUrl(err.statusCode === 401 ? "state" : "exchange", err.message));
+    return res.redirect(
+      errorUrl(err.statusCode === 401 ? "state" : "exchange", err.message),
+    );
   }
 
   res.redirect(`${frontend()}/?microsoft=connected`);
@@ -69,6 +71,30 @@ router.post("/connect", async (req, res) => {
 // DELETE /api/microsoft/accounts/:id -- withdraw the grant. The row stays, revoked.
 router.delete("/accounts/:id", async (req, res) => {
   res.json({ account: await microsoft.revoke(paramId(req), req.user) });
+});
+
+// --- The app registration: admin only ---
+//
+// A third block, on the role rather than a permission. The registration is infrastructure
+// -- the credentials this whole router signs in with -- not a record anybody works on, and
+// there is no reading of RF-USR-05 under which coordination delegates it. Stacked below the
+// write block, so an admin needs spreadsheet.write as well, which section 8 of
+// catalog-bootstrap and the microsoft-accounts migration grant.
+router.use(requireRole("admin"));
+
+// GET /api/microsoft/app -- what is configured and where it comes from. Never the secret.
+router.get("/app", async (_req, res) => {
+  res.json({ app: await microsoft.getApp() });
+});
+
+// PUT /api/microsoft/app -- save the registration. Omit clientSecret to keep the stored one.
+router.put("/app", async (req, res) => {
+  res.json({ app: await microsoft.setApp(req.body ?? {}, req.user) });
+});
+
+// DELETE /api/microsoft/app -- forget the stored registration; .env applies again, if set.
+router.delete("/app", async (_req, res) => {
+  res.json({ app: await microsoft.clearApp() });
 });
 
 function paramId(req) {

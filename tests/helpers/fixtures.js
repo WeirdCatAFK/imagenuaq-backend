@@ -96,6 +96,7 @@ export async function resetCases(keepEmails = []) {
   // reference users, and neither is seeded.
   await sql('delete from sheets');
   await sql('delete from microsoft_accounts');
+  await sql('delete from microsoft_app');
   await sql(
     `delete from role_permissions
       where role_id in (select id from roles where name like $1)`,

@@ -741,6 +741,39 @@ export function buildOpenApiDocument() {
           },
           required: ['id', 'userId', 'email', 'displayName', 'tenantId', 'scopes', 'connectedAt', 'lastUsedAt', 'revokedAt'],
         },
+        MicrosoftApp: {
+          type: 'object',
+          description:
+            'The Azure app registration in force. The secret is never returned -- only ' +
+            'whether one is set -- and `source` says whether it came from the microsoft_app ' +
+            'row or from MS_* in .env.',
+          properties: {
+            source: { type: ['string', 'null'], enum: ['database', 'env', null] },
+            tenantId: { type: ['string', 'null'], example: 'common' },
+            clientId: { type: ['string', 'null'], example: '3f2a...-....' },
+            hasSecret: { type: 'boolean' },
+            redirectUri: {
+              type: 'string',
+              format: 'uri',
+              description: 'What the registration must list as its Web redirect URI. Derived from API_DOMAIN.',
+            },
+            updatedAt: { type: ['string', 'null'], format: 'date-time' },
+            updatedByName: { type: ['string', 'null'] },
+          },
+          required: ['source', 'tenantId', 'clientId', 'hasSecret', 'redirectUri', 'updatedAt', 'updatedByName'],
+        },
+        SetMicrosoftAppRequest: {
+          type: 'object',
+          properties: {
+            tenantId: { type: 'string', maxLength: 64, default: 'common', description: '`common`, `organizations`, or a tenant id.' },
+            clientId: { type: 'string', maxLength: 64, description: 'Application (client) ID from the Entra portal.' },
+            clientSecret: {
+              type: 'string',
+              description: 'Required the first time; omit afterwards to keep the stored one.',
+            },
+          },
+          required: ['clientId'],
+        },
         MicrosoftConnectUrl: {
           type: 'object',
           properties: {
@@ -1847,8 +1880,8 @@ export function buildOpenApiDocument() {
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             503: errorResponse(
-              'No app registration in .env; nothing to sign into.',
-              'Microsoft sign-in is not configured on this server: set MS_CLIENT_ID and MS_CLIENT_SECRET in .env (see .env.example).',
+              'No app registration stored and none in .env; nothing to sign into.',
+              'Microsoft sign-in is not configured: save the app registration in the settings screen, or set MS_CLIENT_ID and MS_CLIENT_SECRET in .env.',
             ),
           },
         },
@@ -1886,6 +1919,55 @@ export function buildOpenApiDocument() {
               'That Microsoft account was connected by someone else.',
             ),
             404: errorResponse('Unknown, or already revoked.', 'Microsoft account not found.'),
+          },
+        },
+      },
+
+      '/api/microsoft/app': {
+        get: {
+          tags: ['microsoft'],
+          summary: 'The app registration in force',
+          description:
+            'Admin only. What the sign-in uses -- the microsoft_app row when one is stored, ' +
+            'else MS_* from .env -- and the redirect URI the Azure registration has to list. ' +
+            'Never the secret.',
+          responses: {
+            200: wrapped('The registration, secret withheld.', 'app', 'MicrosoftApp'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        put: {
+          tags: ['microsoft'],
+          summary: 'Save the app registration',
+          description:
+            'Admin only. Creates or replaces the one microsoft_app row; the secret is sealed ' +
+            'under MS_TOKEN_KEY and may be omitted once one is stored. Takes effect on the ' +
+            'next sign-in or refresh -- nothing restarts. The registration itself is made ' +
+            'in the Entra portal; this stores its three values.',
+          requestBody: jsonBody('SetMicrosoftAppRequest'),
+          responses: {
+            200: wrapped('The registration now in force.', 'app', 'MicrosoftApp'),
+            400: errorResponse(
+              'clientId missing or too long, a malformed tenantId, or no secret on first save.',
+              'clientSecret is required the first time.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        delete: {
+          tags: ['microsoft'],
+          summary: 'Forget the stored app registration',
+          description:
+            'Admin only. Removes the row; MS_* in .env applies again if set, otherwise the ' +
+            'sign-in answers 503 until a registration is saved. Connected accounts keep ' +
+            'their grants.',
+          responses: {
+            200: wrapped('The registration now in force, if any.', 'app', 'MicrosoftApp'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Nothing was stored.', 'No app registration is stored.'),
           },
         },
       },

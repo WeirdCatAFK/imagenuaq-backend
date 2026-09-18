@@ -29,6 +29,12 @@
 // revoke the accounts they connected; an admin may use and revoke anyone's. The
 // permission codes (spreadsheet.read / .write) say whether someone may touch the feature
 // at all; this says which rows.
+//
+// The app registration those grants are made to is data too (microsoft_app, one row,
+// secret sealed), saved by an admin from the settings screen; MS_* in .env is the fallback
+// when the row is absent, so tests and deployments that prefer the environment still work.
+// app() below is the one place that choice is made, read per call rather than cached so a
+// saved registration is used by the very next sign-in.
 import * as jose from "jose";
 
 import query from "../resources/query.js";
@@ -36,6 +42,7 @@ import {
   authorizeUrl,
   exchangeCode,
   refreshTokens,
+  redirectUri,
   GraphError,
 } from "../primitives/microsoftGraph.js";
 import auth from "./auth.js";
@@ -57,9 +64,9 @@ class Microsoft {
    * @returns {Promise<{ url: string }>}
    */
   async connectUrl(userId) {
-    requireConfigured();
+    const app = await this.#app();
     const state = await auth.issueConnectState(userId);
-    return { url: authorizeUrl({ state }) };
+    return { url: authorizeUrl(app, { state }) };
   }
 
   /**
@@ -80,9 +87,9 @@ class Microsoft {
 
     let tokens;
     try {
-      tokens = await exchangeCode(code);
+      tokens = await exchangeCode(await this.#app(), code);
     } catch (err) {
-      throw translateGraph(err);
+      throw translateExchange(err);
     }
 
     const claims = tokens.idToken ? jose.decodeJwt(tokens.idToken) : {};
@@ -131,7 +138,7 @@ class Microsoft {
 
     let tokens;
     try {
-      tokens = await refreshTokens(open(account.refresh_token_enc));
+      tokens = await refreshTokens(await this.#app(), open(account.refresh_token_enc));
     } catch (err) {
       if (err instanceof GraphError && err.code === "invalid_grant") {
         await this.#markRevoked(account);
@@ -150,6 +157,118 @@ class Microsoft {
 
     return tokens.accessToken;
   }
+
+  // --- The app registration ---
+
+  /**
+   * The registration in force: the microsoft_app row, else MS_* from .env.
+   *
+   * @returns {Promise<{ tenantId: string, clientId: string, clientSecret: string }>}
+   * @throws {ApiError} 503 when neither is set.
+   */
+  async #app() {
+    const row = await query.getMicrosoftApp();
+    if (row) {
+      return {
+        tenantId: row.tenant_id,
+        clientId: row.client_id,
+        clientSecret: open(row.client_secret_enc),
+      };
+    }
+
+    const { MS_CLIENT_ID: clientId, MS_CLIENT_SECRET: clientSecret } = process.env;
+    if (!clientId || !clientSecret) {
+      throw ApiError.unavailable(
+        "Microsoft sign-in is not configured: save the app registration in the settings screen, or set MS_CLIENT_ID and MS_CLIENT_SECRET in .env.",
+      );
+    }
+    return { tenantId: process.env.MS_TENANT_ID || "common", clientId, clientSecret };
+  }
+
+  /**
+   * What is configured, for the settings screen: never the secret, only whether there is
+   * one, plus the redirect URI the Azure registration has to list.
+   *
+   * @returns {Promise<object>}
+   */
+  async getApp() {
+    const row = await query.getMicrosoftApp();
+    const env = Boolean(process.env.MS_CLIENT_ID && process.env.MS_CLIENT_SECRET);
+
+    return {
+      source: row ? "database" : env ? "env" : null,
+      tenantId: row ? row.tenant_id : env ? process.env.MS_TENANT_ID || "common" : null,
+      clientId: row ? row.client_id : env ? process.env.MS_CLIENT_ID : null,
+      hasSecret: Boolean(row) || env,
+      redirectUri: redirectUri(),
+      updatedAt: row?.updated_at ?? null,
+      updatedByName: row?.updated_by_name ?? null,
+    };
+  }
+
+  /**
+   * Saves the registration. The secret may be omitted when one is already stored -- the
+   * form never shows it, so re-saving the other fields must not require re-typing it.
+   *
+   * @param {{ tenantId?: string, clientId: string, clientSecret?: string }} input
+   * @param {object} actor
+   * @returns {Promise<object>} getApp()'s shape.
+   * @throws {ApiError} 400 on a bad payload, or a missing secret with none stored.
+   */
+  async setApp({ tenantId, clientId, clientSecret }, actor) {
+    const tenant = cleanText(tenantId) ?? "common";
+    const client = cleanText(clientId);
+    const secret = cleanText(clientSecret);
+
+    if (!client || client.length > 64 || tenant.length > 64) {
+      throw ApiError.badRequest("clientId is required (64 characters or fewer).");
+    }
+    if (!/^[A-Za-z0-9.-]+$/.test(tenant)) {
+      throw ApiError.badRequest("tenantId must be 'common', 'organizations' or a tenant id.");
+    }
+    const before = await query.getMicrosoftApp();
+    if (secret === null && !before) {
+      throw ApiError.badRequest("clientSecret is required the first time.");
+    }
+
+    const row = await query.setMicrosoftApp({
+      tenantId: tenant,
+      clientId: client,
+      clientSecretEnc: secret === null ? null : seal(secret),
+      updatedBy: actor?.id ?? null,
+    });
+
+    await events.emit({
+      action: before ? "record_updated" : "record_created",
+      target: { table: "microsoft_app", id: row.id },
+      before,
+      after: row,
+    });
+
+    return this.getApp();
+  }
+
+  /**
+   * Removes the stored registration, falling back to .env if it has one. Accounts already
+   * connected keep their grants -- they were made to the registration, and if it is truly
+   * gone their next refresh fails and marks them revoked.
+   *
+   * @throws {ApiError} 404 when nothing was stored.
+   */
+  async clearApp() {
+    const row = await query.deleteMicrosoftApp();
+    if (!row) throw ApiError.notFound("No app registration is stored.");
+
+    await events.emit({
+      action: "record_deleted",
+      target: { table: "microsoft_app", id: row.id },
+      before: row,
+    });
+
+    return this.getApp();
+  }
+
+  // --- Accounts ---
 
   /**
    * The live account, checked for ownership. Shared with spreadsheets.js so registering a
@@ -210,18 +329,10 @@ class Microsoft {
   }
 }
 
-/**
- * The sign-in cannot start without an app registration. Checked here rather than left to
- * the primitive's throw so the answer is a 503 naming the variables, not a 500 hiding them.
- *
- * @throws {ApiError} 503 when MS_CLIENT_ID or MS_CLIENT_SECRET is unset.
- */
-function requireConfigured() {
-  if (!process.env.MS_CLIENT_ID || !process.env.MS_CLIENT_SECRET) {
-    throw ApiError.unavailable(
-      "Microsoft sign-in is not configured on this server: set MS_CLIENT_ID and MS_CLIENT_SECRET in .env (see .env.example).",
-    );
-  }
+function cleanText(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function isAdmin(actor) {
@@ -262,6 +373,33 @@ function shapeAccount(row) {
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at,
   };
+}
+
+/**
+ * The code exchange fails for reasons the person at the browser can act on, and none of
+ * them is "reconnect": the identity platform names each one in `error`.
+ *
+ * @returns {ApiError | Error}
+ */
+function translateExchange(err) {
+  if (!(err instanceof GraphError)) return err;
+
+  switch (err.code) {
+    case "invalid_client":
+      return ApiError.unavailable(
+        "Microsoft rejected the app registration's client secret. Check the secret saved in the settings screen: it must be the secret's Value, not its Id, and it must not have expired.",
+      );
+    case "unauthorized_client":
+      return ApiError.unavailable(
+        "Microsoft does not recognise the app registration's client id, or it does not admit this kind of account. Check the client id saved in the settings screen.",
+      );
+    case "invalid_grant":
+      return ApiError.badRequest(
+        "The sign-in code was already used or has expired. Start the connection again.",
+      );
+    default:
+      return ApiError.badGateway(`Microsoft refused the sign-in: ${err.message}`);
+  }
 }
 
 /**

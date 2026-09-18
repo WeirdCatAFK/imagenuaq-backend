@@ -75,6 +75,8 @@ describe('/api/microsoft', () => {
         url.searchParams.get('redirect_uri'),
         `${process.env.API_DOMAIN}/api/microsoft/callback`,
       );
+      // No openid, no id_token, no identity to store: the one scope that is not optional.
+      assert.match(url.searchParams.get('scope'), /(^| )openid( |$)/);
       assert.match(url.searchParams.get('scope'), /offline_access/);
       assert.match(url.searchParams.get('scope'), /Files\.Read\.All/);
 
@@ -92,10 +94,105 @@ describe('/api/microsoft', () => {
         const res = await server.post('/api/microsoft/connect', { token: adminToken });
 
         assert.equal(res.status, 503);
-        assert.match(res.body.error.message, /MS_CLIENT_ID and MS_CLIENT_SECRET/);
+        assert.match(res.body.error.message, /not configured/);
       } finally {
         process.env.MS_CLIENT_ID = saved;
       }
+    });
+  });
+
+  describe('the app registration (/app)', () => {
+    const APP = { tenantId: 'organizations', clientId: 'client-from-db', clientSecret: 'shh' };
+
+    test('reports .env as the source until a row is saved, never the secret', async () => {
+      const res = await server.get('/api/microsoft/app', { token: adminToken });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.body.app.source, 'env');
+      assert.equal(res.body.app.clientId, process.env.MS_CLIENT_ID);
+      assert.equal(res.body.app.hasSecret, true);
+      assert.equal(res.body.app.redirectUri, `${process.env.API_DOMAIN}/api/microsoft/callback`);
+      assert.doesNotMatch(JSON.stringify(res.body), /not-a-real-secret/);
+    });
+
+    test('a saved registration wins over .env and is what connect signs with', async () => {
+      const saved = await server.put('/api/microsoft/app', { token: adminToken, body: APP });
+
+      assert.equal(saved.status, 200);
+      assert.equal(saved.body.app.source, 'database');
+      assert.equal(saved.body.app.clientId, APP.clientId);
+      assert.equal(saved.body.app.tenantId, 'organizations');
+      assert.equal(saved.body.app.updatedByName, 'Prueba Usuario');
+      assert.doesNotMatch(JSON.stringify(saved.body), /shh/);
+
+      const connect = await server.post('/api/microsoft/connect', { token: adminToken });
+      const url = new URL(connect.body.url);
+      assert.equal(url.pathname, '/organizations/oauth2/v2.0/authorize');
+      assert.equal(url.searchParams.get('client_id'), APP.clientId);
+
+      // The secret is a column on the row, and the trail must not carry it.
+      const logs = await logsFor('microsoft_app', 1);
+      assert.deepEqual(logs.map((l) => l.action), ['record_created']);
+      assert.equal(logs[0].after_data.client_secret_enc, '[redacted]');
+    });
+
+    test('re-saving without the secret keeps the stored one', async () => {
+      await server.put('/api/microsoft/app', { token: adminToken, body: APP });
+
+      const res = await server.put('/api/microsoft/app', {
+        token: adminToken,
+        body: { clientId: 'renamed' },
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.body.app.clientId, 'renamed');
+      assert.equal(res.body.app.tenantId, 'common');
+      assert.equal(res.body.app.hasSecret, true);
+
+      const [row] = await sql('select client_secret_enc from microsoft_app where id = 1');
+      assert.equal(open(row.client_secret_enc), 'shh');
+
+      const logs = await logsFor('microsoft_app', 1);
+      assert.deepEqual(logs.map((l) => l.action), ['record_created', 'record_updated']);
+    });
+
+    test('the first save needs a secret; a bad tenant or client id is 400', async () => {
+      const noSecret = await server.put('/api/microsoft/app', {
+        token: adminToken,
+        body: { clientId: 'x' },
+      });
+      assert.equal(noSecret.status, 400);
+      assert.equal(noSecret.body.error.message, 'clientSecret is required the first time.');
+
+      const badTenant = await server.put('/api/microsoft/app', {
+        token: adminToken,
+        body: { ...APP, tenantId: 'not a tenant' },
+      });
+      assert.equal(badTenant.status, 400);
+
+      const noClient = await server.put('/api/microsoft/app', {
+        token: adminToken,
+        body: { clientSecret: 'x' },
+      });
+      assert.equal(noClient.status, 400);
+    });
+
+    test('deleting falls back to .env; deleting again is 404', async () => {
+      await server.put('/api/microsoft/app', { token: adminToken, body: APP });
+
+      const res = await server.delete('/api/microsoft/app', { token: adminToken });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.app.source, 'env');
+
+      const again = await server.delete('/api/microsoft/app', { token: adminToken });
+      assert.equal(again.status, 404);
+    });
+
+    test('a worker with the spreadsheet permissions is still refused', async () => {
+      const res = await server.get('/api/microsoft/app', { token: workerToken });
+
+      assert.equal(res.status, 403);
+      assert.equal(res.body.error.message, 'Insufficient role for this resource.');
     });
   });
 

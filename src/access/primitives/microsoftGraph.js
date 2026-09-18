@@ -19,15 +19,22 @@
 // an implementation that ignores it -- weeks later, when the old token stops working.
 //
 // Scopes are the smallest set that reads a workbook someone shares with the signed-in
-// account: `offline_access` is what yields a refresh token at all, `User.Read` the
-// identity, `Files.Read.All` the files -- including SharePoint document libraries the
-// person can reach. `Sites.Read.All` is not requested: it is not supported for personal
-// accounts and MS_TENANT_ID=common admits those.
+// account: `openid profile email` is what makes the token endpoint return an id_token at
+// all -- without `openid` there is no identity to record, whatever else was granted --
+// `offline_access` is what yields a refresh token, `User.Read` the Graph identity,
+// `Files.Read.All` the files, including SharePoint document libraries the person can
+// reach. `Sites.Read.All` is not requested: it is not supported for personal accounts and
+// a `common` tenant admits those.
+//
+// The app registration -- `{ tenantId, clientId, clientSecret }` -- is an argument to
+// every token call, not read from the environment here. Where it comes from (the
+// microsoft_app row, or MS_* in .env as the fallback) is orchestration's decision; this
+// module only knows how to use one.
 
 const AUTHORITY = "https://login.microsoftonline.com";
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
-export const SCOPES = "offline_access User.Read Files.Read.All";
+export const SCOPES = "openid profile email offline_access User.Read Files.Read.All";
 
 /** The identity platform's error, or Graph's, with what the caller needs to classify it. */
 export class GraphError extends Error {
@@ -44,23 +51,6 @@ export class GraphError extends Error {
   }
 }
 
-function tenant() {
-  return process.env.MS_TENANT_ID || "common";
-}
-
-/** Read per call, not at import: a test may set them after the module loads. */
-function clientId() {
-  const value = process.env.MS_CLIENT_ID;
-  if (!value) throw new Error("MS_CLIENT_ID is unset (see .env.example).");
-  return value;
-}
-
-function clientSecret() {
-  const value = process.env.MS_CLIENT_SECRET;
-  if (!value) throw new Error("MS_CLIENT_SECRET is unset (see .env.example).");
-  return value;
-}
-
 /** Derived from API_DOMAIN so the two cannot disagree; the registration must list it. */
 export function redirectUri() {
   const base = (process.env.API_DOMAIN || "http://localhost:3000").replace(/\/+$/, "");
@@ -70,12 +60,13 @@ export function redirectUri() {
 /**
  * Where to send the browser to sign in and consent.
  *
+ * @param {{ tenantId: string, clientId: string }} app The registration.
  * @param {{ state: string }} options `state` comes back untouched on the callback.
  * @returns {string}
  */
-export function authorizeUrl({ state }) {
+export function authorizeUrl(app, { state }) {
   const params = new URLSearchParams({
-    client_id: clientId(),
+    client_id: app.clientId,
     response_type: "code",
     redirect_uri: redirectUri(),
     response_mode: "query",
@@ -85,19 +76,20 @@ export function authorizeUrl({ state }) {
     // and the one their browser is signed into is not necessarily the one with the files.
     prompt: "select_account",
   });
-  return `${AUTHORITY}/${tenant()}/oauth2/v2.0/authorize?${params}`;
+  return `${AUTHORITY}/${app.tenantId}/oauth2/v2.0/authorize?${params}`;
 }
 
 /**
  * Trades the callback's authorization code for tokens.
  *
+ * @param {{ tenantId: string, clientId: string, clientSecret: string }} app
  * @param {string} code
  * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: number,
  *   idToken: string, scope: string }>}
  * @throws {GraphError} with the identity platform's `error` as `code`.
  */
-export function exchangeCode(code) {
-  return tokenRequest({
+export function exchangeCode(app, code) {
+  return tokenRequest(app, {
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectUri(),
@@ -108,28 +100,29 @@ export function exchangeCode(code) {
  * A fresh access token from a refresh token. The result carries a NEW refresh token;
  * persist it, the one passed in is now on borrowed time.
  *
+ * @param {{ tenantId: string, clientId: string, clientSecret: string }} app
  * @param {string} refreshToken
  * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: number,
  *   idToken: string | null, scope: string }>}
  * @throws {GraphError} `code === 'invalid_grant'` means the grant is gone for good --
  *   revoked, expired, or the password changed -- and the account must be reconnected.
  */
-export function refreshTokens(refreshToken) {
-  return tokenRequest({
+export function refreshTokens(app, refreshToken) {
+  return tokenRequest(app, {
     grant_type: "refresh_token",
     refresh_token: refreshToken,
   });
 }
 
-async function tokenRequest(fields) {
+async function tokenRequest(app, fields) {
   const body = new URLSearchParams({
-    client_id: clientId(),
-    client_secret: clientSecret(),
+    client_id: app.clientId,
+    client_secret: app.clientSecret,
     scope: SCOPES,
     ...fields,
   });
 
-  const response = await fetch(`${AUTHORITY}/${tenant()}/oauth2/v2.0/token`, {
+  const response = await fetch(`${AUTHORITY}/${app.tenantId}/oauth2/v2.0/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
