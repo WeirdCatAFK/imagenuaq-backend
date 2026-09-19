@@ -1016,6 +1016,228 @@ class Query {
     return rows;
   }
 
+
+  //--- DATA TYPES ---
+
+  async getDataType(code) {
+    const [row] = await this.#rows(
+      `select
+        id,
+        code,
+        name,
+        base_type,
+        properties,
+        is_active,
+        created_at
+      from data_types
+      where code = $1`,
+      [code],
+    );
+
+    return row ?? null;
+  }
+
+  async getDataTypes() {
+    return this.#rows(
+      `select
+        id,
+        code,
+        name,
+        base_type,
+        properties,
+        is_active,
+        created_at
+      from data_types
+      where is_active = true
+      order by name, id`,
+    );
+  }
+
+  //--- SCHEMAS ---
+
+  /**
+   * CREATE
+   * Crea un schema y su primera versión.
+   * El schema almacena la identidad estable, mientras que la versión almacena la definición JSON de sus campos.
+   */
+
+  async createSchema({code, name, fields, publishedBy = null}) {
+    const [row] = await this.#rows(
+      `with created_schema as(
+        insert into schemas (code, name)
+        values($1, $2)
+        returning id, code, name, is_active, created_at
+      ),
+      created_version as (
+        insert into schema_versions(
+          schema_id,
+          version, 
+          fields,
+          published_by
+        )
+        select
+          created_schema.id,
+          1,
+          $3::jsonb,
+          $4::bigint
+        from created_schema
+        returning 
+          id, 
+          schema_id, 
+          version, 
+          fields, 
+          published_at, 
+          published_by
+      )
+      select
+        s.id,
+        s.code,
+        s.name,
+        s.is_active,
+        s.created_at,
+        v.id as schema_version_id,
+        v.version,
+        v.fields,
+        v.published_at,
+        v.published_by
+      from created_schema s
+      join created_version v
+        on v.schema_id = s.id`,
+      [
+        code, name, JSON.stringify(fields), publishedBy,
+      ],
+    );
+    return row;
+  }
+
+  /**
+   * READ
+   * Obtiene un schema con su última versión.
+   */
+  async getSchema (schemaId) {
+    const [row] = await this.#rows(
+      `select
+        s.id,
+        s.code,
+        s.name,
+        s.is_active,
+        s.created_at,
+        v.id as schema_version_id,
+        v.version,
+        v.fields,
+        v.published_at,
+        v.published_by
+      from schemas s
+      left join lateral (
+        select
+          id, version, fields, published_at, published_by
+        from schema_versions
+        where schema_id = s.id
+        order by version desc
+        limit 1
+      ) v on true
+      where s.id = $1`,
+      [schemaId],
+    );
+    //Asegura que la función responda con null en lugar de undefined
+    //Ejemplo: si falla el filtro del JOIN.
+    return row ?? null;
+  }
+
+  /* READ - Obtiene TODOS los schemas con sus más recientes/últimas versiones*/
+  async getSchemas() {
+    return this.#rows(
+      `select
+        s.id,
+        s.code,
+        s.name,
+        s.is_active,
+        s.created_at,
+        v.id as schema_version_id,
+        v.version,
+        v.fields,
+        v.published_at,
+        v.published_by
+      from schemas s
+      left join lateral (
+        select
+          id, version, fields, published_at, published_by
+        from schema_versions
+        where schema_id = s.id
+        order by version desc
+        limit 1
+      ) v on true
+      order by s.name, s.id`,
+    );
+  }
+
+  /**
+   * UPDATE 
+   * Crea una NUEVA versión de un schema existente 
+   * 
+   * Las versiones publicadas NO son modificadas. 
+   * En lugar de eso, el siguiente numero versión es creado con los nuevos campos
+   */
+
+  async createSchemaVersion(schemaId, {fields, publishedBy = null}){
+    const [row] = await this.#rows(
+      `insert into schema_versions(
+        schema_id,
+        version, 
+        fields,
+        published_by
+      )
+      select
+        $1,
+        coalesce(max(version), 0) + 1,
+        $2::jsonb,
+        $3::bigint
+      from schema_versions
+      where schema_id = $1
+      returning
+        id,
+        schema_id,
+        version, 
+        fields,
+        published_at,
+        published_by`,
+      [
+        schemaId, JSON.stringify(fields), publishedBy,
+      ],
+    );
+
+    return row;
+  }
+
+  /**
+   * DELETE 
+   * Desactiva un schema 
+   * 
+   * No elimina fisicamente el registro.
+   * Se conserva el schema y sus versiones, pero 
+   * is_active pasa a false
+   */
+
+  async desactivateSchema(schemaId){
+    const [row] = await this.#rows(
+      `update schemas
+        set is_active = false
+      where id = $1
+      returning
+        id,
+        code, 
+        name,
+        is_active,
+        created_at`,
+      [schemaId]
+    );
+
+    return row ?? null;
+  }
+
+
+
+
 }
 
 export default new Query();
