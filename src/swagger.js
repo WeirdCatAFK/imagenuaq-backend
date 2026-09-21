@@ -217,6 +217,12 @@ export function buildOpenApiDocument() {
           'RF-MIG-02). Registering records which book and which account reads it; mapping ' +
           'its columns onto a request format is the next iteration and is absent here.',
       },
+      {
+        name: 'schemas',
+        description:
+          'Dynamic schemas and their versions. READs are open to any signed-in user; ' +
+          'WRITEs require the `schema.manage` permission.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -897,6 +903,63 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['sheet', 'kind', 'name', 'headers', 'rows'],
+        },
+        SchemaField: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', example: 'client_name' },
+            name: { type: 'string', example: 'Client Name' },
+            type: { type: 'string', example: 'text' },
+            section: { type: 'string', enum: ['deliverables', 'information'], example: 'information' },
+            required: { type: 'boolean', example: true },
+          },
+          required: ['code', 'name', 'type', 'section'],
+        },
+        Schema: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 1 },
+            code: { type: 'string', example: 'project_brief' },
+            name: { type: 'string', example: 'Project Brief' },
+            isActive: { type: 'boolean', example: true },
+            createdAt: { type: 'string', format: 'date-time' },
+            version: { type: ['integer', 'null'], example: 1 },
+            fields: { type: ['array', 'null'], items: { $ref: '#/components/schemas/SchemaField' } },
+            publishedAt: { type: ['string', 'null'], format: 'date-time' },
+            publishedBy: { type: ['integer', 'null'], example: 12 },
+            schemaVersionId: { type: ['integer', 'null'], example: 1 },
+          },
+          required: ['id', 'code', 'name', 'isActive', 'createdAt'],
+        },
+        SchemaVersion: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 2 },
+            schemaId: { type: 'integer', example: 1 },
+            version: { type: 'integer', example: 2 },
+            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            publishedAt: { type: ['string', 'null'], format: 'date-time' },
+            publishedBy: { type: ['integer', 'null'], example: 12 },
+          },
+          required: ['id', 'schemaId', 'version', 'fields'],
+        },
+        CreateSchemaRequest: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', maxLength: 100, example: 'project_brief' },
+            name: { type: 'string', maxLength: 200, example: 'Project Brief' },
+            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            publishedBy: { type: ['integer', 'null'], example: 12 },
+          },
+          required: ['code', 'name', 'fields'],
+        },
+        CreateSchemaVersionRequest: {
+          type: 'object',
+          properties: {
+            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            publishedBy: { type: ['integer', 'null'], example: 12 },
+          },
+          required: ['fields'],
         },
       },
       responses: {
@@ -2229,6 +2292,78 @@ export function buildOpenApiDocument() {
             ),
             409: errorResponse('The account must be reconnected.', 'Microsoft access to this account was revoked; connect it again.'),
             502: errorResponse('Microsoft Graph failed or is throttling.', 'Microsoft Graph failed: ...'),
+          },
+        },
+      },
+      
+      // --- schemas ---
+      
+      '/api/schemas': {
+        get: {
+          tags: ['schemas'],
+          summary: 'List all schemas and their latest version',
+          description: 'Reads are open to any signed-in user.',
+          responses: {
+            200: wrapped('Every schema with its latest version.', 'schemas', 'Schema', true),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['schemas'],
+          summary: 'Create a schema and its first version',
+          description: 'Needs schema.manage. Creates the base schema and its first version in one go.',
+          requestBody: jsonBody('CreateSchemaRequest'),
+          responses: {
+            201: wrapped('The created schema.', 'schema', 'Schema'),
+            400: errorResponse('Missing fields or invalid code/name.', 'Schema code is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The code is taken.', 'A schema with that code already exists.'),
+          },
+        },
+      },
+      '/api/schemas/{id}': {
+        get: {
+          tags: ['schemas'],
+          summary: 'Get a specific schema and its latest version',
+          description: 'Reads are open to any signed-in user.',
+          parameters: [pathId('id', 'schemas.id')],
+          responses: {
+            200: wrapped('The schema.', 'schema', 'Schema'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid schema id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+          },
+        },
+        delete: {
+          tags: ['schemas'],
+          summary: 'Deactivate a schema',
+          description: 'Needs schema.manage. Soft-deletes the schema (deactivates it).',
+          parameters: [pathId('id', 'schemas.id')],
+          responses: {
+            200: wrapped('The deactivated schema.', 'schema', 'Schema'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid schema id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+            409: errorResponse('The schema is already inactive.', 'Schema is already inactive.'),
+          },
+        },
+      },
+      '/api/schemas/{id}/versions': {
+        post: {
+          tags: ['schemas'],
+          summary: 'Create a new version of the schema',
+          description: 'Needs schema.manage. The previous version remains intact. If the schema is inactive, this fails.',
+          parameters: [pathId('id', 'schemas.id')],
+          requestBody: jsonBody('CreateSchemaVersionRequest'),
+          responses: {
+            201: wrapped('The created version.', 'version', 'SchemaVersion'),
+            400: errorResponse('Missing fields or invalid payload.', 'Fields must be an array.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+            409: errorResponse('Cannot create a version for an inactive schema.', 'Cannot create a version for a inactive schema.'),
           },
         },
       },

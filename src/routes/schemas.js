@@ -1,3 +1,8 @@
+/*
+Schemas are definitions in the context of the project of data. The ideal usage is for a project to define its schema of data to be filled out
+Also spreadsheet intake maps its values to the schemas. Schemas are a building block to a project
+*/
+
 import { Router } from "express";
 
 import schemas from "../access/orchestration/schemas.js";
