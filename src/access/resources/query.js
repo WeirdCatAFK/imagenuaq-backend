@@ -1016,6 +1016,211 @@ class Query {
     return rows;
   }
 
+  // --- Microsoft app registration (RF-MIG-01) ---
+
+  /** The one row, with who last saved it, or null when the registration lives in .env. */
+  async getMicrosoftApp() {
+    const [row] = await this.#rows(
+      `select a.*, u.full_name as updated_by_name
+         from microsoft_app a
+         left join users u on u.id = a.updated_by
+        where a.id = 1`,
+      [],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Creates or replaces the registration. `clientSecretEnc` null keeps the stored secret,
+   * which is how a form that never shows the secret can save the other two fields.
+   *
+   * @param {{ tenantId: string, clientId: string, clientSecretEnc: Buffer | null,
+   *   updatedBy: number | null }} app
+   * @returns {Promise<object | null>} The row, or null when there was no secret to keep.
+   */
+  async setMicrosoftApp({ tenantId, clientId, clientSecretEnc, updatedBy }) {
+    const [row] = await this.#rows(
+      // The stored secret is folded in BEFORE the insert is attempted: NOT NULL is checked
+      // on the proposed row, ahead of ON CONFLICT, so a coalesce in the DO UPDATE never runs.
+      `insert into microsoft_app (id, tenant_id, client_id, client_secret_enc, updated_by)
+       values (1, $1, $2,
+               coalesce($3::bytea, (select client_secret_enc from microsoft_app where id = 1)),
+               $4::bigint)
+       on conflict (id) do update
+         set tenant_id         = excluded.tenant_id,
+             client_id         = excluded.client_id,
+             client_secret_enc = excluded.client_secret_enc,
+             updated_at        = current_timestamp,
+             updated_by        = excluded.updated_by
+       returning *`,
+      [tenantId, clientId, clientSecretEnc, updatedBy],
+    );
+    return row ?? null;
+  }
+
+  /** @returns {Promise<object | null>} The row that was removed, or null. */
+  async deleteMicrosoftApp() {
+    const [row] = await this.#rows(`delete from microsoft_app where id = 1 returning *`, []);
+    return row ?? null;
+  }
+
+  // --- Microsoft accounts (RF-MIG-01) ---
+
+  /**
+   * Records a delegated grant, or replaces the token when this user reconnects the same
+   * account. The upsert targets the partial unique index, so a revoked row for the same
+   * pair is left as history and a fresh live row is written beside it.
+   *
+   * @param {{ userId: number, msObjectId: string, tenantId: string, email: string | null,
+   *   displayName: string | null, refreshTokenEnc: Buffer, scopes: string }} grant
+   * @returns {Promise<object>} The live row.
+   */
+  async createMicrosoftAccount({
+    userId,
+    msObjectId,
+    tenantId,
+    email,
+    displayName,
+    refreshTokenEnc,
+    scopes,
+  }) {
+    const [row] = await this.#rows(
+      `insert into microsoft_accounts
+         (user_id, ms_object_id, tenant_id, email, display_name, refresh_token_enc, scopes)
+       values ($1, $2, $3, $4::varchar, $5::varchar, $6, $7)
+       on conflict (user_id, ms_object_id) where revoked_at is null
+       do update set tenant_id         = excluded.tenant_id,
+                     email             = excluded.email,
+                     display_name      = excluded.display_name,
+                     refresh_token_enc = excluded.refresh_token_enc,
+                     scopes            = excluded.scopes,
+                     connected_at      = current_timestamp
+       returning *`,
+      [userId, msObjectId, tenantId, email, displayName, refreshTokenEnc, scopes],
+    );
+    return row;
+  }
+
+  /** One account, revoked or not, with its owner's name. */
+  async getMicrosoftAccount(accountId) {
+    const [row] = await this.#rows(
+      `select a.*, u.full_name as user_full_name
+         from microsoft_accounts a
+         join users u on u.id = a.user_id
+        where a.id = $1`,
+      [accountId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Live accounts, everyone's or one person's.
+   *
+   * @param {number | null} userId Null lists them all.
+   */
+  async listMicrosoftAccounts(userId = null) {
+    return this.#rows(
+      `select a.*, u.full_name as user_full_name
+         from microsoft_accounts a
+         join users u on u.id = a.user_id
+        where a.revoked_at is null
+          and ($1::bigint is null or a.user_id = $1)
+        order by a.connected_at desc, a.id desc`,
+      [userId],
+    );
+  }
+
+  /** Stores the rotated refresh token and stamps the use. */
+  async updateMicrosoftRefreshToken(accountId, refreshTokenEnc) {
+    const [row] = await this.#rows(
+      `update microsoft_accounts
+          set refresh_token_enc = $2,
+              last_used_at = current_timestamp
+        where id = $1 and revoked_at is null
+        returning id`,
+      [accountId, refreshTokenEnc],
+    );
+    return row ?? null;
+  }
+
+  /** @returns {Promise<object | null>} The row as it was, or null when already revoked. */
+  async revokeMicrosoftAccount(accountId) {
+    const [row] = await this.#rows(
+      `update microsoft_accounts
+          set revoked_at = current_timestamp
+        where id = $1 and revoked_at is null
+        returning *`,
+      [accountId],
+    );
+    return row ?? null;
+  }
+
+  // --- Sheets (RF-MIG-01, RF-MIG-02) ---
+
+  /**
+   * Registers a workbook. `schema_version_id` and `column_map` are left at their defaults:
+   * mapping is a later act (microsoft-accounts migration).
+   *
+   * @throws {{ code: '23505' }} on uq_sheets_item -- the same table registered twice.
+   */
+  async createSheet({
+    name,
+    driveId,
+    itemId,
+    tableName,
+    webUrl,
+    microsoftAccountId,
+    registeredBy,
+  }) {
+    const [row] = await this.#rows(
+      `insert into sheets
+         (name, drive_id, item_id, table_name, web_url, microsoft_account_id, registered_by)
+       values ($1, $2, $3, $4::varchar, $5::text, $6, $7::bigint)
+       returning *`,
+      [name, driveId, itemId, tableName, webUrl, microsoftAccountId, registeredBy],
+    );
+    return row;
+  }
+
+  #sheetSelect = `
+    select s.*,
+           a.email        as account_email,
+           a.display_name as account_display_name,
+           a.revoked_at   as account_revoked_at,
+           u.full_name    as registered_by_name
+      from sheets s
+      join microsoft_accounts a on a.id = s.microsoft_account_id
+      left join users u on u.id = s.registered_by`;
+
+  async listSheets() {
+    return this.#rows(
+      `${this.#sheetSelect}
+        where s.deleted_at is null
+        order by s.created_at desc, s.id desc`,
+      [],
+    );
+  }
+
+  async getSheet(sheetId) {
+    const [row] = await this.#rows(
+      `${this.#sheetSelect}
+        where s.id = $1 and s.deleted_at is null`,
+      [sheetId],
+    );
+    return row ?? null;
+  }
+
+  /** Soft delete. Returns the row as it was, or null when there was no live row. */
+  async deleteSheet(sheetId) {
+    const [row] = await this.#rows(
+      `update sheets
+          set deleted_at = current_timestamp
+        where id = $1 and deleted_at is null
+        returning *`,
+      [sheetId],
+    );
+    return row ?? null;
+  }
 }
 
 export default new Query();

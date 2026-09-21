@@ -44,6 +44,10 @@ const TOKEN_TTL = "7d";
 /** Token purposes. Each verifier demands its own and rejects the other. */
 const PURPOSE_SESSION = "session";
 const PURPOSE_INVITE = "invite";
+const PURPOSE_MS_CONNECT = "ms_connect";
+
+/** How long a Microsoft sign-in may take between leaving here and coming back. */
+const MS_CONNECT_TTL = "10m";
 
 /** Invite lifetime. Shorter than a session: it travels by email or chat and lingers. */
 const INVITE_TTL = "3d";
@@ -95,6 +99,50 @@ class Auth {
 
     // null means no live row matched: a wrong id, or a soft-deleted user.
     if (updated === null) throw ApiError.notFound("User not found.");
+  }
+
+  /**
+   * A person changing their own password: the current one is checked first, so a session
+   * left open on a shared machine cannot be turned into a permanent takeover.
+   *
+   * `token_version` is deliberately NOT bumped. Bumping it would sign the caller out of
+   * the very session they are using, and the frontend would have to log them in again
+   * with the new password to carry on; the trade is that other open sessions keep working
+   * until they expire. "Sign out everywhere" is a separate action when it is wanted.
+   *
+   * @param {number} userId The caller's own id, from the session.
+   * @param {string} currentPassword
+   * @param {string} newPassword
+   * @throws {ApiError} 400 when a field is missing or the new one is too short, 401 when
+   *   the current password is wrong, 404 when no live row matched.
+   */
+  async changePassword(userId, currentPassword, newPassword) {
+    if (!currentPassword || !newPassword) {
+      throw ApiError.badRequest("Current and new passwords are required.");
+    }
+
+    const user = await query.getAuthUserById(userId);
+    if (!user) throw ApiError.notFound("User not found.");
+
+    // The placeholder keeps a never-activated account costing the same as a wrong guess,
+    // as in authenticate(); such an account cannot reach here with a session anyway.
+    const matches = await bcrypt.compare(
+      currentPassword,
+      user.password_hash ?? ABSENT_USER_HASH,
+    );
+    if (!user.password_hash || !matches) {
+      throw ApiError.unauthorized("Current password is incorrect.");
+    }
+
+    await this.setPassword(user.id, newPassword);
+
+    // Only the fact of the change; audit.js would redact the hash in any case.
+    await events.emit({
+      action: "record_updated",
+      target: { table: "users", id: user.id },
+      before: { password_changed: false },
+      after: { password_changed: true },
+    });
   }
 
   /**
@@ -285,6 +333,57 @@ class Auth {
       .setAudience(audience())
       .setExpirationTime(INVITE_TTL)
       .sign(jwtSecret());
+  }
+
+  /**
+   * The `state` for a Microsoft sign-in (RF-MIG-01, orchestration/microsoft.js). The
+   * browser leaves for Microsoft and comes back to a public callback with no session
+   * header, so this is how the callback learns who was connecting: a short-lived token
+   * naming the subject, signed with the session key. Its purpose claim keeps it from being
+   * accepted anywhere a session or an invite is, and vice versa.
+   *
+   * @param {number} userId
+   * @returns {Promise<string>}
+   */
+  async issueConnectState(userId) {
+    return new jose.SignJWT({ purpose: PURPOSE_MS_CONNECT })
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(String(userId))
+      .setIssuedAt()
+      .setIssuer(issuer())
+      .setAudience(audience())
+      .setExpirationTime(MS_CONNECT_TTL)
+      .sign(jwtSecret());
+  }
+
+  /**
+   * Verifies a `state` issued by issueConnectState() and returns the user id it names.
+   *
+   * @param {string} state
+   * @returns {Promise<number>}
+   * @throws {ApiError} 401 on a missing, tampered, expired or wrong-purpose state.
+   */
+  async verifyConnectState(state) {
+    if (typeof state !== "string" || state === "") {
+      throw ApiError.unauthorized("Invalid or expired sign-in state.");
+    }
+
+    let payload;
+    try {
+      ({ payload } = await jose.jwtVerify(state, jwtSecret(), {
+        issuer: issuer(),
+        audience: audience(),
+      }));
+    } catch (err) {
+      if (!(err instanceof jose.errors.JOSEError)) throw err;
+      throw ApiError.unauthorized("Invalid or expired sign-in state.");
+    }
+
+    if (payload.purpose !== PURPOSE_MS_CONNECT) {
+      throw ApiError.unauthorized("Invalid or expired sign-in state.");
+    }
+
+    return Number(payload.sub);
   }
 
   /**

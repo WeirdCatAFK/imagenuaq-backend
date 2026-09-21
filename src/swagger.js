@@ -143,11 +143,12 @@ export function buildOpenApiDocument() {
       description: [
         'API interna de la Dirección de Imagen y Comunicación de la UAQ.',
         '',
-        'Only the USR half of the system is reachable over HTTP today: authentication,',
-        'sessions, staff accounts, areas and roles. SOL, PRY, FLW, TSK, EST, CAL, ARC,',
-        'FIN, INV, IMP, RPT and EXT exist in the requirements and, for some, in the',
-        'schema, but have no endpoints yet -- their absence here is the state of the work,',
-        'not an omission from this document.',
+        'The USR half of the system is reachable over HTTP -- authentication, sessions,',
+        'staff accounts, areas and roles -- plus the first half of MIG: a Microsoft',
+        'sign-in and the registry of Excel workbooks it reads (RF-MIG-01). SOL, PRY, FLW,',
+        'TSK, EST, CAL, ARC, FIN, INV, IMP, RPT and EXT exist in the requirements and, for',
+        'some, in the schema, but have no endpoints yet -- their absence here is the state',
+        'of the work, not an omission from this document.',
         '',
         '**Authentication.** `POST /api/auth/login` returns a bearer token good for seven',
         'days. Paste it into *Authorize* to exercise the guarded routes below.',
@@ -200,6 +201,21 @@ export function buildOpenApiDocument() {
           'arrive with the two grants that are definitions rather than configuration; ' +
           '`worker` and `area_lead` arrive with none, because theirs is a policy decision ' +
           'coordination makes here (RF-USR-05).',
+      },
+      {
+        name: 'microsoft',
+        description:
+          'Microsoft accounts connected by staff, whose delegated access reads the Excel ' +
+          'workbooks the areas keep during the transition (RF-MIG-01). One feature with ' +
+          '`spreadsheets`, sharing `spreadsheet.read` / `spreadsheet.write`. A person may ' +
+          'use and revoke the accounts they connected; an admin may use anyone\'s.',
+      },
+      {
+        name: 'spreadsheets',
+        description:
+          'The registry of workbooks and the table or worksheet inside each (RF-MIG-01, ' +
+          'RF-MIG-02). Registering records which book and which account reads it; mapping ' +
+          'its columns onto a request format is the next iteration and is absent here.',
       },
     ],
     components: {
@@ -298,6 +314,26 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['token', 'password'],
+        },
+        UpdateProfileRequest: {
+          type: 'object',
+          description:
+            'Every key optional; an absent key keeps its value. Contract type, area and ' +
+            'schedule are dropped if sent -- they are conditions of employment coordination ' +
+            'sets through PATCH /api/users/{id}.',
+          properties: {
+            fullName: { type: 'string', maxLength: 200, example: 'Ana Ruiz' },
+            email: { type: 'string', format: 'email', maxLength: 320 },
+            birthday: { type: ['string', 'null'], format: 'date', example: '1990-05-04' },
+          },
+        },
+        ChangePasswordRequest: {
+          type: 'object',
+          properties: {
+            currentPassword: { type: 'string', format: 'password' },
+            newPassword: { type: 'string', format: 'password', minLength: 8 },
+          },
+          required: ['currentPassword', 'newPassword'],
         },
         CreateUserRequest: {
           type: 'object',
@@ -703,6 +739,165 @@ export function buildOpenApiDocument() {
           },
           required: ['roleId', 'permissionId', 'revoked'],
         },
+        MicrosoftAccount: {
+          type: 'object',
+          description:
+            'A delegated grant. Never carries the refresh token, sealed or otherwise: that ' +
+            'column exists to be sent to Microsoft, not to a client.',
+          properties: {
+            id: { type: 'integer', example: 4 },
+            userId: { type: 'integer', description: 'Who connected it.', example: 12 },
+            userFullName: { type: ['string', 'null'], example: 'Ana Ruiz' },
+            email: { type: ['string', 'null'], example: 'ana.ruiz@uaq.mx' },
+            displayName: { type: ['string', 'null'], example: 'Ana Ruiz' },
+            tenantId: {
+              type: 'string',
+              description: 'The `tid` claim: an organisation, or the personal-accounts tenant.',
+            },
+            scopes: { type: 'string', example: 'Files.Read.All User.Read' },
+            connectedAt: { type: 'string', format: 'date-time' },
+            lastUsedAt: { type: ['string', 'null'], format: 'date-time' },
+            revokedAt: { type: ['string', 'null'], format: 'date-time' },
+          },
+          required: ['id', 'userId', 'email', 'displayName', 'tenantId', 'scopes', 'connectedAt', 'lastUsedAt', 'revokedAt'],
+        },
+        MicrosoftApp: {
+          type: 'object',
+          description:
+            'The Azure app registration in force. The secret is never returned -- only ' +
+            'whether one is set -- and `source` says whether it came from the microsoft_app ' +
+            'row or from MS_* in .env.',
+          properties: {
+            source: { type: ['string', 'null'], enum: ['database', 'env', null] },
+            tenantId: { type: ['string', 'null'], example: 'common' },
+            clientId: { type: ['string', 'null'], example: '3f2a...-....' },
+            hasSecret: { type: 'boolean' },
+            redirectUri: {
+              type: 'string',
+              format: 'uri',
+              description: 'What the registration must list as its Web redirect URI. Derived from API_DOMAIN.',
+            },
+            updatedAt: { type: ['string', 'null'], format: 'date-time' },
+            updatedByName: { type: ['string', 'null'] },
+          },
+          required: ['source', 'tenantId', 'clientId', 'hasSecret', 'redirectUri', 'updatedAt', 'updatedByName'],
+        },
+        SetMicrosoftAppRequest: {
+          type: 'object',
+          properties: {
+            tenantId: { type: 'string', maxLength: 64, default: 'common', description: '`common`, `organizations`, or a tenant id.' },
+            clientId: { type: 'string', maxLength: 64, description: 'Application (client) ID from the Entra portal.' },
+            clientSecret: {
+              type: 'string',
+              description: 'Required the first time; omit afterwards to keep the stored one.',
+            },
+          },
+          required: ['clientId'],
+        },
+        MicrosoftConnectUrl: {
+          type: 'object',
+          properties: {
+            url: {
+              type: 'string',
+              format: 'uri',
+              description:
+                'Send the browser here. Microsoft redirects it to GET /api/microsoft/callback, ' +
+                'which finishes the connection and redirects to FRONTEND_DOMAIN with ' +
+                '?microsoft=connected or ?microsoft=error&reason=...',
+            },
+          },
+          required: ['url'],
+        },
+        WorkbookEntry: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', description: 'Graph\'s id for the table or worksheet.' },
+            name: { type: 'string', example: 'Tabla1' },
+          },
+          required: ['id', 'name'],
+        },
+        ResolvedWorkbook: {
+          type: 'object',
+          description:
+            'What a pasted link points at, seen with the given account. The ids are what ' +
+            'POST /api/spreadsheets takes; `tables` and `worksheets` are what the person ' +
+            'picks the table from.',
+          properties: {
+            driveId: { type: 'string', example: 'b!x7Qw...' },
+            itemId: { type: 'string', example: '01BYE5RZ...' },
+            name: { type: 'string', example: 'Seguimiento 2026.xlsx' },
+            webUrl: { type: ['string', 'null'], format: 'uri' },
+            tables: { type: 'array', items: { $ref: '#/components/schemas/WorkbookEntry' } },
+            worksheets: { type: 'array', items: { $ref: '#/components/schemas/WorkbookEntry' } },
+          },
+          required: ['driveId', 'itemId', 'name', 'webUrl', 'tables', 'worksheets'],
+        },
+        Sheet: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 7 },
+            name: { type: 'string', example: 'Seguimiento de solicitudes 2026' },
+            driveId: { type: 'string' },
+            itemId: { type: 'string' },
+            tableName: {
+              type: ['string', 'null'],
+              description: 'Table or worksheet inside the book. Null means the first one.',
+            },
+            webUrl: { type: ['string', 'null'], format: 'uri' },
+            schemaVersionId: {
+              type: ['integer', 'null'],
+              description: 'The format it maps onto. Null until it is mapped.',
+            },
+            columnMap: { type: 'object', description: 'Excel header -> field key. Empty until mapped.' },
+            mapped: { type: 'boolean', description: 'schemaVersionId is not null.' },
+            lastImportedAt: { type: ['string', 'null'], format: 'date-time' },
+            accountId: { type: 'integer', description: 'The microsoft account that reads it.' },
+            accountEmail: { type: ['string', 'null'] },
+            accountDisplayName: { type: ['string', 'null'] },
+            accountRevoked: {
+              type: 'boolean',
+              description: 'The account behind it has been revoked; reads will 404 until it is reconnected.',
+            },
+            registeredBy: { type: ['integer', 'null'] },
+            registeredByName: { type: ['string', 'null'] },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'name', 'driveId', 'itemId', 'tableName', 'schemaVersionId', 'mapped', 'accountId', 'accountRevoked', 'createdAt'],
+        },
+        RegisterSheetRequest: {
+          type: 'object',
+          description: 'The ids come from GET /api/spreadsheets/resolve; nothing here is checked against Microsoft.',
+          properties: {
+            accountId: { type: 'integer', description: 'An account the caller may use.' },
+            name: { type: 'string', maxLength: 300 },
+            driveId: { type: 'string', maxLength: 255 },
+            itemId: { type: 'string', maxLength: 255 },
+            tableName: { type: ['string', 'null'], maxLength: 200, description: 'Omit or null for the first table.' },
+            webUrl: { type: ['string', 'null'], format: 'uri', description: 'Kept for the UI to link back to; not the key.' },
+          },
+          required: ['accountId', 'name', 'driveId', 'itemId'],
+        },
+        SheetPreview: {
+          type: 'object',
+          properties: {
+            sheet: { $ref: '#/components/schemas/Sheet' },
+            kind: { type: 'string', enum: ['table', 'worksheet'] },
+            name: { type: 'string', description: 'The table or worksheet actually read.' },
+            headers: {
+              type: 'array',
+              items: {},
+              description: 'The header row as Excel holds it: strings, numbers, empty strings for blanks.',
+            },
+            rows: {
+              type: 'array',
+              items: { type: 'array', items: {} },
+              description:
+                'Up to five rows under the header, same cell semantics, so a person can ' +
+                'recognise the tracker by its data and not only by its column names.',
+            },
+          },
+          required: ['sheet', 'kind', 'name', 'headers', 'rows'],
+        },
       },
       responses: {
         Unauthorized: errorResponse(
@@ -714,7 +909,8 @@ export function buildOpenApiDocument() {
           'Authenticated, and still not allowed. Two messages: `Insufficient role for this ' +
             'resource.` from a route gated on the role name (users, roles), and `Missing ' +
             'permission: <code>.` from one gated on a permission the role does not hold ' +
-            '(areas writes need `area.manage`).',
+            '(areas writes need `area.manage`; the microsoft and spreadsheets routers need ' +
+            '`spreadsheet.read` and `spreadsheet.write`).',
           'Insufficient role for this resource.',
         ),
       },
@@ -835,6 +1031,112 @@ export function buildOpenApiDocument() {
               },
             },
             401: { $ref: '#/components/responses/Unauthorized' },
+          },
+        },
+        patch: {
+          tags: ['auth'],
+          summary: 'Edit your own name, address or birthday',
+          description:
+            'The id is taken from the session, never from a parameter, so there is no path ' +
+            'by which one person reaches another row. The same token keeps working with the new name: ' +
+            'verifyToken() re-reads the row on every request.',
+          requestBody: jsonBody('UpdateProfileRequest'),
+          responses: {
+            200: wrapped('The record as it now stands.', 'user', 'UserAdmin'),
+            400: errorResponse(
+              'An empty name, a malformed address, or one over the length limit.',
+              'A valid email address is required.',
+            ),
+            401: UNAUTHORIZED,
+            409: errorResponse(
+              'The address belongs to another live account.',
+              'A user with that email address already exists.',
+            ),
+          },
+        },
+      },
+      '/api/auth/me/profile': {
+        get: {
+          tags: ['auth'],
+          summary: 'Your own record, in full',
+          description:
+            'The shape an admin sees, with birthday and contract type: the narrower shape ' +
+            'hides those from colleagues (RF-USR-03), not from the person they describe.',
+          responses: {
+            200: wrapped('The record behind the session.', 'user', 'UserAdmin'),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/auth/me/password': {
+        put: {
+          tags: ['auth'],
+          summary: 'Change your own password',
+          description:
+            'The current password is checked first, so an unattended session cannot be ' +
+            'turned into a permanent takeover. Other open sessions are NOT signed out: ' +
+            'token_version is left alone so the session making the change survives it.',
+          requestBody: jsonBody('ChangePasswordRequest'),
+          responses: {
+            204: { description: 'Changed. The old password no longer logs in.' },
+            400: errorResponse(
+              'A field is missing, or the new password is under eight characters.',
+              'Password must be at least 8 characters long.',
+            ),
+            401: errorResponse(
+              'No session, or the current password does not match.',
+              'Current password is incorrect.',
+            ),
+          },
+        },
+      },
+      '/api/auth/me/picture': {
+        get: {
+          tags: ['auth'],
+          summary: 'Your own profile picture',
+          responses: {
+            200: {
+              description: 'The image bytes, as the type they were uploaded with.',
+              content: {
+                'image/png': { schema: { type: 'string', format: 'binary' } },
+                'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+                'image/webp': { schema: { type: 'string', format: 'binary' } },
+              },
+            },
+            401: UNAUTHORIZED,
+            404: errorResponse('No picture set.', 'No profile picture set.'),
+          },
+        },
+        put: {
+          tags: ['auth'],
+          summary: 'Replace your own profile picture',
+          description:
+            'The body is the raw image, not multipart, as on PUT /api/users/{id}/picture. ' +
+            'Capped at 2 MB.',
+          requestBody: {
+            required: true,
+            content: {
+              'image/png': { schema: { type: 'string', format: 'binary' } },
+              'image/jpeg': { schema: { type: 'string', format: 'binary' } },
+              'image/webp': { schema: { type: 'string', format: 'binary' } },
+            },
+          },
+          responses: {
+            204: { description: 'Stored.' },
+            400: errorResponse(
+              'The body is empty or the type is not one of the three accepted.',
+              'Content-Type must be one of: image/png, image/jpeg, image/webp.',
+            ),
+            401: UNAUTHORIZED,
+            413: errorResponse('The image is larger than 2 MB.'),
+          },
+        },
+        delete: {
+          tags: ['auth'],
+          summary: 'Remove your own profile picture',
+          responses: {
+            204: { description: 'Removed, or there was nothing to remove.' },
+            401: UNAUTHORIZED,
           },
         },
       },
@@ -1661,6 +1963,272 @@ export function buildOpenApiDocument() {
               'The role did not hold that permission.',
               'That role does not hold that permission.',
             ),
+          },
+        },
+      },
+
+      // --- microsoft ---
+      //
+      // Reads need spreadsheet.read, writes spreadsheet.write -- the same two codes as
+      // /api/spreadsheets, because the accounts exist only to read the books. Which account
+      // somebody may touch is a record rule (owner or admin), applied in orchestration.
+
+      '/api/microsoft/callback': {
+        get: {
+          tags: ['microsoft'],
+          summary: 'Where Microsoft sends the browser back',
+          description:
+            'Public: the caller is a browser arriving from login.microsoftonline.com with no ' +
+            'session header. The credential is `state`, a ten-minute token this API minted ' +
+            'for one user at POST /api/microsoft/connect. Trades `code` for tokens, stores ' +
+            'the account, and **always answers with a 302** to FRONTEND_DOMAIN -- ' +
+            '`?microsoft=connected` on success, `?microsoft=error&reason=<why>` otherwise ' +
+            '(`state` for a bad state, `exchange` when Microsoft refused the code, or ' +
+            "Microsoft's own error such as `access_denied`). Not meant to be called by hand.",
+          security: [],
+          parameters: [
+            { name: 'code', in: 'query', schema: { type: 'string' }, description: 'The authorization code.' },
+            { name: 'state', in: 'query', schema: { type: 'string' }, description: 'The state from the authorize URL.' },
+            { name: 'error', in: 'query', schema: { type: 'string' }, description: "Microsoft's error code, when the sign-in failed or was declined." },
+            { name: 'error_description', in: 'query', schema: { type: 'string' } },
+          ],
+          responses: {
+            302: {
+              description: 'Redirect to the frontend, with the outcome in the query string.',
+              headers: { Location: { schema: { type: 'string', format: 'uri' } } },
+            },
+          },
+        },
+      },
+      '/api/microsoft/connect': {
+        post: {
+          tags: ['microsoft'],
+          summary: 'Start connecting a Microsoft account',
+          description:
+            'Needs spreadsheet.write. Returns the authorize URL to send the browser to. POST ' +
+            'because it mints a state token bound to the caller; the sign-in must finish ' +
+            'within ten minutes.',
+          responses: {
+            200: jsonResponse('Where to send the browser.', 'MicrosoftConnectUrl'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            503: errorResponse(
+              'No app registration stored and none in .env; nothing to sign into.',
+              'Microsoft sign-in is not configured: save the app registration in the settings screen, or set MS_CLIENT_ID and MS_CLIENT_SECRET in .env.',
+            ),
+          },
+        },
+      },
+      '/api/microsoft/accounts': {
+        get: {
+          tags: ['microsoft'],
+          summary: 'List connected accounts',
+          description:
+            "Needs spreadsheet.read. The caller's own live accounts; every live account for " +
+            'an admin. Revoked accounts are not listed.',
+          responses: {
+            200: wrapped('Live accounts, newest first.', 'accounts', 'MicrosoftAccount', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/microsoft/accounts/{id}': {
+        delete: {
+          tags: ['microsoft'],
+          summary: 'Revoke a connected account',
+          description:
+            'Needs spreadsheet.write, and the account must be the caller\'s unless they are ' +
+            'admin. The row stays, marked revoked, so the books that used it still say ' +
+            'which account to reconnect. Microsoft is not told: the person removes the ' +
+            'consent from their own account settings if they want it gone there too.',
+          parameters: [pathId('id', 'microsoft_accounts.id')],
+          responses: {
+            200: wrapped('The account, now revoked.', 'account', 'MicrosoftAccount'),
+            400: errorResponse('A malformed id.', 'Invalid account id.'),
+            401: UNAUTHORIZED,
+            403: errorResponse(
+              'Missing permission, or somebody else\'s account.',
+              'That Microsoft account was connected by someone else.',
+            ),
+            404: errorResponse('Unknown, or already revoked.', 'Microsoft account not found.'),
+          },
+        },
+      },
+
+      '/api/microsoft/app': {
+        get: {
+          tags: ['microsoft'],
+          summary: 'The app registration in force',
+          description:
+            'Admin only. What the sign-in uses -- the microsoft_app row when one is stored, ' +
+            'else MS_* from .env -- and the redirect URI the Azure registration has to list. ' +
+            'Never the secret.',
+          responses: {
+            200: wrapped('The registration, secret withheld.', 'app', 'MicrosoftApp'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        put: {
+          tags: ['microsoft'],
+          summary: 'Save the app registration',
+          description:
+            'Admin only. Creates or replaces the one microsoft_app row; the secret is sealed ' +
+            'under MS_TOKEN_KEY and may be omitted once one is stored. Takes effect on the ' +
+            'next sign-in or refresh -- nothing restarts. The registration itself is made ' +
+            'in the Entra portal; this stores its three values.',
+          requestBody: jsonBody('SetMicrosoftAppRequest'),
+          responses: {
+            200: wrapped('The registration now in force.', 'app', 'MicrosoftApp'),
+            400: errorResponse(
+              'clientId missing or too long, a malformed tenantId, or no secret on first save.',
+              'clientSecret is required the first time.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        delete: {
+          tags: ['microsoft'],
+          summary: 'Forget the stored app registration',
+          description:
+            'Admin only. Removes the row; MS_* in .env applies again if set, otherwise the ' +
+            'sign-in answers 503 until a registration is saved. Connected accounts keep ' +
+            'their grants.',
+          responses: {
+            200: wrapped('The registration now in force, if any.', 'app', 'MicrosoftApp'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Nothing was stored.', 'No app registration is stored.'),
+          },
+        },
+      },
+
+      // --- spreadsheets ---
+
+      '/api/spreadsheets': {
+        get: {
+          tags: ['spreadsheets'],
+          summary: 'List registered workbooks',
+          description:
+            'Needs spreadsheet.read. Every live registration, whoever made it: the registry ' +
+            'is shared work. Each row says whether its account has been revoked.',
+          responses: {
+            200: wrapped('Registered workbooks, newest first.', 'sheets', 'Sheet', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'Register a workbook table',
+          description:
+            'Needs spreadsheet.write, and an account the caller may use. Takes the ids ' +
+            '`resolve` returned and inserts -- **Microsoft is not consulted**, so the ' +
+            'registry works during an outage and a made-up id fails on first read rather ' +
+            'than here. The row is registered but unmapped: `schemaVersionId` is null and ' +
+            '`columnMap` empty until the mapping iteration.',
+          requestBody: jsonBody('RegisterSheetRequest'),
+          responses: {
+            201: wrapped('The registration.', 'sheet', 'Sheet'),
+            400: errorResponse(
+              'A missing or over-long field, a non-https webUrl, or a malformed accountId.',
+              'name is required (300 characters or fewer).',
+            ),
+            401: UNAUTHORIZED,
+            403: errorResponse(
+              'Missing permission, or an account somebody else connected.',
+              'That Microsoft account was connected by someone else.',
+            ),
+            404: errorResponse('The account is unknown or revoked.', 'Microsoft account not found.'),
+            409: errorResponse(
+              'That drive/item/table is already registered (uq_sheets_item).',
+              'That table is already registered.',
+            ),
+          },
+        },
+      },
+      '/api/spreadsheets/resolve': {
+        get: {
+          tags: ['spreadsheets'],
+          summary: 'Resolve a pasted link into ids and tables',
+          description:
+            'Needs spreadsheet.read and an account the caller may use. The one read that ' +
+            'talks to Microsoft before anything is registered: turns any OneDrive or ' +
+            'SharePoint share link into the drive/item pair and lists the tables and ' +
+            'worksheets in the book. Refreshes the account\'s token on the way; if Microsoft ' +
+            'says the grant is gone, the account is marked revoked and the answer is 409.',
+          parameters: [
+            { name: 'accountId', in: 'query', required: true, schema: { type: 'integer', minimum: 1 } },
+            { name: 'url', in: 'query', required: true, schema: { type: 'string', format: 'uri' }, description: 'An https link to the workbook.' },
+          ],
+          responses: {
+            200: jsonResponse('What the link points at.', 'ResolvedWorkbook'),
+            400: errorResponse('Not an https URL, or a malformed accountId.', 'url must be an https link to the workbook.'),
+            401: UNAUTHORIZED,
+            403: errorResponse(
+              "Missing permission, somebody else's account, or the account cannot open the file.",
+              'The Microsoft account cannot open that workbook.',
+            ),
+            404: errorResponse('Unknown account, or the link resolves to nothing the account can see.', 'Workbook or table not found in Microsoft 365.'),
+            409: errorResponse('The account must be reconnected.', 'Microsoft access to this account was revoked; connect it again.'),
+            502: errorResponse('Microsoft Graph failed or is throttling.', 'Microsoft Graph is throttling; retry in 30s.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}': {
+        get: {
+          tags: ['spreadsheets'],
+          summary: 'One registered workbook',
+          description: 'Needs spreadsheet.read.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: wrapped('The registration.', 'sheet', 'Sheet'),
+            400: errorResponse('A malformed id.', 'Invalid spreadsheet id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No live registration with that id.', 'Spreadsheet not found.'),
+          },
+        },
+        delete: {
+          tags: ['spreadsheets'],
+          summary: 'Remove a registration',
+          description:
+            'Needs spreadsheet.write. Soft delete; the account behind it stays connected, ' +
+            'and the same table can be registered again afterwards.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: wrapped('The registration as it was.', 'sheet', 'Sheet'),
+            400: errorResponse('A malformed id.', 'Invalid spreadsheet id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No live registration with that id.', 'Spreadsheet not found.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/preview': {
+        get: {
+          tags: ['spreadsheets'],
+          summary: 'Read the header row and a sample of the data live',
+          description:
+            'Needs spreadsheet.read and, since it reads as the account, the account must be ' +
+            'the caller\'s or the caller must be admin. The header row of the table, or ' +
+            'the first row of the worksheet\'s used range, plus up to five rows under it, ' +
+            'straight from Microsoft 365 -- so a person can see they registered the right ' +
+            'thing, and so the mapping iteration has something to map.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: jsonResponse('The header row and up to five rows of data.', 'SheetPreview'),
+            400: errorResponse('A malformed id.', 'Invalid spreadsheet id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse(
+              'No such registration, or the table is gone from the workbook.',
+              'That table or worksheet no longer exists in the workbook.',
+            ),
+            409: errorResponse('The account must be reconnected.', 'Microsoft access to this account was revoked; connect it again.'),
+            502: errorResponse('Microsoft Graph failed or is throttling.', 'Microsoft Graph failed: ...'),
           },
         },
       },

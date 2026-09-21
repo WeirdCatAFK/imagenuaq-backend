@@ -25,4 +25,16 @@ export class ApiError extends Error {
   static conflict(message = 'Conflict') {
     return new ApiError(409, message);
   }
+
+  // For a refusal that is not ours: an upstream service (Microsoft Graph) failed or throttled
+  // the call. 502 rather than 500 so the client can tell "retry later" from "report a bug".
+  static badGateway(message = 'Bad gateway') {
+    return new ApiError(502, message);
+  }
+
+  // A feature this deployment has not been configured for -- missing .env values, not a
+  // bug in the code and not the client's fault. 503 so the frontend can say so plainly.
+  static unavailable(message = 'Service unavailable') {
+    return new ApiError(503, message);
+  }
 }

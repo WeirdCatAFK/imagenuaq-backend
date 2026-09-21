@@ -187,6 +187,10 @@ yet.
 | POST   | `/api/auth/login`       | —           | `{ email, password }` → `{ token, user }`            |
 | GET    | `/api/auth/me`          | session      | The subject of the presented token                        |
 | POST   | `/api/auth/activate`    | invite token | `{ token, password }` → `{ token, user }`            |
+| GET    | `/api/auth/me/profile`  | session      | Your own record in full, birthday and contract type included |
+| PATCH  | `/api/auth/me`          | session      | `{ fullName?, email?, birthday? }` — your own; the rest is coordination's |
+| PUT    | `/api/auth/me/password` | session      | `{ currentPassword, newPassword }`; other sessions stay signed in |
+| GET/PUT/DELETE | `/api/auth/me/picture` | session | Your own picture; raw image body on PUT, as `/api/users/:id/picture` |
 | POST   | `/api/users`            | admin        | Create a staff account →`{ user, inviteToken }`        |
 | POST   | `/api/users/:id/invite` | admin        | Re-issue an invite for an account that never activated    |
 

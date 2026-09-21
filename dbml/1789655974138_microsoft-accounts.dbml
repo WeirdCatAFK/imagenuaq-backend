@@ -600,17 +600,6 @@ Table "microsoft_accounts" {
   Note: 'RF-MIG-01: la cuenta Microsoft con cuyo acceso se leen los libros registrados. Una fila por persona y cuenta; se revoca, no se borra.'
 }
 
-Table "microsoft_app" {
-  "id" int2 [pk, not null, default: 1]
-  "tenant_id" varchar(64) [not null, default: 'common', note: 'common (cualquier cuenta) o el id del tenant de la UAQ']
-  "client_id" varchar(64) [not null, note: 'Application (client) ID del portal de Entra. No es secreto: viaja en cada URL de autorizacion.']
-  "client_secret_enc" bytea [not null, note: 'Client secret cifrado con MS_TOKEN_KEY. Nunca se devuelve; solo si esta puesto.']
-  "updated_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "updated_by" int8
-  Note: '''RF-MIG-01: el registro de aplicacion de Azure con el que se inicia sesion en Microsoft. Una sola fila; si no existe se leen MS_* de .env.
-CHECK microsoft_app_singleton: id = 1'''
-}
-
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -690,8 +679,6 @@ Ref "fk_logs_user_id_users_id":"users"."id" < "logs"."user_id"
 Ref "logs_area_id_fkey":"areas"."id" < "logs"."area_id"
 
 Ref "microsoft_accounts_user_id_fkey":"users"."id" < "microsoft_accounts"."user_id"
-
-Ref "microsoft_app_updated_by_fkey":"users"."id" < "microsoft_app"."updated_by"
 
 Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "project_field_values"."produced_by_stage_id"
 
