@@ -38,12 +38,6 @@ throw `ApiError` directly instead of being wrapped.
 - **postgrejs** owns runtime queries. The pool is built in
   `access/primitives/database.js` and used only by `resources/query.js`. Reads pass
   `objectRows: true` — postgrejs returns arrays of values otherwise.
-- **Prisma Migrate** owns the schema. `prisma/schema.prisma` has no `generator client`
-  block and `@prisma/client` is not installed, so Prisma never loads at runtime; it is
-  a CLI that produces SQL files in `prisma/migrations/`. Since Prisma 7 the connection
-  URL lives in `prisma.config.js`, not in the schema that file reads the same `.env`
-  via `process.loadEnvFile`, because the CLI is a separate process and does not inherit
-  the `--env-file` the npm scripts pass to node.
 
 | Command              | What it does                                       |
 | -------------------- | -------------------------------------------------- |
@@ -61,8 +55,4 @@ commit the generated folder, then write the SQL that uses it in `resources/query
 | GET    | `/`           | Readiness ping, no database involved           |
 | GET    | `/api/health` | 200 while Postgres answers, 503 once it stops  |
 
-## Adding a resource
 
-Model in `prisma/schema.prisma` + a migration, SQL in `access/resources/query.js`, rules
-in `access/orchestration/<name>.js`, a router in `routes/<name>.js`, then one line in the
-`ROUTERS` map in `src/api.js`.
