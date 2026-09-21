@@ -133,6 +133,31 @@ Las filas vuelven el día que algo consulte campos entre formatos —un reporte 
 formatos piden tiraje", por ejemplo—. Mientras tanto, el `CHECK jsonb_typeof(fields) =
 'array'` es lo que impide que la columna degenere en un objeto suelto.
 
+**La forma de cada campo** (`schema-field-shape`, `orchestration/schemas.js`) es
+`{ code, name, type, section, required, propagate, options }`:
+
+- `code` es `snake_case` y único dentro de la versión. Es la llave en `requests.data`, el
+  destino que nombra el mapeo de columnas de una hoja (§2.10) y la `key` bajo la que el
+  valor cae en `project_field_values` cuando se propaga; por eso comparte el juego de
+  caracteres de las tres.
+- `type` es un `data_types.code`; la coerción por la que pasa un valor la decide el tipo.
+- `section` distingue lo que hay que producir (`deliverables`) de lo que hay que saber
+  (`information`).
+- `propagate` dice si el valor **sale de la solicitud** y se vuelve una fila de
+  `project_field_values` al convertirla (`RF-FLW-06`, `RF-IMP-05`): la dependencia que
+  ordenó, la fecha de entrega, el número de orden. Es un eje independiente de `section`.
+- `options` es un objeto libre para los extras del tipo; el constructor de formatos es
+  dueño de su significado.
+
+Las plantillas que pide `RF-SOL-01` ("conforme crecen las coordinaciones") son **clones**:
+`POST /api/schemas/:id/clone` copia los campos de la última versión a la versión 1 de una
+identidad nueva. Un catálogo de grupos de campos que los formatos compusieran se descartó:
+añade una tabla y una regla de propagación para una reutilización que la copia ya da, y
+los formatos que nombran las entrevistas comparten un puñado de campos, no bloques.
+`schema-field-shape` siembra cinco formatos de partida (`solicitud_general`,
+`papel_institucional`, `impresion`, `diseno_grafico`, `fotografia`) precisamente para
+clonarlos.
+
 ### 2.4 Los valores que cruzan etapas son filas, no un JSONB acumulado
 
 `RF-FLW-06` es explícito: el número de orden que genera diseño debe aparecer en el
@@ -297,7 +322,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 
 | RF                              | Cubierto por                                                                                                        | Estado |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------ |
-| RF-SOL-01                       | `schemas`, `schema_versions.fields` (§2.2, §2.3)                                                             | ◑ falta la UI de armado |
+| RF-SOL-01                       | `schemas`, `schema_versions.fields`, clonado (§2.2, §2.3)                                                    | ◑ API completa; falta la UI de armado |
 | RF-SOL-02                       | `requests.area_id` como puente; después`schema_versions` → flujo (§2.5)                                     | ◑ |
 | RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8)                                                   | ✔ |
 | RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3)                                                 | ✔ |

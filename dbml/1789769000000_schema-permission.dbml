@@ -417,11 +417,12 @@ Table "schema_versions" {
   "id" int8 [pk, not null, increment]
   "schema_id" int8 [not null]
   "version" int4 [not null]
-  "fields" jsonb [not null, default: `[]`, note: 'Arreglo ordenado de campos: { code, name, type (data_types.code), section (deliverables|information), required, propagate, options }. propagate: el valor viaja a project_field_values al convertir la solicitud (RF-FLW-06).']
+  "fields" jsonb [not null, default: `[]`, note: 'Arreglo ordenado de definiciones de campo: key, label, type, required, options']
   "published_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "published_by" int8
 
   Indexes {
+    (schema_id, version) [type: btree, unique, name: "uq_composite_schema"]
     (schema_id, version) [type: btree, unique, name: "uq_schema_versions_schema_version"]
   }
   Note: '''RF-SOL-01, DATAMODEL 2.2: inmutable una vez publicada. Editar un formato publica una version nueva.

@@ -1237,6 +1237,94 @@ class Query {
     return row ?? null;
   }
 
+  /**
+   * Clones a schema: a new identity whose version 1 carries the LATEST version's fields of
+   * the source, in one statement. `null` when the source does not exist or has no version.
+   */
+  async cloneSchema(sourceId, { code, name, publishedBy = null }) {
+    const [row] = await this.#rows(
+      `with source as (
+        select fields
+        from schema_versions
+        where schema_id = $1
+        order by version desc
+        limit 1
+      ),
+      created_schema as (
+        insert into schemas (code, name)
+        select $2, $3 from source
+        returning id, code, name, is_active, created_at
+      ),
+      created_version as (
+        insert into schema_versions (schema_id, version, fields, published_by)
+        select created_schema.id, 1, source.fields, $4::bigint
+        from created_schema, source
+        returning id, schema_id, version, fields, published_at, published_by
+      )
+      select
+        s.id, s.code, s.name, s.is_active, s.created_at,
+        v.id as schema_version_id, v.version, v.fields, v.published_at, v.published_by
+      from created_schema s
+      join created_version v on v.schema_id = s.id`,
+      [sourceId, code, name, publishedBy],
+    );
+    return row ?? null;
+  }
+
+  /** Every version of a schema, newest first. */
+  async getSchemaVersions(schemaId) {
+    return this.#rows(
+      `select id, schema_id, version, fields, published_at, published_by
+      from schema_versions
+      where schema_id = $1
+      order by version desc`,
+      [schemaId],
+    );
+  }
+
+  /** One version by its own id, with the identity it belongs to. */
+  async getSchemaVersion(versionId) {
+    const [row] = await this.#rows(
+      `select
+        v.id, v.schema_id, v.version, v.fields, v.published_at, v.published_by,
+        s.code as schema_code, s.name as schema_name, s.is_active as schema_is_active
+      from schema_versions v
+      join schemas s on s.id = v.schema_id
+      where v.id = $1`,
+      [versionId],
+    );
+    return row ?? null;
+  }
+
+  /** The newest version of a schema, or null. Used wherever "the schema" means its current shape. */
+  async getLatestSchemaVersion(schemaId) {
+    const [row] = await this.#rows(
+      `select
+        v.id, v.schema_id, v.version, v.fields, v.published_at, v.published_by,
+        s.code as schema_code, s.name as schema_name, s.is_active as schema_is_active
+      from schema_versions v
+      join schemas s on s.id = v.schema_id
+      where v.schema_id = $1
+      order by v.version desc
+      limit 1`,
+      [schemaId],
+    );
+    return row ?? null;
+  }
+
+  /** Identity-level edit: name and active flag. Versions are never touched. */
+  async updateSchema(schemaId, { name, isActive }) {
+    const [row] = await this.#rows(
+      `update schemas
+        set name = coalesce($2, name),
+            is_active = coalesce($3, is_active)
+      where id = $1
+      returning id, code, name, is_active, created_at`,
+      [schemaId, name ?? null, isActive ?? null],
+    );
+    return row ?? null;
+  }
+
   // --- Microsoft app registration (RF-MIG-01) ---
 
   /** The one row, with who last saved it, or null when the registration lives in .env. */

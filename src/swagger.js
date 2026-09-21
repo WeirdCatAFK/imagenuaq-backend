@@ -220,8 +220,14 @@ export function buildOpenApiDocument() {
       {
         name: 'schemas',
         description:
-          'Dynamic schemas and their versions. READs are open to any signed-in user; ' +
-          'WRITEs require the `schema.manage` permission.',
+          'Request formats (RF-SOL-01) and their immutable versions. Reads are open to any ' +
+          'signed-in user; writes require `schema.manage`.',
+      },
+      {
+        name: 'data-types',
+        description:
+          'The catalogue of field types a format may use. Read-only: a type is a coercion ' +
+          'rule the server implements, so adding one is a migration.',
       },
     ],
     components: {
@@ -904,14 +910,44 @@ export function buildOpenApiDocument() {
           },
           required: ['sheet', 'kind', 'name', 'headers', 'rows'],
         },
-        SchemaField: {
+        DataType: {
           type: 'object',
           properties: {
-            code: { type: 'string', example: 'client_name' },
-            name: { type: 'string', example: 'Client Name' },
-            type: { type: 'string', example: 'text' },
+            id: { type: 'integer', example: 5 },
+            code: { type: 'string', example: 'quantity' },
+            name: { type: 'string', example: 'Cantidad' },
+            baseType: { type: 'string', example: 'number' },
+            properties: { type: 'object', example: { integer: true, min: 0 } },
+            isActive: { type: 'boolean' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'code', 'name', 'baseType', 'properties', 'isActive'],
+        },
+        SchemaField: {
+          type: 'object',
+          description:
+            'One field of a format. `code` is snake_case and doubles as the key in ' +
+            '`requests.data`, the target a sheet column map names and the ' +
+            '`project_field_values.key` the value lands under when it propagates.',
+          properties: {
+            code: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$', example: 'dependencia' },
+            name: { type: 'string', example: 'Dependencia solicitante' },
+            type: { type: 'string', description: 'A data_types.code.', example: 'text' },
             section: { type: 'string', enum: ['deliverables', 'information'], example: 'information' },
-            required: { type: 'boolean', example: true },
+            required: { type: 'boolean', default: false, example: true },
+            propagate: {
+              type: 'boolean',
+              default: false,
+              description:
+                'Whether the value becomes a project_field_values row when the request is ' +
+                'converted (RF-FLW-06): data other stages and tools reuse without re-capture.',
+              example: true,
+            },
+            options: {
+              type: 'object',
+              default: {},
+              description: "Extras for the type (a select's choices, a hint). Not validated.",
+            },
           },
           required: ['code', 'name', 'type', 'section'],
         },
@@ -940,26 +976,44 @@ export function buildOpenApiDocument() {
             fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
             publishedAt: { type: ['string', 'null'], format: 'date-time' },
             publishedBy: { type: ['integer', 'null'], example: 12 },
+            schemaCode: { type: 'string', description: 'Only when read by version id.', example: 'papel_institucional' },
+            schemaName: { type: 'string', description: 'Only when read by version id.' },
+            schemaIsActive: { type: 'boolean', description: 'Only when read by version id.' },
           },
           required: ['id', 'schemaId', 'version', 'fields'],
         },
         CreateSchemaRequest: {
           type: 'object',
+          description: 'The publisher is the session; a `publishedBy` in the body is ignored.',
           properties: {
-            code: { type: 'string', maxLength: 100, example: 'project_brief' },
-            name: { type: 'string', maxLength: 200, example: 'Project Brief' },
-            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
-            publishedBy: { type: ['integer', 'null'], example: 12 },
+            code: { type: 'string', maxLength: 50, example: 'papel_institucional' },
+            name: { type: 'string', maxLength: 300, example: 'Papel institucional' },
+            fields: { type: 'array', minItems: 1, items: { $ref: '#/components/schemas/SchemaField' } },
           },
           required: ['code', 'name', 'fields'],
         },
         CreateSchemaVersionRequest: {
           type: 'object',
           properties: {
-            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
-            publishedBy: { type: ['integer', 'null'], example: 12 },
+            fields: { type: 'array', minItems: 1, items: { $ref: '#/components/schemas/SchemaField' } },
           },
           required: ['fields'],
+        },
+        CloneSchemaRequest: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', maxLength: 50, example: 'papel_institucional_fcq' },
+            name: { type: 'string', maxLength: 300, example: 'Papel institucional FCQ' },
+          },
+          required: ['code', 'name'],
+        },
+        UpdateSchemaRequest: {
+          type: 'object',
+          description: 'At least one of the two. Fields are never edited here: publish a version.',
+          properties: {
+            name: { type: 'string', maxLength: 300 },
+            isActive: { type: 'boolean' },
+          },
         },
       },
       responses: {
@@ -2296,6 +2350,33 @@ export function buildOpenApiDocument() {
         },
       },
       
+      // --- data types ---
+
+      '/api/data-types': {
+        get: {
+          tags: ['data-types'],
+          summary: 'Every active field type',
+          responses: {
+            200: wrapped('The active types.', 'dataTypes', 'DataType', true),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/data-types/{code}': {
+        get: {
+          tags: ['data-types'],
+          summary: 'One field type by code',
+          parameters: [
+            { name: 'code', in: 'path', required: true, schema: { type: 'string' }, description: 'data_types.code' },
+          ],
+          responses: {
+            200: wrapped('The type.', 'dataType', 'DataType'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such type.', 'Data type not found.'),
+          },
+        },
+      },
+
       // --- schemas ---
       
       '/api/schemas': {
@@ -2335,6 +2416,20 @@ export function buildOpenApiDocument() {
             404: errorResponse('No such schema.', 'Schema not found.'),
           },
         },
+        patch: {
+          tags: ['schemas'],
+          summary: 'Rename a schema or flip its active flag',
+          description: 'Needs schema.manage. Reactivation goes through here with `isActive: true`.',
+          parameters: [pathId('id', 'schemas.id')],
+          requestBody: jsonBody('UpdateSchemaRequest'),
+          responses: {
+            200: wrapped('The schema after the change.', 'schema', 'Schema'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update: send name or isActive.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+          },
+        },
         delete: {
           tags: ['schemas'],
           summary: 'Deactivate a schema',
@@ -2351,10 +2446,24 @@ export function buildOpenApiDocument() {
         },
       },
       '/api/schemas/{id}/versions': {
+        get: {
+          tags: ['schemas'],
+          summary: 'Every version of a schema, newest first',
+          parameters: [pathId('id', 'schemas.id')],
+          responses: {
+            200: wrapped('The versions.', 'versions', 'SchemaVersion', true),
+            400: errorResponse('The id is not a positive integer.', 'Invalid schema id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+          },
+        },
         post: {
           tags: ['schemas'],
-          summary: 'Create a new version of the schema',
-          description: 'Needs schema.manage. The previous version remains intact. If the schema is inactive, this fails.',
+          summary: 'Publish the next version of the schema',
+          description:
+            'Needs schema.manage. Earlier versions are immutable (a trigger rejects the ' +
+            'UPDATE); requests captured under them keep reading as they were. Refused on an ' +
+            'inactive schema.',
           parameters: [pathId('id', 'schemas.id')],
           requestBody: jsonBody('CreateSchemaVersionRequest'),
           responses: {
@@ -2363,7 +2472,43 @@ export function buildOpenApiDocument() {
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such schema.', 'Schema not found.'),
-            409: errorResponse('Cannot create a version for an inactive schema.', 'Cannot create a version for a inactive schema.'),
+            409: errorResponse('The schema is inactive.', 'Cannot create a version for an inactive schema.'),
+          },
+        },
+      },
+      '/api/schemas/versions/{versionId}': {
+        get: {
+          tags: ['schemas'],
+          summary: 'One version by its own id',
+          description:
+            "What a request, project or sheet points at. Carries the schema's code, name " +
+            'and active flag beside the fields.',
+          parameters: [pathId('versionId', 'schema_versions.id')],
+          responses: {
+            200: wrapped('The version.', 'version', 'SchemaVersion'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid version id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such version.', 'Schema version not found.'),
+          },
+        },
+      },
+      '/api/schemas/{id}/clone': {
+        post: {
+          tags: ['schemas'],
+          summary: 'Start a new schema from an existing one',
+          description:
+            'Needs schema.manage. RF-SOL-01 templates: a new identity whose version 1 is a ' +
+            "copy of the source's latest fields. The seeded starter formats exist to be " +
+            'cloned this way.',
+          parameters: [pathId('id', 'schemas.id')],
+          requestBody: jsonBody('CloneSchemaRequest'),
+          responses: {
+            201: wrapped('The new schema with its version 1.', 'schema', 'Schema'),
+            400: errorResponse('Missing code or name.', 'code is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such source schema.', 'Schema not found.'),
+            409: errorResponse('The code is taken.', 'A schema with that code already exists.'),
           },
         },
       },
