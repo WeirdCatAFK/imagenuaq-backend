@@ -231,7 +231,11 @@ class Query {
    *
    * @returns {Promise<number>}
    */
-  async countUsers({ areaId = null, roleId = null, includeDeleted = false } = {}) {
+  async countUsers({
+    areaId = null,
+    roleId = null,
+    includeDeleted = false,
+  } = {}) {
     const [row] = await this.#rows(
       `select count(*)::int as total
          from users u
@@ -443,7 +447,9 @@ class Query {
    * @returns {Promise<object[]>}
    */
   async getActions() {
-    const rows = await this.#rows("select id, code, label from actions order by code");
+    const rows = await this.#rows(
+      "select id, code, label from actions order by code",
+    );
     return rows;
   }
 
@@ -1016,7 +1022,6 @@ class Query {
     return rows;
   }
 
-
   //--- DATA TYPES ---
 
   async getDataType(code) {
@@ -1061,7 +1066,7 @@ class Query {
    * El schema almacena la identidad estable, mientras que la versión almacena la definición JSON de sus campos.
    */
 
-  async createSchema({code, name, fields, publishedBy = null}) {
+  async createSchema({ code, name, fields, publishedBy = null }) {
     const [row] = await this.#rows(
       `with created_schema as(
         insert into schemas (code, name)
@@ -1103,91 +1108,9 @@ class Query {
       from created_schema s
       join created_version v
         on v.schema_id = s.id`,
-      [
-        code, name, JSON.stringify(fields), publishedBy,
-      ],
-  // --- Microsoft app registration (RF-MIG-01) ---
-
-  /** The one row, with who last saved it, or null when the registration lives in .env. */
-  async getMicrosoftApp() {
-    const [row] = await this.#rows(
-      `select a.*, u.full_name as updated_by_name
-         from microsoft_app a
-         left join users u on u.id = a.updated_by
-        where a.id = 1`,
-      [],
+      [code, name, JSON.stringify(fields), publishedBy],
     );
-    return row ?? null;
-  }
 
-  /**
-   * Creates or replaces the registration. `clientSecretEnc` null keeps the stored secret,
-   * which is how a form that never shows the secret can save the other two fields.
-   *
-   * @param {{ tenantId: string, clientId: string, clientSecretEnc: Buffer | null,
-   *   updatedBy: number | null }} app
-   * @returns {Promise<object | null>} The row, or null when there was no secret to keep.
-   */
-  async setMicrosoftApp({ tenantId, clientId, clientSecretEnc, updatedBy }) {
-    const [row] = await this.#rows(
-      // The stored secret is folded in BEFORE the insert is attempted: NOT NULL is checked
-      // on the proposed row, ahead of ON CONFLICT, so a coalesce in the DO UPDATE never runs.
-      `insert into microsoft_app (id, tenant_id, client_id, client_secret_enc, updated_by)
-       values (1, $1, $2,
-               coalesce($3::bytea, (select client_secret_enc from microsoft_app where id = 1)),
-               $4::bigint)
-       on conflict (id) do update
-         set tenant_id         = excluded.tenant_id,
-             client_id         = excluded.client_id,
-             client_secret_enc = excluded.client_secret_enc,
-             updated_at        = current_timestamp,
-             updated_by        = excluded.updated_by
-       returning *`,
-      [tenantId, clientId, clientSecretEnc, updatedBy],
-    );
-    return row ?? null;
-  }
-
-  /** @returns {Promise<object | null>} The row that was removed, or null. */
-  async deleteMicrosoftApp() {
-    const [row] = await this.#rows(`delete from microsoft_app where id = 1 returning *`, []);
-    return row ?? null;
-  }
-
-  // --- Microsoft accounts (RF-MIG-01) ---
-
-  /**
-   * Records a delegated grant, or replaces the token when this user reconnects the same
-   * account. The upsert targets the partial unique index, so a revoked row for the same
-   * pair is left as history and a fresh live row is written beside it.
-   *
-   * @param {{ userId: number, msObjectId: string, tenantId: string, email: string | null,
-   *   displayName: string | null, refreshTokenEnc: Buffer, scopes: string }} grant
-   * @returns {Promise<object>} The live row.
-   */
-  async createMicrosoftAccount({
-    userId,
-    msObjectId,
-    tenantId,
-    email,
-    displayName,
-    refreshTokenEnc,
-    scopes,
-  }) {
-    const [row] = await this.#rows(
-      `insert into microsoft_accounts
-         (user_id, ms_object_id, tenant_id, email, display_name, refresh_token_enc, scopes)
-       values ($1, $2, $3, $4::varchar, $5::varchar, $6, $7)
-       on conflict (user_id, ms_object_id) where revoked_at is null
-       do update set tenant_id         = excluded.tenant_id,
-                     email             = excluded.email,
-                     display_name      = excluded.display_name,
-                     refresh_token_enc = excluded.refresh_token_enc,
-                     scopes            = excluded.scopes,
-                     connected_at      = current_timestamp
-       returning *`,
-      [userId, msObjectId, tenantId, email, displayName, refreshTokenEnc, scopes],
-    );
     return row;
   }
 
@@ -1195,7 +1118,7 @@ class Query {
    * READ
    * Obtiene un schema con su última versión.
    */
-  async getSchema (schemaId) {
+  async getSchema(schemaId) {
     const [row] = await this.#rows(
       `select
         s.id,
@@ -1253,14 +1176,14 @@ class Query {
   }
 
   /**
-   * UPDATE 
-   * Crea una NUEVA versión de un schema existente 
-   * 
-   * Las versiones publicadas NO son modificadas. 
+   * UPDATE
+   * Crea una NUEVA versión de un schema existente
+   *
+   * Las versiones publicadas NO son modificadas.
    * En lugar de eso, el siguiente numero versión es creado con los nuevos campos
    */
 
-  async createSchemaVersion(schemaId, {fields, publishedBy = null}){
+  async createSchemaVersion(schemaId, { fields, publishedBy = null }) {
     const [row] = await this.#rows(
       `insert into schema_versions(
         schema_id,
@@ -1282,24 +1205,22 @@ class Query {
         fields,
         published_at,
         published_by`,
-      [
-        schemaId, JSON.stringify(fields), publishedBy,
-      ],
+      [schemaId, JSON.stringify(fields), publishedBy],
     );
 
     return row;
   }
 
   /**
-   * DELETE 
-   * Desactiva un schema 
-   * 
+   * DELETE
+   * Desactiva un schema
+   *
    * No elimina fisicamente el registro.
-   * Se conserva el schema y sus versiones, pero 
+   * Se conserva el schema y sus versiones, pero
    * is_active pasa a false
    */
 
-  async desactivateSchema(schemaId){
+  async desactivateSchema(schemaId) {
     const [row] = await this.#rows(
       `update schemas
         set is_active = false
@@ -1310,14 +1231,107 @@ class Query {
         name,
         is_active,
         created_at`,
-      [schemaId]
+      [schemaId],
     );
 
     return row ?? null;
   }
 
+  // --- Microsoft app registration (RF-MIG-01) ---
 
+  /** The one row, with who last saved it, or null when the registration lives in .env. */
+  async getMicrosoftApp() {
+    const [row] = await this.#rows(
+      `select a.*, u.full_name as updated_by_name
+         from microsoft_app a
+         left join users u on u.id = a.updated_by
+        where a.id = 1`,
+      [],
+    );
+    return row ?? null;
+  }
 
+  /**
+   * Creates or replaces the registration. `clientSecretEnc` null keeps the stored secret,
+   * which is how a form that never shows the secret can save the other two fields.
+   *
+   * @param {{ tenantId: string, clientId: string, clientSecretEnc: Buffer | null,
+   *   updatedBy: number | null }} app
+   * @returns {Promise<object | null>} The row, or null when there was no secret to keep.
+   */
+  async setMicrosoftApp({ tenantId, clientId, clientSecretEnc, updatedBy }) {
+    const [row] = await this.#rows(
+      // The stored secret is folded in BEFORE the insert is attempted: NOT NULL is checked
+      // on the proposed row, ahead of ON CONFLICT, so a coalesce in the DO UPDATE never runs.
+      `insert into microsoft_app (id, tenant_id, client_id, client_secret_enc, updated_by)
+       values (1, $1, $2,
+               coalesce($3::bytea, (select client_secret_enc from microsoft_app where id = 1)),
+               $4::bigint)
+       on conflict (id) do update
+         set tenant_id         = excluded.tenant_id,
+             client_id         = excluded.client_id,
+             client_secret_enc = excluded.client_secret_enc,
+             updated_at        = current_timestamp,
+             updated_by        = excluded.updated_by
+       returning *`,
+      [tenantId, clientId, clientSecretEnc, updatedBy],
+    );
+    return row ?? null;
+  }
+
+  /** @returns {Promise<object | null>} The row that was removed, or null. */
+  async deleteMicrosoftApp() {
+    const [row] = await this.#rows(
+      `delete from microsoft_app where id = 1 returning *`,
+      [],
+    );
+    return row ?? null;
+  }
+
+  // --- Microsoft accounts (RF-MIG-01) ---
+
+  /**
+   * Records a delegated grant, or replaces the token when this user reconnects the same
+   * account. The upsert targets the partial unique index, so a revoked row for the same
+   * pair is left as history and a fresh live row is written beside it.
+   *
+   * @param {{ userId: number, msObjectId: string, tenantId: string, email: string | null,
+   *   displayName: string | null, refreshTokenEnc: Buffer, scopes: string }} grant
+   * @returns {Promise<object>} The live row.
+   */
+  async createMicrosoftAccount({
+    userId,
+    msObjectId,
+    tenantId,
+    email,
+    displayName,
+    refreshTokenEnc,
+    scopes,
+  }) {
+    const [row] = await this.#rows(
+      `insert into microsoft_accounts
+         (user_id, ms_object_id, tenant_id, email, display_name, refresh_token_enc, scopes)
+       values ($1, $2, $3, $4::varchar, $5::varchar, $6, $7)
+       on conflict (user_id, ms_object_id) where revoked_at is null
+       do update set tenant_id         = excluded.tenant_id,
+                     email             = excluded.email,
+                     display_name      = excluded.display_name,
+                     refresh_token_enc = excluded.refresh_token_enc,
+                     scopes            = excluded.scopes,
+                     connected_at      = current_timestamp
+       returning *`,
+      [
+        userId,
+        msObjectId,
+        tenantId,
+        email,
+        displayName,
+        refreshTokenEnc,
+        scopes,
+      ],
+    );
+    return row;
+  }
 
   /** One account, revoked or not, with its owner's name. */
   async getMicrosoftAccount(accountId) {
@@ -1395,7 +1409,15 @@ class Query {
          (name, drive_id, item_id, table_name, web_url, microsoft_account_id, registered_by)
        values ($1, $2, $3, $4::varchar, $5::text, $6, $7::bigint)
        returning *`,
-      [name, driveId, itemId, tableName, webUrl, microsoftAccountId, registeredBy],
+      [
+        name,
+        driveId,
+        itemId,
+        tableName,
+        webUrl,
+        microsoftAccountId,
+        registeredBy,
+      ],
     );
     return row;
   }

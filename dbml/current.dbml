@@ -612,6 +612,17 @@ Table "microsoft_app" {
 CHECK microsoft_app_singleton: id = 1'''
 }
 
+Table "data_types" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null]
+  "name" varchar(100) [not null]
+  "base_type" varchar(30) [not null]
+  "properties" jsonb [not null, default: `{}`]
+  "is_active" bool [not null, default: true]
+  "created_at" timestamptz [not null]
+  Note: 'DEFAULT created_at: now()'
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
