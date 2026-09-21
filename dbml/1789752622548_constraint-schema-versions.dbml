@@ -437,17 +437,11 @@ Table "sheets" {
   "item_id" varchar(255) [not null]
   "table_name" varchar(200)
   "web_url" text
-  "schema_version_id" int8 [note: 'Formato destino. NULL = registrado pero sin mapear; la importacion lo rechaza en vez de adivinar.']
+  "schema_version_id" int8 [not null]
   "column_map" jsonb [not null, default: `{}`, note: 'Encabezado del Excel -> campo de schema_versions.fields o columna promovida de requests']
   "last_imported_at" timestamptz [note: 'Hasta donde llego la ultima importacion, para que la siguiente sepa desde donde seguir']
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "deleted_at" timestamptz
-  "microsoft_account_id" int8 [not null, note: 'Con el acceso de que cuenta se lee este libro']
-  "registered_by" int8 [note: 'Quien lo registro']
-
-  Indexes {
-    microsoft_account_id [type: btree, name: "idx_sheets_microsoft_account_id"]
-  }
   Note: '''RF-MIG-01, RF-MIG-02: el libro de Excel que sigue vivo durante la transicion, y como sus columnas caen en un formato.
 CHECK sheets_column_map_is_object: jsonb_typeof(column_map) = \'object\'::text
 INDEX uq_sheets_item (drive_id, item_id, COALESCE(table_name, \'\'::character varying))'''
@@ -581,37 +575,6 @@ Table "project_field_values" {
   Note: 'RF-FLW-06, RF-IMP-08: los datos que una etapa produce y otra consume sin recaptura.'
 }
 
-Table "microsoft_accounts" {
-  "id" int8 [pk, not null, increment]
-  "user_id" int8 [not null]
-  "ms_object_id" varchar(64) [not null, note: 'Claim oid del id_token. Identifica la cuenta aunque cambie el correo.']
-  "tenant_id" varchar(64) [not null, note: 'Claim tid del id_token. Un tenant de organizacion, o el de cuentas personales.']
-  "email" varchar(320)
-  "display_name" varchar(300)
-  "refresh_token_enc" bytea [not null, note: 'Refresh token cifrado con MS_TOKEN_KEY. Microsoft lo rota en cada uso, asi que se reescribe al leer.']
-  "scopes" text [not null, note: 'Los permisos delegados que la persona concedio, tal como los devolvio Microsoft']
-  "connected_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "last_used_at" timestamptz
-  "revoked_at" timestamptz [note: 'Retirado por la persona o por Microsoft (refresh rechazado). Los libros que dependian de el siguen apuntando aqui.']
-
-  Indexes {
-    (user_id, ms_object_id) [type: btree, unique, name: "uq_microsoft_accounts_live"]
-    user_id [type: btree, name: "idx_microsoft_accounts_user_id"]
-  }
-  Note: 'RF-MIG-01: la cuenta Microsoft con cuyo acceso se leen los libros registrados. Una fila por persona y cuenta; se revoca, no se borra.'
-}
-
-Table "microsoft_app" {
-  "id" int2 [pk, not null, default: 1]
-  "tenant_id" varchar(64) [not null, default: 'common', note: 'common (cualquier cuenta) o el id del tenant de la UAQ']
-  "client_id" varchar(64) [not null, note: 'Application (client) ID del portal de Entra. No es secreto: viaja en cada URL de autorizacion.']
-  "client_secret_enc" bytea [not null, note: 'Client secret cifrado con MS_TOKEN_KEY. Nunca se devuelve; solo si esta puesto.']
-  "updated_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "updated_by" int8
-  Note: '''RF-MIG-01: el registro de aplicacion de Azure con el que se inicia sesion en Microsoft. Una sola fila; si no existe se leen MS_* de .env.
-CHECK microsoft_app_singleton: id = 1'''
-}
-
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -690,10 +653,6 @@ Ref "fk_logs_user_id_users_id":"users"."id" < "logs"."user_id"
 
 Ref "logs_area_id_fkey":"areas"."id" < "logs"."area_id"
 
-Ref "microsoft_accounts_user_id_fkey":"users"."id" < "microsoft_accounts"."user_id"
-
-Ref "microsoft_app_updated_by_fkey":"users"."id" < "microsoft_app"."updated_by"
-
 Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "project_field_values"."produced_by_stage_id"
 
 Ref "project_field_values_project_id_fkey":"projects"."id" < "project_field_values"."project_id" [delete: cascade]
@@ -747,10 +706,6 @@ Ref "role_permissions_role_id_fkey":"roles"."id" < "role_permissions"."role_id" 
 Ref "schema_versions_published_by_fkey":"users"."id" < "schema_versions"."published_by"
 
 Ref "schema_versions_schema_id_fkey":"schemas"."id" < "schema_versions"."schema_id"
-
-Ref "sheets_microsoft_account_id_fkey":"microsoft_accounts"."id" < "sheets"."microsoft_account_id"
-
-Ref "sheets_registered_by_fkey":"users"."id" < "sheets"."registered_by"
 
 Ref "sheets_schema_version_id_fkey":"schema_versions"."id" < "sheets"."schema_version_id"
 
