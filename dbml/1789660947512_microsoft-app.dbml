@@ -422,7 +422,6 @@ Table "schema_versions" {
   "published_by" int8
 
   Indexes {
-    (schema_id, version) [type: btree, unique, name: "uq_composite_schema"]
     (schema_id, version) [type: btree, unique, name: "uq_schema_versions_schema_version"]
   }
   Note: '''RF-SOL-01, DATAMODEL 2.2: inmutable una vez publicada. Editar un formato publica una version nueva.

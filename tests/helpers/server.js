@@ -49,8 +49,12 @@ class Server {
   // One shape for every call: { status, body, headers }. The body is parsed when it is
   // JSON and returned as text when it is not, because a few of the error paths are worth
   // asserting precisely because they do NOT come back as JSON.
-  async request(method, path, { body, token, headers = {}, raw } = {}) {
+  async request(method, path, { body, token, headers = {}, raw, redirect } = {}) {
     const init = { method, headers: { ...headers } };
+
+    // `redirect: 'manual'` for the one route that answers a browser with a 302: fetch would
+    // otherwise follow it to the frontend origin, which is not running here.
+    if (redirect) init.redirect = redirect;
 
     if (token) init.headers.authorization = `Bearer ${token}`;
 

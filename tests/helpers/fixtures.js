@@ -9,6 +9,7 @@ import bcrypt from 'bcrypt';
 
 import query from '../../src/access/resources/query.js';
 import { getStore } from '../../src/access/primitives/database.js';
+import { seal } from '../../src/utils/crypto.js';
 
 // Matches SALT_ROUNDS in orchestration/auth.js. A fixture hashed at a different cost would
 // still verify, so getting this wrong would not fail -- it would just quietly make the
@@ -91,6 +92,11 @@ export async function resetCases(keepEmails = []) {
   // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
   // follows inbound foreign keys and takes logs with it.
   await sql('delete from logs');
+  // Books before accounts before users: sheets reference microsoft_accounts, which
+  // reference users, and neither is seeded.
+  await sql('delete from sheets');
+  await sql('delete from microsoft_accounts');
+  await sql('delete from microsoft_app');
   await sql(
     `delete from role_permissions
       where role_id in (select id from roles where name like $1)`,
@@ -172,6 +178,21 @@ export async function softDelete(userId) {
     'update users set deleted_at = now(), token_version = token_version + 1 where id = $1',
     [userId],
   );
+}
+
+// A connected Microsoft account, as completeConnect() leaves one, without the round trip
+// to Microsoft. The token is a fake sealed under the test MS_TOKEN_KEY, so a case that
+// reaches open() finds a well-formed value and fails on the network, not on the cipher.
+export async function createMicrosoftAccount(userId, { email = 'cuenta@outlook.com' } = {}) {
+  return query.createMicrosoftAccount({
+    userId,
+    msObjectId: `oid-${userId}-${email}`,
+    tenantId: '9188040d-6c67-4c5b-b112-36a304b66dad',
+    email,
+    displayName: 'Cuenta de Prueba',
+    refreshTokenEnc: seal('not-a-real-refresh-token'),
+    scopes: 'Files.Read.All User.Read',
+  });
 }
 
 export async function findUser(userId) {

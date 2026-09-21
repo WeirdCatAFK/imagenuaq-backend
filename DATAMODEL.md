@@ -18,6 +18,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `entities`, `entity_contacts`, `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Implementado por`projects-spine`; falta la definición de formatos por UI            |
+| MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`                                                                                                                                                  | Registro de libros implementado por`microsoft-accounts` y `microsoft-app`; falta el mapeo de columnas (§2.10) |
 | FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
 | FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
@@ -247,6 +248,48 @@ anotar cuál libro, mapeado cómo, hacia qué formato.
 `requests.source = 'sheet'` es el otro extremo del hilo, y el `CHECK requests_sheet_origin`
 impide que una solicitud capturada a mano diga venir de un libro.
 
+### 2.10 El libro se lee con el acceso de una persona, no del sistema
+
+`sheets` decía cuál libro; no decía **con qué acceso** se lee. La migración
+`microsoft-accounts` lo resuelve con acceso delegado: alguien inicia sesión con su cuenta
+Microsoft desde el frontend, consiente, y los libros que registra se leen como esa persona.
+Cada `microsoft_accounts` es una de esas concesiones y `sheets.microsoft_account_id` dice
+cuál lee cada libro. Cualquier cantidad de personas puede conectar una cuenta, y una cuenta
+puede registrar cualquier cantidad de libros; ninguna de las dos cosas toca código.
+
+Se descartó el registro de aplicación con permisos de aplicación (client credentials): leería
+todos los drives del tenant bajo una sola identidad, más de lo que necesita el sistema y más
+de lo que un tenant universitario le concede a una herramienta de una coordinación.
+
+Tres decisiones dentro:
+
+- **El refresh token va cifrado**, AES-256-GCM bajo `MS_TOKEN_KEY` de `.env`
+  (`src/utils/crypto.js`). Microsoft lo rota en cada uso, así que la columna se reescribe
+  cada vez que se lee un libro. El nombre de la columna contiene `token`, que es lo que
+  `audit.js` redacta por patrón, así que la bitácora nunca lo lleva.
+- **Una cuenta se revoca, no se borra.** `revoked_at` marca la concesión retirada — por la
+  persona, o por Microsoft cuando el refresh falla con `invalid_grant` — y los libros que
+  dependían de ella siguen diciendo qué cuenta hay que reconectar. El índice único es sobre
+  `(user_id, ms_object_id)` entre las vivas: dos personas pueden conectar el mismo buzón
+  compartido, cada una con su token.
+- **`sheets.schema_version_id` ya admite NULL.** Registrar (qué libro) y mapear (hacia qué
+  formato) son actos distintos y el segundo no tiene endpoint todavía; con NOT NULL la tabla
+  no se podía insertar. NULL con `column_map` vacío se lee como "registrado, sin mapear", y
+  la importación de `RF-MIG-02` lo rechaza en vez de adivinar.
+
+Quién puede usar qué cuenta es regla de registros, no permiso: la persona que la conectó y
+`admin`, aplicada en `orchestration/microsoft.js`. Los códigos `spreadsheet.read` y
+`spreadsheet.write` dicen si alguien toca la función; aquello dice qué filas.
+
+**El registro de aplicación también es dato** (`microsoft_app`, migración `microsoft-app`).
+Las concesiones se hacen a una aplicación registrada en el portal de Entra — tenant, client
+id y secreto — y ésos tres valores viven en una fila que un administrador guarda desde el
+frontend, con el secreto cifrado bajo la misma `MS_TOKEN_KEY`. Es una sola fila con
+`CHECK (id = 1)`, no una tabla genérica de configuración: un almacén clave/valor sería un
+mecanismo inventado para un único uso. `.env` (`MS_*`) queda como respaldo cuando la fila no
+existe, y es lo que usa la suite de pruebas. Crear el registro en sí sigue siendo un acto en
+el portal: Microsoft no ofrece API para ello.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -286,7 +329,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
 | RF-EST-06, RF-EST-10            | `notifications`                                                                                                   | ✗ |
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
-| RF-MIG-01, RF-MIG-02            | `sheets` + `requests.data` (§2.9)                                                                              | ✔ |
+| RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`                                                | ◑ registro de libros sí; mapeo e importación no |
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
 | RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         | ◑ |
 | RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   | ✔ |
@@ -1191,11 +1234,46 @@ formato (`RF-MIG-01`, `RF-MIG-02`).
 | `item_id` | varchar(255) | no | | Elemento de Graph |
 | `table_name` | varchar(200) | sí | | Tabla dentro del libro. `NULL` = la primera o única |
 | `web_url` | text | sí | | Enlace que un humano pega. Decorativo: la llave es el par drive/item |
-| `schema_version_id` | bigint | no | | Formato destino → `schema_versions.id`. Apunta a la **versión**, no al formato, porque el mapeo se escribe contra columnas concretas |
+| `schema_version_id` | bigint | sí | | Formato destino → `schema_versions.id`. Apunta a la **versión**, no al formato, porque el mapeo se escribe contra columnas concretas. `NULL` = registrado sin mapear (§2.10) |
 | `column_map` | jsonb | no | `{}` | Encabezado del Excel → campo de `schema_versions.fields` o columna promovida de `requests` |
+| `microsoft_account_id` | bigint | no | | Con el acceso de qué cuenta se lee → `microsoft_accounts.id` |
+| `registered_by` | bigint | sí | | Quién lo registró → `users.id` |
 | `last_imported_at` | timestamptz | sí | | Hasta dónde llegó la última importación, para que la siguiente sepa desde dónde seguir |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 | `deleted_at` | timestamptz | sí | | Baja lógica |
+
+#### `microsoft_app`
+
+El registro de aplicación de Azure con el que se inicia sesión en Microsoft (§2.10). Una
+sola fila; si no existe se leen `MS_TENANT_ID`, `MS_CLIENT_ID` y `MS_CLIENT_SECRET` de `.env`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | smallint | no | `1` | Siempre `1` (`CHECK`): es un singleton |
+| `tenant_id` | varchar(64) | no | `common` | `common`, `organizations` o el id del tenant de la UAQ |
+| `client_id` | varchar(64) | no | | Application (client) ID del portal. No es secreto: viaja en cada URL de autorización |
+| `client_secret_enc` | bytea | no | | Secreto de cliente cifrado con `MS_TOKEN_KEY`. Nunca se devuelve; redactado en `logs` |
+| `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Último guardado |
+| `updated_by` | bigint | sí | | Quién lo guardó → `users.id` |
+
+#### `microsoft_accounts`
+
+La cuenta Microsoft con cuyo acceso delegado se leen los libros registrados (§2.10). Una
+fila por persona y cuenta; se revoca, nunca se borra.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `user_id` | bigint | no | | Quién la conectó → `users.id`. Solo esa persona y `admin` pueden usarla |
+| `ms_object_id` | varchar(64) | no | | Claim `oid` del id_token: identifica la cuenta aunque cambie el correo. Único junto con `user_id` entre las vivas |
+| `tenant_id` | varchar(64) | no | | Claim `tid`: el tenant de la organización, o el de cuentas personales |
+| `email` | varchar(320) | sí | | `preferred_username` del id_token |
+| `display_name` | varchar(300) | sí | | `name` del id_token |
+| `refresh_token_enc` | bytea | no | | Refresh token cifrado con `MS_TOKEN_KEY`. Se reescribe en cada uso porque Microsoft lo rota. Redactado en `logs` |
+| `scopes` | text | no | | Los permisos delegados concedidos, tal como los devolvió Microsoft |
+| `connected_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Última conexión; reconectar la misma cuenta lo actualiza |
+| `last_used_at` | timestamptz | sí | | Último refresh |
+| `revoked_at` | timestamptz | sí | | Retirada por la persona o por Microsoft. Los libros que la usaban siguen apuntando aquí |
 
 #### `statuses`
 

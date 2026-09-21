@@ -7,6 +7,7 @@ import morgan from 'morgan';
 
 import healthRouter from './routes/health.js';
 import spreadsheetsRouter from './routes/spreadsheets.js';
+import microsoftRouter from './routes/microsoft.js';
 import authRouter from './routes/auth.js';
 import usersRouter from './routes/users.js';
 import areasRouter from './routes/areas.js';
@@ -26,6 +27,7 @@ import audit from './access/orchestration/audit.js';
 export const ROUTERS = {
   health: healthRouter,
   spreadsheets: spreadsheetsRouter,
+  microsoft: microsoftRouter,
   auth: authRouter,
   users: usersRouter,
   areas: areasRouter,
