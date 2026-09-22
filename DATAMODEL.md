@@ -482,6 +482,72 @@ autocompletado), la versión del formato, y **cada valor capturado** como fila d
 las demás se regresan en `conflicts` en vez de perderse en silencio. Una solicitud ya convertida
 no se edita ni se borra —el proyecto perdería lo que contesta—, salvo el solicitante.
 
+### 2.13b La clave de un campo es vocabulario, no una etiqueta local
+
+Una clave no pertenece al formato que la declara: es lo que nombra al valor en `requests.data` y
+en `project_field_values`. Si un formato declara `numero_orden` como `text` y otro como `date`, un
+proyecto acaba con dos cosas distintas bajo un solo nombre y la orden de impresión lee la que
+encuentre.
+
+Por eso **publicar un campo cuya clave ya existe con otro tipo se rechaza**, nombrando el formato
+donde ya vive y con qué tipo. Reusarla con el mismo tipo es lo contrario de un problema: es el
+punto. `GET /api/schemas/field-keys` es el vocabulario —cada clave publicada alguna vez, con su
+definición más reciente y en qué formatos vive— y el constructor de formatos lo ofrece como
+selector: al caer en una clave que ya existe, el nombre y el tipo se llenan solos y quedan
+bloqueados.
+
+Las claves de versiones retiradas **siguen** en el vocabulario: tienen datos capturados debajo, así
+que no se pueden reusar con otro significado solo porque el formato de hoy dejó de pedirlas.
+
+**La consecuencia, dicha:** el tipo de un campo tampoco cambia publicando una versión nueva. Es la
+misma regla, no otra —los valores ya capturados son del tipo viejo y cambiarlo los volvería
+mentira—. El nombre y la indicación sí se pueden cambiar, porque son etiquetas y no cambian lo
+que el valor es.
+
+### 2.14 La etapa declara lo que recibe y lo que entrega
+
+`stage-io-and-finance` le dio a `project_stages` dos arreglos: `inputs`, las claves de
+`project_field_values` que quien atiende la etapa necesita para trabajar, y `outputs`, las que la
+etapa entrega.
+
+**Esto convierte `RF-FLW-06` en una garantía y no en una intención.** Antes una etapa producía
+valores y la siguiente los encontraba si alguien se acordó de capturarlos;
+`produced_by_stage_id` lo registraba después del hecho. Ahora **el visto bueno se niega** si una
+salida declarada no tiene valor, nombrando cuál falta. Por eso imprenta encuentra el número de
+orden: diseño no pudo cerrar sin capturarlo.
+
+Solo se exigen las salidas, y solo al aprobar. Las entradas son informativas: un dato que no
+llegó es el motivo por el que una etapa se queda esperando (`RF-FLW-07`), no un error de captura.
+Rechazar tampoco exige nada —el trabajo se está devolviendo, no se entregó—, y el intento que se
+abre hereda la misma declaración, porque es la misma etapa.
+
+Son `jsonb` y no una tabla puente por lo mismo que los campos de un formato: se leen de una etapa
+a la vez y nada busca entre etapas distintas. Cuando entren los flujos declarativos (§6),
+`workflow_stages` llevará la declaración y `project_stages` seguirá llevando la copia instanciada.
+
+### 2.15 Factura y cotización son tipos de campo, no tablas
+
+`factura` y `cotizacion` entran a `data_types` como `string` con `properties.finance = true`.
+Guardan el folio o la referencia que genera el sistema financiero de la UAQ, que `RF-MIG-04` dice
+que se captura a mano porque este sistema no lo sustituye. Cuando ARC tenga carga de archivos, el
+mismo campo acepta el PDF (`RF-ARC-05`) sin mover ningún dato.
+
+`properties.finance` es cómo el resto del sistema sabe que un campo es de finanzas sin mantener
+una lista aparte, igual que `properties.format` dice que un `email` se valida como dirección.
+
+**Finanzas ve el tablero y puede pedir, sin poder editar.** El rol `finance` recibe
+`project.read` —el tablero completo, que puede filtrar por el valor de un campo— y un permiso
+propio, `finance.request`, con una sola ruta:
+`POST /api/projects/:id/finance-request {kind, needed, note}`. Esa ruta solo escribe dos claves
+reservadas, `requiere_factura` y `requiere_cotizacion`, como valores ordinarios del proyecto, así
+que el filtro del tablero y cualquier lector posterior las ven sin caso especial. Retirar el
+pedido borra la fila en vez de escribir «no»: un «no» guardado es indistinguible de un proyecto
+que nadie miró.
+
+No se le da `project.write` porque ese permiso alcanza para etapas, vistos buenos y cierre, que
+no es lo que finanzas necesita (`RF-USR-05`: leer y escribir son independientes). El código es
+`finance.request` y no `project.request` porque en este dominio «request» ya es la solicitud.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -489,7 +555,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 
 | RF                              | Cubierto por                                                                                                        | Estado |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------ |
-| RF-SOL-01                       | `schemas`, `schema_versions.fields` por secciones, clonado (§2.2, §2.3)                                      | ◑ API completa; falta la UI de armado |
+| RF-SOL-01                       | `schemas`, `schema_versions.fields` por secciones, clonado, vocabulario de claves (§2.2, §2.3, §2.13b)        | ✔ |
 | RF-SOL-02                       | `requests.area_id` como puente; después`schema_versions` → flujo (§2.5)                                     | ◑ |
 | RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8); API en `/api/requests`                           | ✔ |
 | RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3); `GET /api/requests` con sus filtros            | ✔ |
@@ -509,7 +575,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-FLW-03                       | `approvals`; el rechazo abre`attempt + 1` (§2.6, §2.12)                                                      | ✔ |
 | RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        | ✗ |
 | RF-FLW-05                       | Descartado como firma: el visto bueno es interno y la conformidad del solicitante se captura como evidencia (§2.11) | ✗ por decisión |
-| RF-FLW-06                       | `project_field_values` (§2.4); API en`PUT /api/projects/:id/field-values/:key`                                | ✔ |
+| RF-FLW-06                       | `project_field_values` (§2.4) +`project_stages.inputs`/`outputs`, exigidas al firmar (§2.14)                   | ✔ |
 | RF-FLW-07                       | `project_stages.status = 'waiting_external'` + `blocked_reason` (CHECK)                                        | ✔ |
 | RF-FLW-08                       | `projects.priority`, `requests.priority`; sin orden por fecha de llegada                                        | ✔ |
 | RF-FLW-09                       | Sin etapa actual: el conjunto de`project_stages` activas (§2.1)                                                 | ✔ |

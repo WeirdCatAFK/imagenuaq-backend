@@ -31,6 +31,16 @@ router.get("/:id/field-values", async (req, res) => {
   res.json({ fieldValues: await projects.listFieldValues(projectId(req)) });
 });
 
+// Finanzas: señalar que el proyecto necesita cotización o factura, sin poder editarlo.
+// Declarada antes del bloque de escritura y con su propio permiso: RF-USR-05 separa leer de
+// escribir, y `project.write` alcanzaría para etapas, vistos buenos y cierre.
+router.post("/:id/finance-request", requirePermission("finance.request"), async (req, res) => {
+  const { kind, needed, note } = req.body ?? {};
+  res.json({
+    request: await projects.requestFinance(projectId(req), { kind, needed, note }),
+  });
+});
+
 router.use(requirePermission("project.write"));
 
 router.post("/", async (req, res) => {

@@ -16,6 +16,12 @@ router.use(authenticate);
 
 // --- Reads: any authenticated user ---
 
+// GET /api/schemas/field-keys -- the vocabulary. Declared before '/:id' for the same reason as
+// the route below: otherwise `:id` swallows it.
+router.get("/field-keys", async (_req, res) => {
+  res.json({ fieldKeys: await schemas.listFieldKeys() });
+});
+
 // GET /api/schemas/versions/:versionId -- declared before '/:id', see routes/areas.js.
 router.get("/versions/:versionId", async (req, res) => {
   res.json({ version: await schemas.getVersion(positiveInt(req.params.versionId, "version id")) });

@@ -1265,14 +1265,17 @@ class Query {
         returning 1
       ),
       stages_inserted as (
-        insert into project_stages (project_id, area_id, title, seq, status, started_at, assigned_to)
+        insert into project_stages (
+          project_id, area_id, title, seq, status, started_at, assigned_to, inputs, outputs
+        )
         select
           created.id, st.area_id, st.title, st.seq, st.status,
           case when st.status = 'active' then current_timestamp end,
-          nullif(st.assigned_to, '')::bigint
+          nullif(st.assigned_to, '')::bigint,
+          st.inputs::jsonb, st.outputs::jsonb
         from created, unnest(
-          $18::bigint[], $19::text[], $20::int[], $21::text[], $22::text[]
-        ) as st(area_id, title, seq, status, assigned_to)
+          $18::bigint[], $19::text[], $20::int[], $21::text[], $22::text[], $23::text[], $24::text[]
+        ) as st(area_id, title, seq, status, assigned_to, inputs, outputs)
         returning 1
       )
       select
@@ -1294,6 +1297,8 @@ class Query {
         // postgrejs infers a param's type from its values and cannot type an all-null array,
         // so "nobody" travels as '' and comes back to NULL in the statement.
         this.#idArray(stages.map((st) => (st.assignedTo == null ? '' : String(st.assignedTo)))),
+        this.#idArray(stages.map((st) => JSON.stringify(st.inputs ?? []))),
+        this.#idArray(stages.map((st) => JSON.stringify(st.outputs ?? []))),
       ],
     );
 
@@ -1324,6 +1329,7 @@ class Query {
               'blockedReason', ps.blocked_reason, 'assignedTo', ps.assigned_to,
               'assignedToName', au.full_name, 'eventId', ps.event_id,
               'startedAt', ps.started_at, 'endedAt', ps.ended_at, 'createdAt', ps.created_at,
+              'inputs', ps.inputs, 'outputs', ps.outputs,
               'approvals', coalesce(ap.list, '[]'::json)
             ) as stage
           from project_stages ps
@@ -1496,11 +1502,12 @@ class Query {
 
   async createProjectStage({
     projectId, areaId, title, seq = 1, status = 'pending', assignedTo = null,
-    blockedReason = null, attempt = null,
+    blockedReason = null, attempt = null, inputs = [], outputs = [],
   }) {
     const [row] = await this.#rows(
       `insert into project_stages (
-        project_id, area_id, title, seq, attempt, status, blocked_reason, assigned_to, started_at
+        project_id, area_id, title, seq, attempt, status, blocked_reason, assigned_to,
+        started_at, inputs, outputs
       )
       select
         $1, $2, $3, $4,
@@ -1509,9 +1516,13 @@ class Query {
           where project_id = $1 and area_id = $2 and seq = $4
         )),
         $5, $6, $7::bigint,
-        case when $5 = 'active' then current_timestamp end
+        case when $5 = 'active' then current_timestamp end,
+        $9::jsonb, $10::jsonb
       returning *`,
-      [projectId, areaId, title, seq, status, blockedReason, assignedTo, attempt],
+      [
+        projectId, areaId, title, seq, status, blockedReason, assignedTo, attempt,
+        JSON.stringify(inputs), JSON.stringify(outputs),
+      ],
     );
     return row;
   }
@@ -1547,9 +1558,12 @@ class Query {
    */
   async updateProjectStage(stageId, {
     title = null, status = null, blockedReason = null, assignedTo = null, clearBlocked = false,
+    inputs = null, outputs = null,
   }) {
     const [row] = await this.#rows(
       `update project_stages set
+        inputs         = coalesce($7::jsonb, inputs),
+        outputs        = coalesce($8::jsonb, outputs),
         title          = coalesce($2, title),
         status         = coalesce($3, status),
         blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
@@ -1565,7 +1579,11 @@ class Query {
                          end
       where id = $1
       returning *`,
-      [stageId, title, status, blockedReason, assignedTo, clearBlocked],
+      [
+        stageId, title, status, blockedReason, assignedTo, clearBlocked,
+        inputs === null ? null : JSON.stringify(inputs),
+        outputs === null ? null : JSON.stringify(outputs),
+      ],
     );
     return row ?? null;
   }
@@ -1591,7 +1609,8 @@ class Query {
       ),
       opened as (
         insert into project_stages (
-          project_id, area_id, title, seq, attempt, status, assigned_to, started_at
+          project_id, area_id, title, seq, attempt, status, assigned_to, started_at,
+          inputs, outputs
         )
         select
           closed.project_id, n.area_id, n.title, n.seq,
@@ -1600,9 +1619,10 @@ class Query {
             where ps.project_id = closed.project_id
               and ps.area_id = n.area_id and ps.seq = n.seq
           ), 0) + 1,
-          'active', nullif(n.assigned_to, '')::bigint, current_timestamp
-        from closed, unnest($3::bigint[], $4::text[], $5::int[], $6::text[])
-          as n(area_id, title, seq, assigned_to)
+          'active', nullif(n.assigned_to, '')::bigint, current_timestamp,
+          n.inputs::jsonb, n.outputs::jsonb
+        from closed, unnest($3::bigint[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
+          as n(area_id, title, seq, assigned_to, inputs, outputs)
         returning *
       )
       select 'closed' as kind, to_json(closed.*) as row from closed
@@ -1614,6 +1634,8 @@ class Query {
         this.#idArray(nextStages.map((n) => n.title)),
         this.#idArray(nextStages.map((n) => n.seq)),
         this.#idArray(nextStages.map((n) => (n.assignedTo == null ? '' : String(n.assignedTo)))),
+        this.#idArray(nextStages.map((n) => JSON.stringify(n.inputs ?? []))),
+        this.#idArray(nextStages.map((n) => JSON.stringify(n.outputs ?? []))),
       ],
     );
 
@@ -2082,6 +2104,47 @@ class Query {
       [schemaId],
     );
     return row ?? null;
+  }
+
+  /**
+   * The field vocabulary: every key ever published, with its most recent definition and where it
+   * is used.
+   *
+   * A key is not local to a format -- it is what the value is stored under in `requests.data` and
+   * in `project_field_values`, so `numero_orden` has to mean one thing system-wide. Keys from
+   * retired versions stay in the list: they have captured data under them.
+   */
+  async listFieldKeys() {
+    return this.#rows(
+      `with campos as (
+        select
+          f->>'code' as key,
+          f->>'name' as name,
+          f->>'type' as type,
+          coalesce(f->>'note', '') as note,
+          v.schema_id, v.published_at, v.id as version_id
+        from schema_versions v
+        cross join lateral (
+          select value as f from jsonb_array_elements(coalesce(v.fields->'deliverables', '[]'::jsonb))
+          union all
+          select value as f from jsonb_array_elements(coalesce(v.fields->'information', '[]'::jsonb))
+        ) campo
+        where f->>'code' is not null
+      ),
+      ultima as (
+        select distinct on (key) key, name, type, note
+        from campos
+        order by key, published_at desc, version_id desc
+      )
+      select
+        u.key, u.name, u.type, u.note,
+        (select count(distinct c.schema_id) from campos c where c.key = u.key)::int as schema_count,
+        (select json_agg(distinct s.name)
+           from campos c join schemas s on s.id = c.schema_id
+          where c.key = u.key) as schemas
+      from ultima u
+      order by u.key`,
+    );
   }
 
   /** Identity-level edit: name and active flag. Versions are never touched. */

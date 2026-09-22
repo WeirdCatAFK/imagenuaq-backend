@@ -31,6 +31,18 @@
 // later tools -- labels, stock, invoicing -- can read the project's data, and there are no
 // reserved values in the organisation that would justify excluding one.
 //
+// **A key is vocabulary, not a label local to one format.** It is what the value is stored
+// under in `requests.data` and in `project_field_values`, so `numero_orden` has to mean one
+// thing system-wide: if one format declares it `text` and another `date`, a project ends up
+// holding two different things under one name and the print order reads whichever it finds.
+// So publishing a field whose key already exists **with another type** is refused, naming the
+// format it already lives in. Whoever needs something else uses another key.
+//
+// The consequence, stated: a field's type cannot be changed by publishing a new version either.
+// That is the same rule, not a separate one -- the values already captured under that key are of
+// the old type, and changing it would make them lie. `GET /api/schemas/field-keys` is the list
+// the builder reads to autofill instead of guessing.
+//
 // Templates (RF-SOL-01, "conforme crecen las coordinaciones") are clones: `clone()` copies
 // the latest version's fields into a new identity's version 1. A field-group catalogue
 // that schemas compose was considered and declined -- it adds a table and a propagation
@@ -131,6 +143,21 @@ class Schemas {
   async getAll() {
     const types = await baseTypes();
     return (await query.getSchemas()).map((row) => shapeSchema(row, types));
+  }
+
+  /**
+   * Every key ever published, with its latest definition and where it is used. Lo que el
+   * constructor de formatos ofrece para que una clave se reuse en vez de reinventarse.
+   */
+  async listFieldKeys() {
+    return (await query.listFieldKeys()).map((row) => ({
+      key: row.key,
+      name: row.name,
+      type: row.type,
+      note: row.note,
+      schemaCount: row.schema_count,
+      schemas: row.schemas ?? [],
+    }));
   }
 
   /** Every version of a schema, newest first. @throws {ApiError} 404. */
@@ -273,7 +300,8 @@ function requireId(value, field) {
  * @returns {Promise<{ deliverables: object[], information: object[] }>}
  * @throws {ApiError} 400 naming the field and what is wrong with it.
  */
-export async function validateFields(fields) {
+export async function validateFields(fields, vocabulary = null) {
+  const known = vocabulary ?? (await fieldVocabulary());
   if (Array.isArray(fields)) {
     throw ApiError.badRequest(
       'Fields must be an object with "deliverables" and "information" arrays, not a flat array.',
@@ -310,15 +338,23 @@ export async function validateFields(fields) {
 
   for (const section of SECTIONS) {
     for (const field of fields[section]) {
-      out[section].push(await validateField(field, section, seen));
+      out[section].push(await validateField(field, section, seen, known));
     }
   }
 
   return out;
 }
 
+/** `code` -> its published definition, for the consistency check above. */
+async function fieldVocabulary() {
+  const rows = await query.listFieldKeys();
+  return new Map(rows.map((row) => [row.key, row]));
+}
+
+
+
 /** One field of one section. @throws {ApiError} 400. */
-async function validateField(field, section, seen) {
+async function validateField(field, section, seen, known) {
   if (!field || typeof field !== "object" || Array.isArray(field)) {
     throw ApiError.badRequest(`Each field of "${section}" must be an object.`);
   }
@@ -352,6 +388,18 @@ async function validateField(field, section, seen) {
   const dataType = await query.getDataType(type);
   if (!dataType || !dataType.is_active) {
     throw ApiError.badRequest(`Data type "${type}" does not exist or is inactive.`);
+  }
+
+  // The key already means something. Same type: fine, that is reuse and the point of the
+  // vocabulary. Different type: refused, because the values stored under it are of the old one.
+  const published = known.get(code);
+  if (published !== undefined && published.type !== type) {
+    const where = (published.schemas ?? []).join(", ");
+    throw ApiError.badRequest(
+      `Field "${code}" already exists as "${published.type}"` +
+        `${where === "" ? "" : ` in ${where}`}, so it cannot be published as "${type}". ` +
+        "Reuse it with that type, or pick another key.",
+    );
   }
 
   return {

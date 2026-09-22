@@ -10,6 +10,13 @@
 //   - **A stage repeats by `attempt`** (§2.6): a rejected sign-off closes the row and opens
 //     a fresh one for the same stage, so what happened stays readable.
 //
+// **A stage declares what it needs and what it owes.** `inputs` are the field keys whoever
+// works it needs to have at hand; `outputs` are the keys it is expected to produce. Only the
+// outputs are enforced, and only on an approval: a stage cannot be signed off while a key it
+// declared has no value (RF-FLW-06). That is what makes the print shop find the order number --
+// design could not close without capturing it. Inputs are informational, because a value that
+// never arrived is why a stage waits on a third party (RF-FLW-07), not a capture error.
+//
 // Stages are created by hand here. When the declarative workflow lands they are instantiated
 // from `workflow_stages` instead, and `advanceStage()` in query.js is already the statement
 // that walk will reuse -- nothing in this module's shape has to change for it.
@@ -36,6 +43,13 @@ const FIELD_KEY_MAX = 100;
 
 /** The status a project starts at when the caller names none (RF-EST-01). */
 const DEFAULT_STATUS = "recibido";
+
+/**
+ * The two keys finance may write without `project.write` (`finance.request`). They are ordinary
+ * `project_field_values` rows, so everything that reads values -- the board's filter, a report,
+ * the print order -- sees them with no special case.
+ */
+const FINANCE_KEYS = { quote: "requiere_cotizacion", invoice: "requiere_factura" };
 
 /** `project_stages.status`: the flow machine, not the visible catalogue (§2.7). */
 const STAGE_STATUSES = ["pending", "active", "waiting_external", "done", "cancelled"];
@@ -345,7 +359,9 @@ class Projects {
    *
    * @throws {ApiError} 400 on a bad payload or unknown area/user, 404.
    */
-  async addStage(projectId, { areaId, title, seq = 1, status = "pending", assignedTo = null }) {
+  async addStage(projectId, {
+    areaId, title, seq = 1, status = "pending", assignedTo = null, inputs = [], outputs = [],
+  }) {
     const id = requireId(projectId, "projectId");
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
 
@@ -365,6 +381,8 @@ class Projects {
         seq: requireInt(seq, "seq"),
         status: state,
         assignedTo: optionalId(assignedTo, "assignedTo"),
+        inputs: requireKeyList(inputs, "inputs"),
+        outputs: requireKeyList(outputs, "outputs"),
       });
 
       await events.emit({
@@ -388,7 +406,9 @@ class Projects {
    *
    * @throws {ApiError} 400 on an illegal transition or a missing reason, 404.
    */
-  async updateStage(projectId, stageId, { title, status, blockedReason, assignedTo }) {
+  async updateStage(projectId, stageId, {
+    title, status, blockedReason, assignedTo, inputs, outputs,
+  }) {
     const { id, before } = await this.#ownStage(projectId, stageId);
 
     let next = status === undefined ? undefined : requireStageStatus(status);
@@ -409,14 +429,17 @@ class Projects {
       status: next ?? null,
       blockedReason: reason ?? null,
       assignedTo: assignedTo === undefined ? null : optionalId(assignedTo, "assignedTo"),
+      inputs: inputs === undefined ? null : requireKeyList(inputs, "inputs"),
+      outputs: outputs === undefined ? null : requireKeyList(outputs, "outputs"),
       // Leaving the blocked state clears the reason: it described a wait that is over.
       clearBlocked:
         before.status === "waiting_external" && next !== undefined && next !== "waiting_external",
     };
 
     if (
-      payload.title === null && payload.status === null &&
-      payload.blockedReason === null && payload.assignedTo === null && !payload.clearBlocked
+      payload.title === null && payload.status === null && payload.blockedReason === null &&
+      payload.assignedTo === null && payload.inputs === null && payload.outputs === null &&
+      !payload.clearBlocked
     ) {
       throw ApiError.badRequest("Nothing to update.");
     }
@@ -470,6 +493,25 @@ class Projects {
       throw ApiError.badRequest("An approval needs a session: approver_user_id cannot be null.");
     }
 
+    // The declaration is a promise the stage made, and approving is where it comes due. A
+    // rejection is exempt: work being sent back has not produced anything yet.
+    if (decision === "approved") {
+      const declared = Array.isArray(before.outputs) ? before.outputs : [];
+      if (declared.length > 0) {
+        const values = await query.listFieldValues(before.project_id);
+        const captured = new Set(
+          values.filter((row) => row.value !== null && row.value !== "").map((row) => row.key),
+        );
+        const missing = declared.filter((key) => !captured.has(key));
+        if (missing.length > 0) {
+          throw ApiError.conflict(
+            `This stage owes ${missing.length === 1 ? "a value" : "values"} it has not captured: ` +
+              `${missing.join(", ")}. Write ${missing.length === 1 ? "it" : "them"} before signing off.`,
+          );
+        }
+      }
+    }
+
     let approval;
     try {
       approval = await query.createApproval({
@@ -485,7 +527,14 @@ class Projects {
 
     const rerun =
       decision === "rejected"
-        ? [{ areaId: before.area_id, title: before.title, seq: before.seq, assignedTo: before.assigned_to }]
+        ? [{
+            areaId: before.area_id,
+            title: before.title,
+            seq: before.seq,
+            assignedTo: before.assigned_to,
+            inputs: before.inputs ?? [],
+            outputs: before.outputs ?? [],
+          }]
         : [];
 
     let advanced;
@@ -515,6 +564,57 @@ class Projects {
       stage: withArea(advanced.stage),
       reopened: advanced.opened.map(withArea),
     };
+  }
+
+  // --- Finance (RF-FIN, RF-USR-05) ---
+
+  /**
+   * Finance says a project needs a quote or an invoice, without holding `project.write`.
+   *
+   * It writes one of two reserved keys as an ordinary field value, so the board's filter and
+   * every later reader see it with no special case. The note is what finance wants the project
+   * to know ("falta el desglose por partida"); omitted, the value is just `sí`.
+   *
+   * @param {number} projectId
+   * @param {{ kind: 'quote'|'invoice', needed?: boolean, note?: string }} input
+   * @throws {ApiError} 400 on an unknown kind, 404.
+   */
+  async requestFinance(projectId, { kind, needed = true, note = null }) {
+    const id = requireId(projectId, "projectId");
+    const key = FINANCE_KEYS[kind];
+    if (key === undefined) {
+      throw ApiError.badRequest(
+        `kind must be one of: ${Object.keys(FINANCE_KEYS).join(", ")}.`,
+      );
+    }
+    if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+
+    // Withdrawing the request removes the row rather than writing "no": a value that says no is
+    // indistinguishable from one nobody ever asked about.
+    if (needed === false) {
+      const removed = await query.deleteFieldValue(id, key);
+      if (removed) {
+        await events.emit({
+          action: "record_deleted",
+          target: { table: "project_field_values", id: removed.id },
+          before: removed,
+        });
+      }
+      return { key, needed: false, note: null };
+    }
+
+    const value = cleanText(note) ?? "sí";
+    const before = (await query.listFieldValues(id)).find((row) => row.key === key) ?? null;
+    const row = await query.upsertFieldValue(id, { key, value, producedByStageId: null });
+
+    await events.emit({
+      action: before ? "record_updated" : "record_created",
+      target: { table: "project_field_values", id: row.id },
+      before,
+      after: row,
+    });
+
+    return { key, needed: true, note: row.value === "sí" ? null : row.value };
   }
 
   // --- Field values (RF-FLW-06, RF-IMP-08) ---
@@ -673,6 +773,19 @@ function requireKey(value) {
   return key;
 }
 
+/** A declaration of inputs or outputs: field keys, unique, in the order given. */
+function requireKeyList(value, field) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw ApiError.badRequest(`${field} must be an array of field keys.`);
+
+  const out = [];
+  for (const entry of value) {
+    const key = requireFieldKey(entry);
+    if (!out.includes(key)) out.push(key);
+  }
+  return out;
+}
+
 function requireFieldKey(value) {
   const text = cleanText(value);
   if (text === null) throw ApiError.badRequest("A field key is required.");
@@ -787,6 +900,8 @@ function normaliseStages(stages) {
       title: requireText(stage.title, "stages[].title", TITLE_MAX),
       seq: stage.seq === undefined ? index + 1 : requireInt(stage.seq, "stages[].seq"),
       assignedTo: optionalId(stage.assignedTo, "stages[].assignedTo"),
+      inputs: requireKeyList(stage.inputs, "stages[].inputs"),
+      outputs: requireKeyList(stage.outputs, "stages[].outputs"),
     };
   });
 
@@ -899,6 +1014,8 @@ function shapeStage(row) {
     startedAt: row.started_at,
     endedAt: row.ended_at,
     createdAt: row.created_at,
+    inputs: row.inputs ?? [],
+    outputs: row.outputs ?? [],
   };
 }
 

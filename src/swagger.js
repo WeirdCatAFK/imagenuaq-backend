@@ -1154,6 +1154,22 @@ export function buildOpenApiDocument() {
             startedAt: { type: ['string', 'null'], format: 'date-time' },
             endedAt: { type: ['string', 'null'], format: 'date-time' },
             createdAt: { type: 'string', format: 'date-time' },
+            inputs: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Field keys this stage needs to do the work (RF-FLW-06). Informational: a value ' +
+                'that never arrived is why a stage waits, not a capture error.',
+              example: ['dependencia', 'tiraje'],
+            },
+            outputs: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Field keys this stage owes. **Enforced**: an approval is refused while one of ' +
+                'them has no value, which is what makes the next stage find it.',
+              example: ['numero_orden'],
+            },
             approvals: {
               type: 'array',
               readOnly: true,
@@ -1337,6 +1353,16 @@ export function buildOpenApiDocument() {
             seq: { type: 'integer', default: 1 },
             status: { type: 'string', enum: ['pending', 'active'], default: 'pending' },
             assignedTo: { type: 'integer' },
+            inputs: {
+              type: 'array',
+              items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' },
+              description: 'Field keys the stage needs. Informational.',
+            },
+            outputs: {
+              type: 'array',
+              items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' },
+              description: 'Field keys the stage owes; its sign-off is refused without them.',
+            },
           },
           required: ['areaId', 'title'],
         },
@@ -1350,6 +1376,8 @@ export function buildOpenApiDocument() {
             status: { type: 'string', enum: ['pending', 'active', 'waiting_external', 'cancelled'] },
             blockedReason: { type: 'string', description: 'Required when moving to `waiting_external`.' },
             assignedTo: { type: 'integer' },
+            inputs: { type: 'array', items: { type: 'string' }, description: 'Replaces the list whole.' },
+            outputs: { type: 'array', items: { type: 'string' }, description: 'Replaces the list whole.' },
           },
         },
         ApprovalRequest: {
@@ -1374,6 +1402,38 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['approval', 'stage', 'reopened'],
+        },
+        FinanceRequestRequest: {
+          type: 'object',
+          description:
+            'Finance marks that the project needs a quote or an invoice. It writes one of two ' +
+            'reserved field values (`requiere_cotizacion`, `requiere_factura`), so the board ' +
+            'filter and every later reader see it with no special case.',
+          properties: {
+            kind: { type: 'string', enum: ['quote', 'invoice'] },
+            needed: {
+              type: 'boolean',
+              default: true,
+              description:
+                'false withdraws the request by removing the value: a stored "no" is ' +
+                'indistinguishable from a project nobody ever asked about.',
+            },
+            note: {
+              type: 'string',
+              description: 'What finance wants the project to know. Omitted, the value is `sí`.',
+              example: 'Falta el desglose por partida',
+            },
+          },
+          required: ['kind'],
+        },
+        FinanceRequestResponse: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', example: 'requiere_factura' },
+            needed: { type: 'boolean' },
+            note: { type: ['string', 'null'] },
+          },
+          required: ['key', 'needed'],
         },
         SetFieldValueRequest: {
           type: 'object',
@@ -1475,6 +1535,26 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['code', 'name', 'type'],
+        },
+        FieldKey: {
+          type: 'object',
+          description:
+            'One entry of the field vocabulary. A key is what the value is stored under in ' +
+            '`requests.data` and `project_field_values`, so it means one thing system-wide: ' +
+            'publishing it with another type is refused.',
+          properties: {
+            key: { type: 'string', example: 'numero_orden' },
+            name: { type: 'string', description: 'Its most recent name.', example: 'Número de orden' },
+            type: { type: 'string', description: 'A data_types.code. Fixed once published.', example: 'text' },
+            note: { type: 'string', example: 'Lo genera diseño y lo ocupa facturación de imprenta' },
+            schemaCount: { type: 'integer', description: 'How many formats declare it.', example: 2 },
+            schemas: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'The formats that declare it, by name.',
+            },
+          },
+          required: ['key', 'name', 'type', 'schemaCount'],
         },
         SchemaFields: {
           type: 'object',
@@ -3224,6 +3304,26 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/projects/{id}/finance-request': {
+        post: {
+          tags: ['projects'],
+          summary: 'Mark that the project needs a quote or an invoice',
+          description:
+            'Needs `finance.request` and nothing else -- deliberately not `project.write`, which ' +
+            'would also allow stages, sign-offs and closing (RF-USR-05 separates reading from ' +
+            'writing). The finance role holds `project.read` and this, so it can see the whole ' +
+            'board and ask, without editing the work.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('FinanceRequestRequest'),
+          responses: {
+            200: wrapped('What was recorded.', 'request', 'FinanceRequestResponse'),
+            400: errorResponse('An unknown kind.', 'kind must be one of: quote, invoice.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
       '/api/projects/{id}/stages': {
         get: {
           tags: ['projects'],
@@ -3294,7 +3394,10 @@ export function buildOpenApiDocument() {
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('The stage is gone, or belongs to another project.', 'Stage not found for that project.'),
-            409: errorResponse('The stage is not open.', 'Only an open stage can be signed off; this one is done.'),
+            409: errorResponse(
+              'The stage is not open, or it owes a value it declared as an output.',
+              'This stage owes a value it has not captured: numero_orden. Write it before signing off.',
+            ),
           },
         },
       },
@@ -3497,7 +3600,10 @@ export function buildOpenApiDocument() {
           requestBody: jsonBody('CreateSchemaRequest'),
           responses: {
             201: wrapped('The created schema.', 'schema', 'Schema'),
-            400: errorResponse('Missing fields or invalid code/name.', 'Schema code is required.'),
+            400: errorResponse(
+              'Missing fields, an invalid code/name, or a key that already exists with another type.',
+              'Field "numero_orden" already exists as "text" in Papel institucional, so it cannot be published as "date". Reuse it with that type, or pick another key.',
+            ),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             409: errorResponse('The code is taken.', 'A schema with that code already exists.'),
@@ -3577,6 +3683,21 @@ export function buildOpenApiDocument() {
             403: FORBIDDEN,
             404: errorResponse('No such schema.', 'Schema not found.'),
             409: errorResponse('The schema is inactive.', 'Cannot create a version for an inactive schema.'),
+          },
+        },
+      },
+      '/api/schemas/field-keys': {
+        get: {
+          tags: ['schemas'],
+          summary: 'The field vocabulary: every key ever published',
+          description:
+            'What the format builder reads to autofill a key that already exists instead of ' +
+            'letting somebody re-invent it. Keys from retired versions are included -- they have ' +
+            'captured data under them, so they are still part of the system\'s vocabulary. ' +
+            'Publishing a field whose key exists with another type is refused.',
+          responses: {
+            200: wrapped('The vocabulary, by key.', 'fieldKeys', 'FieldKey', true),
+            401: UNAUTHORIZED,
           },
         },
       },
