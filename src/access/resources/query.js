@@ -28,6 +28,9 @@ class Query {
    *
    * @param {Array} ids
    */
+  // An empty JS array serialises as '' and Postgres refuses it as an array literal, so an
+  // empty list becomes NULL: `= any(NULL)` matches nothing and `unnest(NULL)` yields no rows,
+  // which is what every caller means by "none".
   #idArray(ids) {
     return ids.length ? ids : null;
   }
@@ -1020,6 +1023,466 @@ class Query {
       [roleId, this.#idArray(permissionIds)],
     );
     return rows;
+  }
+
+  //--- PROJECTS (RF-PRY-02) ---
+
+  /**
+   * A project, the requests it converts, its first field values and its first stages, in one
+   * statement. `key` omitted takes the sequence default.
+   *
+   * The requests update returns its own count so orchestration can tell "linked three" from
+   * "one of them was already converted" without a second read; a partial link is impossible
+   * because it is the same statement.
+   */
+  async createProject({
+    key = null, title, description = null, requester = null, schemaVersionId = null,
+    statusId, priority = 0, hasCost = false, carriedOver = false,
+    startsOn = null, dueOn = null, folderId = null, eventCollectionId = null, createdBy = null,
+    requestIds = [], fieldValues = [], stages = [],
+  }) {
+    const [row] = await this.#rows(
+      `with created as (
+        insert into projects (
+          key, title, description, requester, schema_version_id, status_id,
+          priority, has_cost, carried_over, starts_on, due_on,
+          folder_id, event_collection_id, created_by
+        )
+        values (
+          coalesce($1, 'PRY-' || to_char(nextval('projects_key_seq'), 'FM000000')),
+          $2, $3, $4, $5::bigint, $6,
+          $7, $8, $9, $10::date, $11::date,
+          $12::bigint, $13::bigint, $14::bigint
+        )
+        returning *
+      ),
+      linked as (
+        update requests r
+          set project_id = created.id
+        from created
+        where r.id = any($15::bigint[]) and r.project_id is null and r.deleted_at is null
+        returning r.id
+      ),
+      values_inserted as (
+        insert into project_field_values (project_id, key, value)
+        select created.id, v.key, v.value
+        from created, unnest($16::text[], $17::text[]) as v(key, value)
+        returning 1
+      ),
+      stages_inserted as (
+        insert into project_stages (project_id, area_id, title, seq, status, started_at, assigned_to)
+        select
+          created.id, st.area_id, st.title, st.seq, st.status,
+          case when st.status = 'active' then current_timestamp end,
+          nullif(st.assigned_to, '')::bigint
+        from created, unnest(
+          $18::bigint[], $19::text[], $20::int[], $21::text[], $22::text[]
+        ) as st(area_id, title, seq, status, assigned_to)
+        returning 1
+      )
+      select
+        created.*,
+        (select count(*) from linked)::int as linked_count,
+        (select count(*) from stages_inserted)::int as stage_count
+      from created`,
+      [
+        key, title, description, requester, schemaVersionId, statusId,
+        priority, hasCost, carriedOver, startsOn, dueOn,
+        folderId, eventCollectionId, createdBy,
+        this.#idArray(requestIds),
+        this.#idArray(fieldValues.map((v) => v.key)),
+        this.#idArray(fieldValues.map((v) => v.value)),
+        this.#idArray(stages.map((st) => st.areaId)),
+        this.#idArray(stages.map((st) => st.title)),
+        this.#idArray(stages.map((st) => st.seq)),
+        this.#idArray(stages.map((st) => st.status)),
+        // postgrejs infers a param's type from its values and cannot type an all-null array,
+        // so "nobody" travels as '' and comes back to NULL in the statement.
+        this.#idArray(stages.map((st) => (st.assignedTo == null ? '' : String(st.assignedTo)))),
+      ],
+    );
+
+    return row;
+  }
+
+  /** One project with its stages (and their approvals), field values and linked requests. */
+  async getProject(projectId) {
+    const [row] = await this.#rows(
+      `select
+        p.*,
+        s.code as status_code, s.label as status_label, s.is_terminal as status_is_terminal,
+        u.full_name as created_by_name,
+        coalesce(stages.list, '[]'::json) as stages,
+        coalesce(fv.list, '[]'::json) as field_values,
+        coalesce(req.list, '[]'::json) as requests
+      from projects p
+      join statuses s on s.id = p.status_id
+      left join users u on u.id = p.created_by
+      left join lateral (
+        select json_agg(stage order by stage_seq, stage_attempt, stage_id) as list
+        from (
+          select
+            ps.id as stage_id, ps.seq as stage_seq, ps.attempt as stage_attempt,
+            json_build_object(
+              'id', ps.id, 'areaId', ps.area_id, 'areaName', a.name, 'title', ps.title,
+              'seq', ps.seq, 'attempt', ps.attempt, 'status', ps.status,
+              'blockedReason', ps.blocked_reason, 'assignedTo', ps.assigned_to,
+              'assignedToName', au.full_name, 'eventId', ps.event_id,
+              'startedAt', ps.started_at, 'endedAt', ps.ended_at, 'createdAt', ps.created_at,
+              'approvals', coalesce(ap.list, '[]'::json)
+            ) as stage
+          from project_stages ps
+          join areas a on a.id = ps.area_id
+          left join users au on au.id = ps.assigned_to
+          left join lateral (
+            select json_agg(json_build_object(
+              'id', v.id, 'decision', v.decision, 'approverUserId', v.approver_user_id,
+              'approverName', vu.full_name, 'comment', v.comment,
+              'evidenceFileId', v.evidence_file_id, 'decidedAt', v.decided_at
+            ) order by v.decided_at, v.id) as list
+            from approvals v
+            left join users vu on vu.id = v.approver_user_id
+            where v.project_stage_id = ps.id
+          ) ap on true
+          where ps.project_id = p.id
+        ) ordered
+      ) stages on true
+      left join lateral (
+        select json_agg(json_build_object(
+          'key', f.key, 'value', f.value, 'producedByStageId', f.produced_by_stage_id,
+          'updatedAt', f.updated_at
+        ) order by f.key) as list
+        from project_field_values f
+        where f.project_id = p.id
+      ) fv on true
+      left join lateral (
+        select json_agg(json_build_object(
+          'id', r.id, 'folio', r.folio, 'title', r.title
+        ) order by r.id) as list
+        from requests r
+        where r.project_id = p.id and r.deleted_at is null
+      ) req on true
+      where p.id = $1 and p.deleted_at is null`,
+      [projectId],
+    );
+
+    return row ?? null;
+  }
+
+  /**
+   * The board (RF-PRY-02, RF-SOL-05). `state` is open | closed | archived | all; `areaId`
+   * matches a project with a stage in that area; `fieldKey`/`fieldValue` is RF-IMP-08's
+   * equality lookup over produced values.
+   */
+  async listProjects({
+    q = null, statusId = null, areaId = null, requester = null,
+    hasCost = null, carriedOver = null, state = 'open',
+    fieldKey = null, fieldValue = null, assignedTo = null,
+    sort = 'priority', limit = 50, offset = 0,
+  } = {}) {
+    return this.#rows(
+      `select
+        p.id, p.key, p.title, p.requester, p.status_id, p.status_since, p.priority,
+        p.has_cost, p.carried_over, p.starts_on, p.due_on,
+        p.closed_at, p.archived_at, p.created_at,
+        s.code as status_code, s.label as status_label,
+        (select count(*) from project_stages ps
+          where ps.project_id = p.id and ps.status in ('active', 'waiting_external'))::int
+          as open_stage_count,
+        (select count(*) from requests r
+          where r.project_id = p.id and r.deleted_at is null)::int as request_count
+      from projects p
+      join statuses s on s.id = p.status_id
+      where p.deleted_at is null
+        and case $7::text
+              when 'open'     then p.closed_at is null and p.archived_at is null
+              when 'closed'   then p.closed_at is not null
+              when 'archived' then p.archived_at is not null
+              else true
+            end
+        and ($1::text is null or p.title ilike '%' || $1 || '%' or p.key ilike $1 || '%')
+        and ($2::bigint is null or p.status_id = $2::bigint)
+        and ($3::bigint is null or exists (
+              select 1 from project_stages ps
+              where ps.project_id = p.id and ps.area_id = $3::bigint))
+        and ($4::text is null or lower(p.requester) = lower($4))
+        and ($5::boolean is null or p.has_cost = $5::boolean)
+        and ($6::boolean is null or p.carried_over = $6::boolean)
+        and ($8::text is null or exists (
+              select 1 from project_field_values f
+              where f.project_id = p.id and f.key = $8::text
+                and ($9::text is null or f.value = $9::text)))
+        and ($10::bigint is null or exists (
+              select 1 from project_stages ps
+              where ps.project_id = p.id and ps.assigned_to = $10::bigint))
+      order by
+        case when $11::text = 'priority' then p.priority end desc nulls last,
+        case when $11::text = 'due' then p.due_on end asc nulls last,
+        p.created_at desc, p.id desc
+      limit $12 offset $13`,
+      [
+        q, statusId, areaId, requester, hasCost, carriedOver, state,
+        fieldKey, fieldValue, assignedTo, sort, limit, offset,
+      ],
+    );
+  }
+
+  /** Only the keys the caller sent; the row is merged in orchestration. */
+  async updateProject(projectId, {
+    title = null, description = null, requester = null, priority = null,
+    hasCost = null, carriedOver = null, startsOn = null, dueOn = null, key = null,
+  }) {
+    const [row] = await this.#rows(
+      `update projects set
+        key          = coalesce($2, key),
+        title        = coalesce($3, title),
+        description  = coalesce($4, description),
+        requester    = coalesce($5, requester),
+        priority     = coalesce($6, priority),
+        has_cost     = coalesce($7, has_cost),
+        carried_over = coalesce($8, carried_over),
+        starts_on    = coalesce($9::date, starts_on),
+        due_on       = coalesce($10::date, due_on)
+      where id = $1 and deleted_at is null
+      returning *`,
+      [projectId, key, title, description, requester, priority, hasCost, carriedOver, startsOn, dueOn],
+    );
+    return row ?? null;
+  }
+
+  /** `status_since` moves in the same UPDATE, per DATAMODEL 2.7. */
+  async setProjectStatus(projectId, statusId) {
+    const [row] = await this.#rows(
+      `update projects
+        set status_id = $2, status_since = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [projectId, statusId],
+    );
+    return row ?? null;
+  }
+
+  /** `closed_at` and `archived_at` are different acts; `stamp` names the column. */
+  async stampProject(projectId, stamp) {
+    const column = stamp === 'closed' ? 'closed_at' : 'archived_at';
+    const [row] = await this.#rows(
+      `update projects
+        set ${column} = current_timestamp
+      where id = $1 and deleted_at is null and ${column} is null
+      returning *`,
+      [projectId],
+    );
+    return row ?? null;
+  }
+
+  async deleteProject(projectId) {
+    const [row] = await this.#rows(
+      `update projects
+        set deleted_at = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [projectId],
+    );
+    return row ?? null;
+  }
+
+  /** Links unconverted requests to an existing project (RF-PRY-01). */
+  async attachRequests(projectId, requestIds) {
+    return this.#rows(
+      `update requests
+        set project_id = $1
+      where id = any($2::bigint[]) and project_id is null and deleted_at is null
+      returning id, folio, title`,
+      [projectId, this.#idArray(requestIds)],
+    );
+  }
+
+  //--- PROJECT STAGES (RF-FLW-01) ---
+
+  async createProjectStage({
+    projectId, areaId, title, seq = 1, status = 'pending', assignedTo = null,
+    blockedReason = null, attempt = null,
+  }) {
+    const [row] = await this.#rows(
+      `insert into project_stages (
+        project_id, area_id, title, seq, attempt, status, blocked_reason, assigned_to, started_at
+      )
+      select
+        $1, $2, $3, $4,
+        coalesce($8::int, (
+          select coalesce(max(attempt), 0) + 1 from project_stages
+          where project_id = $1 and area_id = $2 and seq = $4
+        )),
+        $5, $6, $7::bigint,
+        case when $5 = 'active' then current_timestamp end
+      returning *`,
+      [projectId, areaId, title, seq, status, blockedReason, assignedTo, attempt],
+    );
+    return row;
+  }
+
+  async getProjectStage(stageId) {
+    const [row] = await this.#rows(
+      `select ps.*, a.name as area_name, p.deleted_at as project_deleted_at
+      from project_stages ps
+      join areas a on a.id = ps.area_id
+      join projects p on p.id = ps.project_id
+      where ps.id = $1`,
+      [stageId],
+    );
+    return row ?? null;
+  }
+
+  async listProjectStages(projectId) {
+    return this.#rows(
+      `select ps.*, a.name as area_name, u.full_name as assigned_to_name
+      from project_stages ps
+      join areas a on a.id = ps.area_id
+      left join users u on u.id = ps.assigned_to
+      where ps.project_id = $1
+      order by ps.seq, ps.attempt, ps.id`,
+      [projectId],
+    );
+  }
+
+  /**
+   * `started_at` is stamped the first time a stage becomes active and `ended_at` when it
+   * leaves the flow, both here rather than in orchestration so a status change cannot forget
+   * its timestamp.
+   */
+  async updateProjectStage(stageId, {
+    title = null, status = null, blockedReason = null, assignedTo = null, clearBlocked = false,
+  }) {
+    const [row] = await this.#rows(
+      `update project_stages set
+        title          = coalesce($2, title),
+        status         = coalesce($3, status),
+        blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
+        assigned_to    = coalesce($5::bigint, assigned_to),
+        started_at     = case
+                           when started_at is null and coalesce($3, status) = 'active'
+                           then current_timestamp else started_at
+                         end,
+        ended_at       = case
+                           when coalesce($3, status) in ('done', 'cancelled')
+                           then coalesce(ended_at, current_timestamp)
+                           else ended_at
+                         end
+      where id = $1
+      returning *`,
+      [stageId, title, status, blockedReason, assignedTo, clearBlocked],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Closes a stage and opens its follow-ups in one statement: a rejection that reruns the
+   * stage, or -- once E lands -- the targets of the transitions out of it. Each follow-up
+   * takes `attempt = max + 1` for its own (project, area, seq), which is what the unique
+   * index counts, so two callers racing collide on the index instead of on each other.
+   *
+   * @param {number} stageId
+   * @param {{ status?: string, nextStages?: {areaId:number,title:string,seq:number,
+   *   assignedTo?:number|null}[] }} input
+   * @returns {Promise<{ stage: object, opened: object[] }>}
+   */
+  async advanceStage(stageId, { status = 'done', nextStages = [] } = {}) {
+    const rows = await this.#rows(
+      `with closed as (
+        update project_stages
+          set status = $2, ended_at = coalesce(ended_at, current_timestamp)
+        where id = $1
+        returning *
+      ),
+      opened as (
+        insert into project_stages (
+          project_id, area_id, title, seq, attempt, status, assigned_to, started_at
+        )
+        select
+          closed.project_id, n.area_id, n.title, n.seq,
+          coalesce((
+            select max(ps.attempt) from project_stages ps
+            where ps.project_id = closed.project_id
+              and ps.area_id = n.area_id and ps.seq = n.seq
+          ), 0) + 1,
+          'active', nullif(n.assigned_to, '')::bigint, current_timestamp
+        from closed, unnest($3::bigint[], $4::text[], $5::int[], $6::text[])
+          as n(area_id, title, seq, assigned_to)
+        returning *
+      )
+      select 'closed' as kind, to_json(closed.*) as row from closed
+      union all
+      select 'opened' as kind, to_json(opened.*) as row from opened`,
+      [
+        stageId, status,
+        this.#idArray(nextStages.map((n) => n.areaId)),
+        this.#idArray(nextStages.map((n) => n.title)),
+        this.#idArray(nextStages.map((n) => n.seq)),
+        this.#idArray(nextStages.map((n) => (n.assignedTo == null ? '' : String(n.assignedTo)))),
+      ],
+    );
+
+    return {
+      stage: rows.find((r) => r.kind === 'closed')?.row ?? null,
+      opened: rows.filter((r) => r.kind === 'opened').map((r) => r.row),
+    };
+  }
+
+  //--- APPROVALS (RF-FLW-03) ---
+
+  async createApproval({ projectStageId, decision, approverUserId, comment = null, evidenceFileId = null }) {
+    const [row] = await this.#rows(
+      `insert into approvals (
+        project_stage_id, decision, approver_user_id, comment, evidence_file_id
+      )
+      values ($1, $2, $3, $4, $5::bigint)
+      returning *`,
+      [projectStageId, decision, approverUserId, comment, evidenceFileId],
+    );
+    return row;
+  }
+
+  async listApprovals(stageId) {
+    return this.#rows(
+      `select v.*, u.full_name as approver_name
+      from approvals v
+      left join users u on u.id = v.approver_user_id
+      where v.project_stage_id = $1
+      order by v.decided_at, v.id`,
+      [stageId],
+    );
+  }
+
+  //--- PROJECT FIELD VALUES (RF-FLW-06, RF-IMP-08) ---
+
+  /** One row per key per project; a correction is an UPDATE that moves the provenance with it. */
+  async upsertFieldValue(projectId, { key, value, producedByStageId = null }) {
+    const [row] = await this.#rows(
+      `insert into project_field_values (project_id, key, value, produced_by_stage_id)
+      values ($1, $2, $3, $4::bigint)
+      on conflict (project_id, key) do update
+        set value = excluded.value,
+            produced_by_stage_id = coalesce(excluded.produced_by_stage_id, project_field_values.produced_by_stage_id),
+            updated_at = current_timestamp
+      returning *`,
+      [projectId, key, value, producedByStageId],
+    );
+    return row;
+  }
+
+  async listFieldValues(projectId) {
+    return this.#rows(
+      `select * from project_field_values where project_id = $1 order by key`,
+      [projectId],
+    );
+  }
+
+  async deleteFieldValue(projectId, key) {
+    const [row] = await this.#rows(
+      `delete from project_field_values where project_id = $1 and key = $2 returning *`,
+      [projectId, key],
+    );
+    return row ?? null;
   }
 
   //--- REQUESTERS (RF-SOL-07) ---

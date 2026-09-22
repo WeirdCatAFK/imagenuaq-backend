@@ -224,6 +224,14 @@ export function buildOpenApiDocument() {
           'signed-in user; writes require `schema.manage`.',
       },
       {
+        name: 'projects',
+        description:
+          'Projects (RF-PRY-02), their stages (RF-FLW-01), the sign-offs that move them ' +
+          '(RF-FLW-03) and the values that cross stages (RF-FLW-06). A project has no ' +
+          'current stage: the active stage is the set of stages whose status is `active`, ' +
+          'which is what `activeStageIds` reports.',
+      },
+      {
         name: 'requesters',
         description:
           'The requesting party is a string on the request and the project, not a row ' +
@@ -923,6 +931,266 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['sheet', 'kind', 'name', 'headers', 'rows'],
+        },
+        ProjectStage: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 9 },
+            projectId: { type: 'integer', example: 4 },
+            areaId: { type: 'integer', example: 3 },
+            areaName: { type: ['string', 'null'], example: 'Diseño Gráfico' },
+            title: { type: 'string', example: 'Diseño de la propuesta' },
+            seq: { type: 'integer', description: 'Display order only; it decides nothing.', example: 1 },
+            attempt: {
+              type: 'integer',
+              description: 'Rises when a rejected sign-off sends the work back (RF-FLW-03).',
+              example: 1,
+            },
+            status: {
+              type: 'string',
+              enum: ['pending', 'active', 'waiting_external', 'done', 'cancelled'],
+              description:
+                'The flow machine, not the visible catalogue. `done` is reached only by ' +
+                'recording an approval.',
+            },
+            blockedReason: {
+              type: ['string', 'null'],
+              description: 'Required while `waiting_external` (RF-FLW-07).',
+            },
+            assignedTo: { type: ['integer', 'null'] },
+            assignedToName: { type: ['string', 'null'] },
+            eventId: { type: ['integer', 'null'], description: 'The calendar entry, RF-CAL-02.' },
+            startedAt: { type: ['string', 'null'], format: 'date-time' },
+            endedAt: { type: ['string', 'null'], format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+            approvals: {
+              type: 'array',
+              readOnly: true,
+              description: 'Only inside a single project read.',
+              items: { $ref: '#/components/schemas/Approval' },
+            },
+          },
+          required: ['id', 'projectId', 'areaId', 'title', 'seq', 'attempt', 'status'],
+        },
+        Approval: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 2 },
+            projectStageId: { type: 'integer', example: 9 },
+            decision: { type: 'string', enum: ['approved', 'rejected'] },
+            approverUserId: { type: 'integer', description: 'Always internal (DATAMODEL 2.11).' },
+            approverName: { type: ['string', 'null'] },
+            comment: { type: ['string', 'null'], example: 'Conformidad por correo del 3 de marzo' },
+            evidenceFileId: {
+              type: ['integer', 'null'],
+              description:
+                "The requester's conformity as evidence rather than a signature. Empty until " +
+                'ARC can accept an upload.',
+            },
+            decidedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'projectStageId', 'decision', 'approverUserId', 'decidedAt'],
+        },
+        ProjectFieldValue: {
+          type: 'object',
+          description:
+            'A value one stage produced and another reads (RF-FLW-06): the order number, the ' +
+            'SIN folio, the pantone. One row per key per project, stored as text.',
+          properties: {
+            key: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$', example: 'numero_orden' },
+            value: { type: 'string', example: 'A-77' },
+            producedByStageId: {
+              type: ['integer', 'null'],
+              description: 'Which stage produced it (RF-PRY-03). Null: it came from the request.',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['key', 'value'],
+        },
+        ProjectListItem: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            key: { type: 'string', example: 'PRY-000012' },
+            title: { type: 'string' },
+            requester: { type: ['string', 'null'], example: 'Facultad de Química' },
+            statusId: { type: 'integer' },
+            statusCode: { type: 'string', example: 'en_proceso' },
+            statusLabel: { type: 'string', example: 'En proceso' },
+            statusSince: { type: 'string', format: 'date-time' },
+            priority: { type: 'integer', description: 'Higher is more urgent (RF-FLW-08).' },
+            hasCost: { type: 'boolean', description: 'RF-PRY-07.' },
+            carriedOver: { type: 'boolean', description: 'RF-PRY-08.' },
+            startsOn: { type: ['string', 'null'], format: 'date' },
+            dueOn: { type: ['string', 'null'], format: 'date' },
+            closedAt: { type: ['string', 'null'], format: 'date-time' },
+            archivedAt: { type: ['string', 'null'], format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+            openStageCount: { type: 'integer', description: 'Stages that are active or waiting.' },
+            requestCount: { type: 'integer' },
+          },
+          required: ['id', 'key', 'title', 'statusId', 'priority'],
+        },
+        Project: {
+          allOf: [
+            { $ref: '#/components/schemas/ProjectListItem' },
+            {
+              type: 'object',
+              properties: {
+                description: { type: ['string', 'null'] },
+                schemaVersionId: { type: ['integer', 'null'] },
+                statusIsTerminal: { type: 'boolean' },
+                folderId: { type: ['integer', 'null'] },
+                eventCollectionId: { type: ['integer', 'null'] },
+                createdBy: { type: ['integer', 'null'] },
+                createdByName: { type: ['string', 'null'] },
+                deletedAt: { type: ['string', 'null'], format: 'date-time' },
+                stages: { type: 'array', items: { $ref: '#/components/schemas/ProjectStage' } },
+                fieldValues: { type: 'array', items: { $ref: '#/components/schemas/ProjectFieldValue' } },
+                requests: {
+                  type: 'array',
+                  description: 'The requests this project answers (RF-PRY-01).',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'integer' },
+                      folio: { type: 'string', example: 'SOL-000004' },
+                      title: { type: 'string' },
+                    },
+                  },
+                },
+                activeStageIds: {
+                  type: 'array',
+                  items: { type: 'integer' },
+                  description:
+                    'The current stage, as a set: a project may be worked by more than one ' +
+                    'area at a time (RF-FLW-09).',
+                },
+              },
+            },
+          ],
+        },
+        CreateProjectRequest: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', maxLength: 300 },
+            key: {
+              type: 'string',
+              maxLength: 50,
+              description:
+                'Omitted: generated as `PRY-000001`. Sent: uppercased, and must hold only ' +
+                'A-Z, 0-9, - and _. Doubles as the folder name.',
+              example: 'PAPEL-FCQ-03',
+            },
+            description: { type: 'string' },
+            requester: { type: 'string', maxLength: 300, example: 'Facultad de Química' },
+            schemaVersionId: { type: 'integer' },
+            statusId: { type: 'integer', description: 'Omitted: the global `recibido`.' },
+            priority: { type: 'integer', default: 0 },
+            hasCost: { type: 'boolean', default: false },
+            carriedOver: { type: 'boolean', default: false },
+            startsOn: { type: 'string', format: 'date' },
+            dueOn: { type: 'string', format: 'date' },
+            fieldValues: {
+              type: 'array',
+              description: 'Values to seed; empty ones are dropped rather than stored as "".',
+              items: {
+                type: 'object',
+                properties: { key: { type: 'string' }, value: {} },
+                required: ['key', 'value'],
+              },
+            },
+            stages: {
+              type: 'array',
+              description: 'The lowest `seq` starts `active`, the rest `pending`.',
+              items: {
+                type: 'object',
+                properties: {
+                  areaId: { type: 'integer' },
+                  title: { type: 'string', maxLength: 300 },
+                  seq: { type: 'integer' },
+                  assignedTo: { type: 'integer' },
+                },
+                required: ['areaId', 'title'],
+              },
+            },
+            requestIds: {
+              type: 'array',
+              items: { type: 'integer' },
+              description: 'Requests to convert (RF-PRY-01). Linked in the same statement.',
+            },
+          },
+          required: ['title'],
+        },
+        UpdateProjectRequest: {
+          type: 'object',
+          description: 'At least one key. Status, closing and archiving have their own routes.',
+          properties: {
+            key: { type: 'string', maxLength: 50 },
+            title: { type: 'string', maxLength: 300 },
+            description: { type: 'string' },
+            requester: { type: 'string', maxLength: 300 },
+            priority: { type: 'integer' },
+            hasCost: { type: 'boolean' },
+            carriedOver: { type: 'boolean' },
+            startsOn: { type: 'string', format: 'date' },
+            dueOn: { type: 'string', format: 'date' },
+          },
+        },
+        CreateStageRequest: {
+          type: 'object',
+          properties: {
+            areaId: { type: 'integer' },
+            title: { type: 'string', maxLength: 300 },
+            seq: { type: 'integer', default: 1 },
+            status: { type: 'string', enum: ['pending', 'active'], default: 'pending' },
+            assignedTo: { type: 'integer' },
+          },
+          required: ['areaId', 'title'],
+        },
+        UpdateStageRequest: {
+          type: 'object',
+          description:
+            'At least one key. `done` is refused here: a stage is completed by recording an ' +
+            'approval on it.',
+          properties: {
+            title: { type: 'string', maxLength: 300 },
+            status: { type: 'string', enum: ['pending', 'active', 'waiting_external', 'cancelled'] },
+            blockedReason: { type: 'string', description: 'Required when moving to `waiting_external`.' },
+            assignedTo: { type: 'integer' },
+          },
+        },
+        ApprovalRequest: {
+          type: 'object',
+          description: 'The approver is the session; `rejected` reruns the stage at attempt + 1.',
+          properties: {
+            decision: { type: 'string', enum: ['approved', 'rejected'] },
+            comment: { type: 'string' },
+            evidenceFileId: { type: 'integer' },
+          },
+          required: ['decision'],
+        },
+        ApprovalResponse: {
+          type: 'object',
+          properties: {
+            approval: { $ref: '#/components/schemas/Approval' },
+            stage: { $ref: '#/components/schemas/ProjectStage' },
+            reopened: {
+              type: 'array',
+              description: 'The fresh attempt a rejection opened; empty on an approval.',
+              items: { $ref: '#/components/schemas/ProjectStage' },
+            },
+          },
+          required: ['approval', 'stage', 'reopened'],
+        },
+        SetFieldValueRequest: {
+          type: 'object',
+          properties: {
+            value: { description: 'Stringified before storage; null or empty is refused.' },
+            producedByStageId: { type: 'integer', description: 'Must be a stage of this project.' },
+          },
+          required: ['value'],
         },
         Requester: {
           type: 'object',
@@ -2439,6 +2707,305 @@ export function buildOpenApiDocument() {
         },
       },
       
+      // --- projects ---
+
+      '/api/projects': {
+        get: {
+          tags: ['projects'],
+          summary: 'The board',
+          description: 'Needs project.read. Defaults to the open projects, most urgent first.',
+          parameters: [
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Title fragment, or key prefix.' },
+            { name: 'state', in: 'query', required: false, schema: { type: 'string', enum: ['open', 'closed', 'archived', 'all'], default: 'open' } },
+            { name: 'statusId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'areaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 }, description: 'Projects with a stage in that area.' },
+            { name: 'assignedTo', in: 'query', required: false, schema: { type: 'integer', minimum: 1 }, description: 'Projects with a stage assigned to that person.' },
+            { name: 'requester', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact match, case-insensitive.' },
+            { name: 'hasCost', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-07.' },
+            { name: 'carriedOver', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-08.' },
+            { name: 'fieldKey', in: 'query', required: false, schema: { type: 'string' }, description: 'RF-IMP-08: look a project up by a value a stage produced.' },
+            { name: 'fieldValue', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact value; needs fieldKey.' },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'due'], default: 'priority' } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
+          responses: {
+            200: wrapped('The projects.', 'projects', 'ProjectListItem', true),
+            400: errorResponse('A bad filter.', 'state must be one of: open, closed, archived, all.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['projects'],
+          summary: 'Create a project, with its first stages and values',
+          description:
+            'Needs project.write. Everything happens in one statement: the project, the ' +
+            'requests it converts, its field values and its stages. A request that already ' +
+            'belongs to a project makes the whole call fail.',
+          requestBody: jsonBody('CreateProjectRequest'),
+          responses: {
+            201: wrapped('The project.', 'project', 'Project'),
+            400: errorResponse('A bad payload or an unknown reference.', 'title is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The key is taken, or a request is already converted.', 'A project with that key already exists.'),
+          },
+        },
+      },
+      '/api/projects/{id}': {
+        get: {
+          tags: ['projects'],
+          summary: 'One project with its stages, values and requests',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The project.', 'project', 'Project'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid project id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+        patch: {
+          tags: ['projects'],
+          summary: 'Edit a project',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('UpdateProjectRequest'),
+          responses: {
+            200: wrapped('The project after the change.', 'project', 'Project'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('The key is taken.', 'A project with that key already exists.'),
+          },
+        },
+        delete: {
+          tags: ['projects'],
+          summary: 'Soft-delete a project',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The deleted project.', 'project', 'Project'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/status': {
+        put: {
+          tags: ['projects'],
+          summary: 'Move the visible status',
+          description:
+            'Needs project.write. `status_since` moves in the same statement, and the change ' +
+            'is recorded as `status_changed` in the trail rather than in a table of its own. ' +
+            'The status must be global or belong to an area with a stage in this project.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { statusId: { type: 'integer', minimum: 1 } },
+                  required: ['statusId'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The project.', 'project', 'Project'),
+            400: errorResponse('An unusable status.', 'That status belongs to an area with no stage in this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/close': {
+        post: {
+          tags: ['projects'],
+          summary: 'Close a project',
+          description:
+            'Needs project.write. Refused while a stage is still active or waiting on a third ' +
+            "party -- RF-EST-05's question about what is pending, in the cheapest form it has.",
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The closed project.', 'project', 'Project'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('A stage is still open, or it is already closed.', 'Project is already closed.'),
+          },
+        },
+      },
+      '/api/projects/{id}/archive': {
+        post: {
+          tags: ['projects'],
+          summary: 'Archive a project',
+          description: 'A different act from closing: finished work versus out of the way.',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The archived project.', 'project', 'Project'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('Already archived.', 'Project is already archived.'),
+          },
+        },
+      },
+      '/api/projects/{id}/requests': {
+        post: {
+          tags: ['projects'],
+          summary: 'Link more requests to the project',
+          description: 'Needs project.write and request.write. RF-PRY-01: one project may answer several requests.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { requestIds: { type: 'array', items: { type: 'integer' } } },
+                  required: ['requestIds'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The project with its requests.', 'project', 'Project'),
+            400: errorResponse('An empty list.', 'requestIds must not be empty.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('One is already converted.', 'One of those requests does not exist or already has a project.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages': {
+        get: {
+          tags: ['projects'],
+          summary: 'The stages of a project, every attempt',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The stages.', 'stages', 'ProjectStage', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+        post: {
+          tags: ['projects'],
+          summary: 'Add a stage by hand',
+          description:
+            'Needs project.write. Until the node editor exists (RF-FLW-02) stages are created ' +
+            'here. Adding the same area and seq again reruns it as the next attempt.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('CreateStageRequest'),
+          responses: {
+            201: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('A bad payload or an unknown area.', 'A stage is completed by an approval, not created done.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages/{stageId}': {
+        patch: {
+          tags: ['projects'],
+          summary: 'Start, block, unblock or cancel a stage',
+          description:
+            'Needs project.write. `waiting_external` needs a `blockedReason` (RF-FLW-07) and ' +
+            'leaving it clears the reason. `done` is not reachable here.',
+          parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
+          requestBody: jsonBody('UpdateStageRequest'),
+          responses: {
+            200: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('An illegal transition or a missing reason.', 'blockedReason is required when a stage waits on a third party.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('The stage is gone, or belongs to another project.', 'Stage not found for that project.'),
+            409: errorResponse('A finished stage cannot change status.', 'A done stage cannot change status; it reruns instead.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages/{stageId}/approvals': {
+        post: {
+          tags: ['projects'],
+          summary: 'Record a visto bueno on the stage',
+          description:
+            'Needs project.write, and that is the whole policy: RF-FLW-03 asks for the ' +
+            'decision to be recorded with its author, not for a second authorisation model. ' +
+            'The approver is the session. `approved` completes the stage; `rejected` completes ' +
+            'it and opens the same stage again at attempt + 1, so the returned work stays ' +
+            'visible. Which stage follows is the flow\'s business and the flow does not exist ' +
+            'yet, so the next stage is started by hand.',
+          parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
+          requestBody: jsonBody('ApprovalRequest'),
+          responses: {
+            201: {
+              description: 'The approval, the stage it closed and any attempt it reopened.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/ApprovalResponse' } } },
+            },
+            400: errorResponse('A bad decision or unknown evidence file.', 'decision must be "approved" or "rejected".'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('The stage is gone, or belongs to another project.', 'Stage not found for that project.'),
+            409: errorResponse('The stage is not open.', 'Only an open stage can be signed off; this one is done.'),
+          },
+        },
+      },
+      '/api/projects/{id}/field-values': {
+        get: {
+          tags: ['projects'],
+          summary: 'The values this project carries',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The values.', 'fieldValues', 'ProjectFieldValue', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/field-values/{key}': {
+        put: {
+          tags: ['projects'],
+          summary: 'Write a value another stage will read',
+          description:
+            'Needs project.write. RF-FLW-06: the order number diseño generates appears in the ' +
+            "print shop's billing without re-capture. One row per key; a correction is an " +
+            'update and the provenance moves with it.',
+          parameters: [
+            pathId('id', 'projects.id'),
+            { name: 'key', in: 'path', required: true, schema: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' } },
+          ],
+          requestBody: jsonBody('SetFieldValueRequest'),
+          responses: {
+            200: wrapped('The value.', 'fieldValue', 'ProjectFieldValue'),
+            400: errorResponse('A bad key, an empty value or a stage of another project.', 'producedByStageId must be a stage of this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+        delete: {
+          tags: ['projects'],
+          summary: 'Remove a value',
+          parameters: [
+            pathId('id', 'projects.id'),
+            { name: 'key', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            200: wrapped('The removed value.', 'fieldValue', 'ProjectFieldValue'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project, or no value under that key.', 'That project has no value under that key.'),
+          },
+        },
+      },
+
       // --- requesters ---
 
       '/api/requesters': {

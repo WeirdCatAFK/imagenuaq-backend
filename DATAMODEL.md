@@ -17,7 +17,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
-| SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`. Con API: `schemas` (§2.2), `statuses` (`RF-EST-02`) y `/api/requesters` (§2.11). `requests` y `projects` siguen solo en `psql` |
+| SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`. Con API: `schemas` (§2.2), `statuses` (`RF-EST-02`), `projects` con sus etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11). `requests` sigue solo en `psql` |
 | MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`                                                                                                                                                  | Registro de libros implementado por`microsoft-accounts` y `microsoft-app`; falta el mapeo de columnas (§2.10) |
 | FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
@@ -396,6 +396,45 @@ y a esta escala eso es aceptable. El día que no lo sea, la respuesta es `pg_trg
 `requesters` con la cadena como llave natural y un `requester_id` nulable al lado de la
 columna, no revivir `entities` con sus contactos.
 
+### 2.12 La llave del proyecto se genera, y la etapa la cierra un visto bueno
+
+`projects-intake` cerró las tres cosas que le faltaban al proyecto para tener API.
+
+**La llave se genera y se puede sobrescribir.** `projects.key` se asignaba a mano, lo que está
+bien cuando alguien bautiza el proyecto y estorba cuando la vía normal es convertir una
+solicitud: la conversión se detendría a que una persona invente un nombre, y lo que se teclea
+en ese momento es `PROYECTO-1`. Una secuencia da `PRY-000001` igual que `requests_folio_seq` da
+`SOL-000001`, y quien sí quiere nombrar sigue mandando su llave, que se pasa a mayúsculas antes
+de que el CHECK la vea. Sigue sirviendo como nombre de carpeta.
+
+**La etapa no se marca `done` a mano.** `PATCH .../stages/:id` mueve `pending → active`,
+`active ↔ waiting_external` —con el motivo que pide `RF-FLW-07`, y al salir del bloqueo el
+motivo se borra porque describía una espera que terminó— y `→ cancelled`. `done` se rechaza:
+una etapa se cierra registrando un visto bueno, que es lo que `RF-FLW-03` quiere que quede
+escrito. Una etapa ya `done` o `cancelled` no cambia de estatus; se repite (§2.6).
+
+**El rechazo abre el siguiente intento en la misma sentencia.** `advanceStage()` cierra la fila
+y abre las que siguen en un solo statement, con `attempt = max + 1` por (proyecto, área, seq),
+que es lo que cuenta el índice único: dos llamadas simultáneas chocan contra el índice y no
+entre ellas. Hoy la única fila que abre es la repetición de la etapa rechazada; cuando entren
+las transiciones declarativas (§6), el recorrido del grafo llama a la misma función con los
+destinos. Aprobar **no** abre la etapa siguiente: cuál sigue es asunto del flujo, y el flujo
+todavía no existe, así que la siguiente la inicia quien lleva el proyecto.
+
+**Firmar solo pide `project.write`.** Se consideró exigir pertenencia al área de la etapa
+—`area_members` más `area_hierarchy`— y se descartó: `RF-FLW-03` pide que la decisión quede
+registrada con su autor, no un segundo modelo de autorización. `approvals.approver_user_id` es
+NOT NULL y es el actor de la sesión; `evidence_file_id` es nulable y espera a que ARC tenga
+carga de archivos (§2.11).
+
+**Cerrar se niega con etapas abiertas.** Es la forma más barata de la pregunta de `RF-EST-05`
+—qué queda pendiente—; las mitades de facturas y evidencia de ese requerimiento esperan a FIN y
+ARC. Archivar es un acto distinto de cerrar (trabajo terminado contra quitado de en medio) y
+tiene su columna y su ruta.
+
+**El estatus que puede vestir un proyecto está acotado**: global, o de un área que tenga una
+etapa en ese proyecto. Si no, un tablero terminaría mostrando el vocabulario de otra área.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -411,7 +450,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-SOL-07                       | `requests.requester` /`projects.requester` como cadena, con autocompletado en `/api/requesters`; el contacto es un campo del formato (§2.11) | ✔ |
 | RF-SOL-08                       | `requests.source`                                                                                                 | ✔ |
 | RF-PRY-01                       | `requests.project_id` (§2.8)                                                                                      | ✔ |
-| RF-PRY-02                       | `projects`, `project_members`; las áreas participantes se derivan, no se guardan                               | ◑ falta`project_members` |
+| RF-PRY-02                       | `projects` + `project_stages`; API en`/api/projects` (§2.12). Las áreas participantes se derivan de las etapas | ◑ falta`project_members` para los integrantes |
 | RF-PRY-03                       | `project_stages` + `approvals` + `logs`                                                                       | ✔ |
 | RF-PRY-04                       | `time_entries`                                                                                                    | ✗ |
 | RF-PRY-05                       | `notes.kind`                                                                                                      | ✗ |
@@ -419,11 +458,11 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-PRY-07                       | `projects.has_cost`                                                                                               | ✔ |
 | RF-PRY-08                       | `projects.carried_over`; `period_id` espera a`periods` (CAL/FIN)                                            | ◑ |
 | RF-PRY-09                       | `project_materials.origin`                                                                                        | ✗ |
-| RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1, §6)                                                        | ✗ etapas a mano |
-| RF-FLW-03                       | `approvals`                                                                                                       | ✔ |
+| RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1, §6)                                                        | ◑ etapas a mano por`/api/projects/:id/stages`; falta el editor |
+| RF-FLW-03                       | `approvals`; el rechazo abre`attempt + 1` (§2.6, §2.12)                                                      | ✔ |
 | RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        | ✗ |
 | RF-FLW-05                       | Descartado como firma: el visto bueno es interno y la conformidad del solicitante se captura como evidencia (§2.11) | ✗ por decisión |
-| RF-FLW-06                       | `project_field_values` (§2.4)                                                                                    | ✔ |
+| RF-FLW-06                       | `project_field_values` (§2.4); API en`PUT /api/projects/:id/field-values/:key`                                | ✔ |
 | RF-FLW-07                       | `project_stages.status = 'waiting_external'` + `blocked_reason` (CHECK)                                        | ✔ |
 | RF-FLW-08                       | `projects.priority`, `requests.priority`; sin orden por fecha de llegada                                        | ✔ |
 | RF-FLW-09                       | Sin etapa actual: el conjunto de`project_stages` activas (§2.1)                                                 | ✔ |
