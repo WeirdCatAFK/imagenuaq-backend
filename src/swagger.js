@@ -926,30 +926,53 @@ export function buildOpenApiDocument() {
         SchemaField: {
           type: 'object',
           description:
-            'One field of a format. `code` is snake_case and doubles as the key in ' +
-            '`requests.data`, the target a sheet column map names and the ' +
-            '`project_field_values.key` the value lands under when it propagates.',
+            'One field of a format. `code` is snake_case and unique across BOTH sections: it ' +
+            'is the key in `requests.data`, the target a sheet column map names, and the ' +
+            '`project_field_values.key` the value lands under when the request is converted.',
           properties: {
-            code: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$', example: 'dependencia' },
-            name: { type: 'string', example: 'Dependencia solicitante' },
-            type: { type: 'string', description: 'A data_types.code.', example: 'text' },
-            section: { type: 'string', enum: ['deliverables', 'information'], example: 'information' },
-            required: { type: 'boolean', default: false, example: true },
-            propagate: {
-              type: 'boolean',
-              default: false,
-              description:
-                'Whether the value becomes a project_field_values row when the request is ' +
-                'converted (RF-FLW-06): data other stages and tools reuse without re-capture.',
-              example: true,
+            code: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$', example: 'd_entrega' },
+            name: { type: 'string', example: 'Fecha de entrega' },
+            type: { type: 'string', description: 'A data_types.code.', example: 'date' },
+            note: {
+              type: 'string',
+              default: '',
+              description: 'The human hint shown beside the field.',
+              example: 'Documento PDF con la firma de Alma',
             },
-            options: {
-              type: 'object',
-              default: {},
-              description: "Extras for the type (a select's choices, a hint). Not validated.",
+            required: { type: 'boolean', default: false, example: true },
+            baseType: {
+              type: ['string', 'null'],
+              readOnly: true,
+              description:
+                "The type's base_type from the catalogue, so a client that only cares about " +
+                'string-vs-number need not know the codes. Never sent on a write.',
+              example: 'date',
             },
           },
-          required: ['code', 'name', 'type', 'section'],
+          required: ['code', 'name', 'type'],
+        },
+        SchemaFields: {
+          type: 'object',
+          description:
+            'What a format asks for, in two sections: `deliverables` is what the area must ' +
+            'produce, `information` what the requester states. Each is an ordered array -- ' +
+            'arrays rather than objects keyed by code because jsonb does not preserve object ' +
+            'key order. Both keys are required; either may be empty, but not both.',
+          properties: {
+            deliverables: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            information: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+          },
+          required: ['deliverables', 'information'],
+          example: {
+            deliverables: [
+              { code: 'doc_cot', name: 'Documento de cotización', type: 'document', note: 'PDF con la firma de Alma', required: true },
+              { code: 'd_entrega', name: 'Fecha de entrega', type: 'date', note: '', required: true },
+            ],
+            information: [
+              { code: 'inst_pet', name: 'Institución que hace la petición', type: 'text', note: '', required: true },
+              { code: 'cant_mat', name: 'Cantidad de material', type: 'quantity', note: 'Cantidad total solicitada', required: false },
+            ],
+          },
         },
         Schema: {
           type: 'object',
@@ -960,7 +983,7 @@ export function buildOpenApiDocument() {
             isActive: { type: 'boolean', example: true },
             createdAt: { type: 'string', format: 'date-time' },
             version: { type: ['integer', 'null'], example: 1 },
-            fields: { type: ['array', 'null'], items: { $ref: '#/components/schemas/SchemaField' } },
+            fields: { oneOf: [{ $ref: '#/components/schemas/SchemaFields' }, { type: 'null' }] },
             publishedAt: { type: ['string', 'null'], format: 'date-time' },
             publishedBy: { type: ['integer', 'null'], example: 12 },
             schemaVersionId: { type: ['integer', 'null'], example: 1 },
@@ -973,7 +996,7 @@ export function buildOpenApiDocument() {
             id: { type: 'integer', example: 2 },
             schemaId: { type: 'integer', example: 1 },
             version: { type: 'integer', example: 2 },
-            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            fields: { $ref: '#/components/schemas/SchemaFields' },
             publishedAt: { type: ['string', 'null'], format: 'date-time' },
             publishedBy: { type: ['integer', 'null'], example: 12 },
             schemaCode: { type: 'string', description: 'Only when read by version id.', example: 'papel_institucional' },
@@ -988,14 +1011,14 @@ export function buildOpenApiDocument() {
           properties: {
             code: { type: 'string', maxLength: 50, example: 'papel_institucional' },
             name: { type: 'string', maxLength: 300, example: 'Papel institucional' },
-            fields: { type: 'array', minItems: 1, items: { $ref: '#/components/schemas/SchemaField' } },
+            fields: { $ref: '#/components/schemas/SchemaFields' },
           },
           required: ['code', 'name', 'fields'],
         },
         CreateSchemaVersionRequest: {
           type: 'object',
           properties: {
-            fields: { type: 'array', minItems: 1, items: { $ref: '#/components/schemas/SchemaField' } },
+            fields: { $ref: '#/components/schemas/SchemaFields' },
           },
           required: ['fields'],
         },
@@ -2468,7 +2491,10 @@ export function buildOpenApiDocument() {
           requestBody: jsonBody('CreateSchemaVersionRequest'),
           responses: {
             201: wrapped('The created version.', 'version', 'SchemaVersion'),
-            400: errorResponse('Missing fields or invalid payload.', 'Fields must be an array.'),
+            400: errorResponse(
+              'Missing fields or invalid payload.',
+              'Section "deliverables" is required and must be an array.',
+            ),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such schema.', 'Schema not found.'),

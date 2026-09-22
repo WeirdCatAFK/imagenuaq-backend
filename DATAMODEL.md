@@ -133,28 +133,55 @@ Las filas vuelven el día que algo consulte campos entre formatos —un reporte 
 formatos piden tiraje", por ejemplo—. Mientras tanto, el `CHECK jsonb_typeof(fields) =
 'array'` es lo que impide que la columna degenere en un objeto suelto.
 
-**La forma de cada campo** (`schema-field-shape`, `orchestration/schemas.js`) es
-`{ code, name, type, section, required, propagate, options }`:
+**La forma de los campos** (`schema-field-sections`, `orchestration/schemas.js`) son dos
+secciones, cada una con un arreglo ordenado:
 
-- `code` es `snake_case` y único dentro de la versión. Es la llave en `requests.data`, el
-  destino que nombra el mapeo de columnas de una hoja (§2.10) y la `key` bajo la que el
-  valor cae en `project_field_values` cuando se propaga; por eso comparte el juego de
-  caracteres de las tres.
-- `type` es un `data_types.code`; la coerción por la que pasa un valor la decide el tipo.
-- `section` distingue lo que hay que producir (`deliverables`) de lo que hay que saber
-  (`information`).
-- `propagate` dice si el valor **sale de la solicitud** y se vuelve una fila de
-  `project_field_values` al convertirla (`RF-FLW-06`, `RF-IMP-05`): la dependencia que
-  ordenó, la fecha de entrega, el número de orden. Es un eje independiente de `section`.
-- `options` es un objeto libre para los extras del tipo; el constructor de formatos es
-  dueño de su significado.
+```json
+{
+  "deliverables": [
+    { "code": "doc_cot", "name": "Documento de cotización", "type": "document",
+      "note": "PDF con la firma de Alma", "required": true }
+  ],
+  "information": [
+    { "code": "inst_pet", "name": "Institución que hace la petición", "type": "text",
+      "note": "", "required": true }
+  ]
+}
+```
+
+- `deliverables` es lo que el formato pide **producir**; `information`, lo que pide
+  **declarar**. La agrupación se guarda en vez de derivarse: el constructor de formatos y la
+  pantalla de captura muestran dos listas, y con un arreglo plano las armaban filtrando.
+- `code` es `snake_case` y único **entre ambas secciones**. Es la llave en `requests.data`, el
+  destino que nombra el mapeo de columnas de una hoja (§2.10) y la `key` bajo la que el valor
+  cae en `project_field_values`; ninguno de los tres sabe de qué sección salió, así que el
+  espacio de nombres es uno solo.
+- `type` es un `data_types.code`; la coerción por la que pasa un valor la decide el tipo. Las
+  lecturas agregan `baseType` del catálogo, para el cliente que solo distingue texto de
+  número.
+- `note` es la indicación humana del campo; puede ir vacía. `required` rechaza la solicitud
+  sin ese valor.
+- Ambas llaves de sección son obligatorias; una puede ir vacía, las dos no.
+
+**Las secciones llevan arreglos y no objetos indexados por código**, y el motivo es del
+almacenamiento: `jsonb` **no conserva el orden de las llaves de un objeto** —las reordena por
+longitud y luego por bytes—, así que un objeto indexado por código perdería el orden de
+captura y habría que reponerlo con un atributo `order` mantenido a mano. El arreglo lo
+conserva sin pedir nada.
+
+**No hay bandera `propagate`, y eso es una decisión.** Una versión anterior marcaba campo por
+campo cuál salía hacia `project_field_values`. La propagación existe justamente para que las
+herramientas posteriores —etiquetas, existencias, facturación— lean los datos del proyecto sin
+recaptura (`RF-FLW-06`, `RF-IMP-05`), y en la organización no hay valores reservados que
+justifiquen excluir alguno: **todo valor capturado viaja**, cada uno bajo su código. Un campo
+es, en palabras de la coordinación, "simplemente un valor con su clave".
 
 Las plantillas que pide `RF-SOL-01` ("conforme crecen las coordinaciones") son **clones**:
 `POST /api/schemas/:id/clone` copia los campos de la última versión a la versión 1 de una
 identidad nueva. Un catálogo de grupos de campos que los formatos compusieran se descartó:
-añade una tabla y una regla de propagación para una reutilización que la copia ya da, y
-los formatos que nombran las entrevistas comparten un puñado de campos, no bloques.
-`schema-field-shape` siembra cinco formatos de partida (`solicitud_general`,
+añade una tabla y una regla de propagación para una reutilización que la copia ya da, y los
+formatos que nombran las entrevistas comparten un puñado de campos, no bloques.
+`schema-field-sections` siembra cinco formatos de partida (`solicitud_general`,
 `papel_institucional`, `impresion`, `diseno_grafico`, `fotografia`) precisamente para
 clonarlos.
 
@@ -322,7 +349,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 
 | RF                              | Cubierto por                                                                                                        | Estado |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------ |
-| RF-SOL-01                       | `schemas`, `schema_versions.fields`, clonado (§2.2, §2.3)                                                    | ◑ API completa; falta la UI de armado |
+| RF-SOL-01                       | `schemas`, `schema_versions.fields` por secciones, clonado (§2.2, §2.3)                                      | ◑ API completa; falta la UI de armado |
 | RF-SOL-02                       | `requests.area_id` como puente; después`schema_versions` → flujo (§2.5)                                     | ◑ |
 | RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8)                                                   | ✔ |
 | RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3)                                                 | ✔ |

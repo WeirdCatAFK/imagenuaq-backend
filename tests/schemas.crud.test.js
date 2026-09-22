@@ -24,11 +24,18 @@ describe('/api/schemas', () => {
 
   const ACCOUNTS = ['coordinacion@uaq.mx', 'disenador@uaq.mx'];
 
-  const FIELDS = [
-    { code: 'dependencia', name: 'Dependencia', type: 'text', section: 'information', required: true, propagate: true },
-    { code: 'tiraje', name: 'Tiraje', type: 'quantity', section: 'deliverables', required: true },
-    { code: 'fecha_entrega', name: 'Fecha de entrega', type: 'date', section: 'deliverables' },
-  ];
+  const FIELDS = {
+    deliverables: [
+      { code: 'tiraje', name: 'Tiraje', type: 'quantity', note: 'Total de piezas', required: true },
+      { code: 'fecha_entrega', name: 'Fecha de entrega', type: 'date' },
+    ],
+    information: [
+      { code: 'dependencia', name: 'Dependencia', type: 'text', note: '', required: true },
+    ],
+  };
+
+  /** FIELDS with one section replaced, for the validation cases. */
+  const withSection = (section, list) => ({ ...FIELDS, [section]: list });
 
   before(async () => {
     server = await startServer();
@@ -63,13 +70,21 @@ describe('/api/schemas', () => {
       assert.equal(schema.version, 1);
       assert.equal(schema.isActive, true);
       assert.ok(schema.schemaVersionId);
-      // Defaults filled in and canonical: every field carries the whole shape.
-      assert.deepEqual(schema.fields[1], {
-        code: 'tiraje', name: 'Tiraje', type: 'quantity', section: 'deliverables',
-        required: true, propagate: false, options: {},
+
+      // Both sections come back, in order, with the defaults filled in and baseType
+      // attached from the data_types catalogue.
+      assert.deepEqual(Object.keys(schema.fields), ['deliverables', 'information']);
+      assert.deepEqual(schema.fields.deliverables.map((f) => f.code), ['tiraje', 'fecha_entrega']);
+      assert.deepEqual(schema.fields.deliverables[0], {
+        code: 'tiraje', name: 'Tiraje', type: 'quantity', note: 'Total de piezas',
+        required: true, baseType: 'number',
       });
-      assert.equal(schema.fields[0].propagate, true);
-      assert.equal(schema.fields[2].required, false);
+      // note and required defaulted, not dropped.
+      assert.deepEqual(schema.fields.deliverables[1], {
+        code: 'fecha_entrega', name: 'Fecha de entrega', type: 'date', note: '',
+        required: false, baseType: 'date',
+      });
+      assert.equal(schema.fields.information[0].code, 'dependencia');
     });
 
     test('the publisher is the session, whatever the body says', async () => {
@@ -99,15 +114,19 @@ describe('/api/schemas', () => {
     });
 
     const BAD_FIELDS = [
-      ['a code with spaces', [{ ...FIELDS[0], code: 'con espacio' }], /snake_case/],
-      ['an uppercase code', [{ ...FIELDS[0], code: 'Dependencia' }], /snake_case/],
-      ['a repeated code', [FIELDS[0], { ...FIELDS[1], code: 'dependencia' }], /repeated/],
-      ['an unknown type', [{ ...FIELDS[0], type: 'moneda' }], /does not exist/],
-      ['a bad section', [{ ...FIELDS[0], section: 'extras' }], /section must be/],
-      ['a non-boolean propagate', [{ ...FIELDS[0], propagate: 'yes' }], /propagate must be a boolean/],
-      ['options that are not an object', [{ ...FIELDS[0], options: [1] }], /options must be an object/],
-      ['an empty list', [], /must not be empty/],
-      ['no name', [{ ...FIELDS[0], name: ' ' }], /must have a name/],
+      ['a code with spaces', withSection('information', [{ code: 'con espacio', name: 'X', type: 'text' }]), /snake_case/],
+      ['an uppercase code', withSection('information', [{ code: 'Dependencia', name: 'X', type: 'text' }]), /snake_case/],
+      ['an unknown type', withSection('information', [{ code: 'x', name: 'X', type: 'moneda' }]), /does not exist/],
+      ['a non-boolean required', withSection('information', [{ code: 'x', name: 'X', type: 'text', required: 'si' }]), /required must be a boolean/],
+      ['a note that is not a string', withSection('information', [{ code: 'x', name: 'X', type: 'text', note: 5 }]), /note must be a string/],
+      ['no name', withSection('information', [{ code: 'x', name: ' ', type: 'text' }]), /must have a name/],
+      ['a field that is not an object', withSection('information', ['dependencia']), /must be an object/],
+      // The shape of the document itself.
+      ['a flat array', [{ code: 'x', name: 'X', type: 'text' }], /not a flat array/],
+      ['a missing section', { deliverables: [{ code: 'x', name: 'X', type: 'text' }] }, /"information" is required/],
+      ['a section that is not an array', { deliverables: {}, information: [] }, /"deliverables" is required and must be an array/],
+      ['an unknown section', { ...FIELDS, extras: [] }, /Unknown section "extras"/],
+      ['both sections empty', { deliverables: [], information: [] }, /at least one field/],
     ];
 
     for (const [label, fields, message] of BAD_FIELDS) {
@@ -117,6 +136,34 @@ describe('/api/schemas', () => {
         assert.match(res.body.error.message, message);
       });
     }
+
+    test('refuses a code repeated ACROSS the two sections', async () => {
+      // One namespace: the code is the key in requests.data and in project_field_values,
+      // and neither knows which section it came from.
+      const res = await create({
+        code: `${TEST_SCHEMA_PREFIX}choque`,
+        name: 'Choque',
+        fields: {
+          deliverables: [{ code: 'tiraje', name: 'Tiraje', type: 'quantity' }],
+          information: [{ code: 'tiraje', name: 'Tiraje otra vez', type: 'text' }],
+        },
+      });
+
+      assert.equal(res.status, 400);
+      assert.match(res.body.error.message, /repeated; codes are unique across both sections/);
+    });
+
+    test('accepts an empty section as long as the other is not', async () => {
+      const res = await create({
+        code: `${TEST_SCHEMA_PREFIX}solo_info`,
+        name: 'Solo informacion',
+        fields: { deliverables: [], information: [{ code: 'dependencia', name: 'Dependencia', type: 'text' }] },
+      });
+
+      assert.equal(res.status, 201);
+      assert.deepEqual(res.body.schema.fields.deliverables, []);
+      assert.equal(res.body.schema.fields.information.length, 1);
+    });
 
     test('needs schema.manage', async () => {
       const res = await create({ code: `${TEST_SCHEMA_PREFIX}nope`, name: 'No', fields: FIELDS }, workerToken);
@@ -132,7 +179,12 @@ describe('/api/schemas', () => {
       assert.equal(res.status, 200);
       const codes = res.body.schemas.map((s) => s.code);
       assert.ok(codes.includes(`${TEST_SCHEMA_PREFIX}uno`));
-      assert.ok(codes.includes('papel_institucional'), 'the seeded starter format');
+      const starter = res.body.schemas.find((x) => x.code === 'papel_institucional');
+      assert.ok(starter, 'the seeded starter format');
+      // The seeds were rewritten into the sections shape by schema-field-sections.
+      assert.deepEqual(Object.keys(starter.fields), ['deliverables', 'information']);
+      assert.ok(starter.fields.deliverables.some((f) => f.code === 'tiraje' && f.required === true));
+      assert.ok(starter.fields.information.some((f) => f.code === 'numero_orden'));
     });
 
     test('GET /:id/versions lists newest first and GET /versions/:id reads one', async () => {
@@ -147,13 +199,14 @@ describe('/api/schemas', () => {
       const list = await server.get(`/api/schemas/${schema.id}/versions`, { token: workerToken });
       assert.equal(list.status, 200);
       assert.deepEqual(list.body.versions.map((v) => v.version), [2, 1]);
-      // Version 1 is what it was: three fields were published on v2 only.
-      assert.equal(list.body.versions[1].fields.length, 1);
+      // Version 1 is what it was: the fixture's one-per-section document, not v2's.
+      assert.equal(list.body.versions[1].fields.deliverables.length, 1);
+      assert.equal(list.body.versions[1].fields.information.length, 1);
 
       const one = await server.get(`/api/schemas/versions/${v2.body.version.id}`, { token: workerToken });
       assert.equal(one.status, 200);
       assert.equal(one.body.version.schemaCode, `${TEST_SCHEMA_PREFIX}versiones`);
-      assert.equal(one.body.version.fields.length, 3);
+      assert.equal(one.body.version.fields.deliverables.length, 2);
     });
 
     test('404s on a missing schema or version', async () => {
@@ -167,7 +220,10 @@ describe('/api/schemas', () => {
     test('a published version cannot be edited in place, even by SQL', async () => {
       const schema = await createSchema('inmutable');
       await assert.rejects(
-        sql('update schema_versions set fields = $2::jsonb where id = $1', [schema.schema_version_id, '[]']),
+        sql('update schema_versions set fields = $2::jsonb where id = $1', [
+          schema.schema_version_id,
+          '{"deliverables": [], "information": []}',
+        ]),
         /cannot be edited/,
       );
     });

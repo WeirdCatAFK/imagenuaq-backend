@@ -215,9 +215,14 @@ export async function createSchema(code, fields = null, name = null) {
   return query.createSchema({
     code: `${TEST_SCHEMA_PREFIX}${code}`,
     name: name ?? `Formato ${code}`,
-    fields: fields ?? [
-      { code: 'titulo', name: 'Título', type: 'text', section: 'information', required: true, propagate: false, options: {} },
-    ],
+    fields: fields ?? {
+      deliverables: [
+        { code: 'entregable', name: 'Entregable', type: 'text', note: '', required: true },
+      ],
+      information: [
+        { code: 'dependencia', name: 'Dependencia', type: 'text', note: '', required: true },
+      ],
+    },
     publishedBy: null,
   });
 }

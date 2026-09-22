@@ -1,22 +1,35 @@
 // Tier 3: request formats (RF-SOL-01), the "schemas" of DATAMODEL.md 2.2 and 2.3.
 //
 // A schema is a stable identity (code, name, active flag); what it asks for lives in
-// `schema_versions.fields`, an ordered array that is immutable once published -- the
-// trigger in projects-spine rejects the UPDATE, so "editing" a format is publishing the
-// next version. Requests, projects and sheets point at a version, never at the schema, so
+// `schema_versions.fields`, a document that is immutable once published -- the trigger in
+// projects-spine rejects the UPDATE, so "editing" a format is publishing the next version. Requests, projects and sheets point at a version, never at the schema, so
 // what was captured under v1 still reads as v1 after v2 exists.
 //
-// A field is `{ code, name, type, section, required, propagate, options }`:
-//   code      snake_case, unique in the version. It is the key in `requests.data`, the
-//             target a sheet's column map names, and the `project_field_values.key` the
-//             value lands under when it propagates -- hence the same character set.
-//   type      a `data_types.code`; the coercion a value goes through is chosen by it.
-//   section   `deliverables` (something to produce) or `information` (something to know).
-//   required  the request is refused without it.
-//   propagate the value leaves the request and becomes a `project_field_values` row when
-//             the request is converted (RF-FLW-06, RF-IMP-05). Independent of `section`.
-//   options   free object for the type's extras (a select's choices, a hint). Not validated
-//             beyond being an object; the builder owns its meaning.
+// `fields` is two sections, each an ordered array:
+//
+//   { "deliverables": [ { code, name, type, note, required }, ... ],
+//     "information":  [ ... ] }
+//
+//   deliverables  what the format asks the area to produce.
+//   information   what it asks the requester to state.
+//   code          snake_case, unique **across both sections**. It is the key in
+//                 `requests.data`, the target a sheet's column map names, and the
+//                 `project_field_values.key` the value lands under -- hence one namespace
+//                 and the narrow character set.
+//   type          a `data_types.code`; the coercion a value goes through is chosen by it.
+//                 Reads also carry `baseType` from the catalogue, so a client that only
+//                 cares about string-vs-number need not know the codes.
+//   note          the human hint ("PDF con la firma de Alma"); may be empty.
+//   required      the request is refused without it.
+//
+// The sections hold arrays rather than objects keyed by code because `jsonb` does not
+// preserve object key order -- it sorts keys by length then bytes -- so a keyed object
+// loses capture order and would need an `order` attribute maintained by hand.
+//
+// There is no `propagate` flag: **every** captured value becomes a `project_field_values`
+// row when the request is converted (RF-FLW-06, RF-IMP-05). The propagation exists so the
+// later tools -- labels, stock, invoicing -- can read the project's data, and there are no
+// reserved values in the organisation that would justify excluding one.
 //
 // Templates (RF-SOL-01, "conforme crecen las coordinaciones") are clones: `clone()` copies
 // the latest version's fields into a new identity's version 1. A field-group catalogue
@@ -40,7 +53,9 @@ const NAME_MAX = 300;
 
 /** Field codes are keys elsewhere (see header), so the character set is the narrow one. */
 const FIELD_CODE = /^[a-z][a-z0-9_]{0,99}$/;
-const SECTIONS = new Set(["deliverables", "information"]);
+
+/** The two section keys, in the order a form renders them. */
+export const SECTIONS = ["deliverables", "information"];
 
 class Schemas {
   /**
@@ -69,7 +84,7 @@ class Schemas {
         after: row,
       });
 
-      return shapeSchema(row);
+      return shapeSchema(row, await baseTypes());
     } catch (err) {
       throw translate(err);
     }
@@ -99,7 +114,7 @@ class Schemas {
         after: { ...row, cloned_from: id },
       });
 
-      return shapeSchema(row);
+      return shapeSchema(row, await baseTypes());
     } catch (err) {
       throw translate(err);
     }
@@ -109,26 +124,28 @@ class Schemas {
   async get(schemaId) {
     const row = await query.getSchema(requireId(schemaId, "schemaId"));
     if (!row) throw ApiError.notFound("Schema not found.");
-    return shapeSchema(row);
+    return shapeSchema(row, await baseTypes());
   }
 
   /** Every schema with its latest version, active or not; the client filters. */
   async getAll() {
-    return (await query.getSchemas()).map(shapeSchema);
+    const types = await baseTypes();
+    return (await query.getSchemas()).map((row) => shapeSchema(row, types));
   }
 
   /** Every version of a schema, newest first. @throws {ApiError} 404. */
   async getVersions(schemaId) {
     const id = requireId(schemaId, "schemaId");
     if (!(await query.getSchema(id))) throw ApiError.notFound("Schema not found.");
-    return (await query.getSchemaVersions(id)).map(shapeSchemaVersion);
+    const types = await baseTypes();
+    return (await query.getSchemaVersions(id)).map((row) => shapeSchemaVersion(row, types));
   }
 
   /** One version by its id, with the schema it belongs to. @throws {ApiError} 404. */
   async getVersion(versionId) {
     const row = await query.getSchemaVersion(requireId(versionId, "versionId"));
     if (!row) throw ApiError.notFound("Schema version not found.");
-    return shapeSchemaVersion(row);
+    return shapeSchemaVersion(row, await baseTypes());
   }
 
   /**
@@ -158,7 +175,7 @@ class Schemas {
         after: row,
       });
 
-      return shapeSchemaVersion(row);
+      return shapeSchemaVersion(row, await baseTypes());
     } catch (err) {
       throw translate(err);
     }
@@ -217,7 +234,7 @@ class Schemas {
       after: row,
     });
 
-    return shapeSchema(row);
+    return shapeSchema(row, await baseTypes());
   }
 }
 
@@ -247,81 +264,138 @@ function requireId(value, field) {
 }
 
 /**
- * Checks a field array against the shape in the header and returns it normalised --
- * trimmed strings, defaults filled -- so what is stored is canonical whatever the client
- * sent. Exported for the modules that validate a field list they did not receive from a
- * client (a clone, a seed check).
+ * Checks a `fields` document against the shape in the header and returns it normalised --
+ * trimmed strings, `note` and `required` filled in -- so what is stored is canonical
+ * whatever the client sent. Exported for the modules that validate a document they did not
+ * receive from a client.
  *
+ * @param {{ deliverables: object[], information: object[] }} fields
+ * @returns {Promise<{ deliverables: object[], information: object[] }>}
  * @throws {ApiError} 400 naming the field and what is wrong with it.
  */
 export async function validateFields(fields) {
-  if (!Array.isArray(fields)) throw ApiError.badRequest("Fields must be an array.");
-  if (fields.length === 0) throw ApiError.badRequest("Fields must not be empty.");
+  if (Array.isArray(fields)) {
+    throw ApiError.badRequest(
+      'Fields must be an object with "deliverables" and "information" arrays, not a flat array.',
+    );
+  }
+  if (!fields || typeof fields !== "object") {
+    throw ApiError.badRequest(
+      'Fields must be an object with "deliverables" and "information" arrays.',
+    );
+  }
 
+  for (const key of Object.keys(fields)) {
+    if (!SECTIONS.includes(key)) {
+      throw ApiError.badRequest(
+        `Unknown section "${key}": fields may only hold "deliverables" and "information".`,
+      );
+    }
+  }
+
+  for (const section of SECTIONS) {
+    if (!Array.isArray(fields[section])) {
+      throw ApiError.badRequest(`Section "${section}" is required and must be an array.`);
+    }
+  }
+
+  if (SECTIONS.every((section) => fields[section].length === 0)) {
+    throw ApiError.badRequest("A format must define at least one field.");
+  }
+
+  // One namespace across both sections: the code is the key in requests.data and in
+  // project_field_values, and neither knows which section it came from.
   const seen = new Set();
-  const out = [];
+  const out = { deliverables: [], information: [] };
 
-  for (const field of fields) {
-    if (!field || typeof field !== "object" || Array.isArray(field)) {
-      throw ApiError.badRequest("Each field must be an object.");
+  for (const section of SECTIONS) {
+    for (const field of fields[section]) {
+      out[section].push(await validateField(field, section, seen));
     }
-
-    const code = typeof field.code === "string" ? field.code.trim() : "";
-    if (!code) throw ApiError.badRequest("Each field must have a code.");
-    if (!FIELD_CODE.test(code)) {
-      throw ApiError.badRequest(
-        `Field "${code}" code must be snake_case: a lowercase letter, then letters, digits or _ (100 max).`,
-      );
-    }
-    if (seen.has(code)) throw ApiError.badRequest(`Field "${code}" is repeated.`);
-    seen.add(code);
-
-    const name = typeof field.name === "string" ? field.name.trim() : "";
-    if (!name) throw ApiError.badRequest(`Field "${code}" must have a name.`);
-
-    const type = typeof field.type === "string" ? field.type.trim().toLowerCase() : "";
-    if (!type) throw ApiError.badRequest(`Field "${code}" must have a type.`);
-
-    if (!SECTIONS.has(field.section)) {
-      throw ApiError.badRequest(
-        `Field "${code}" section must be "deliverables" or "information".`,
-      );
-    }
-
-    for (const flag of ["required", "propagate"]) {
-      if (field[flag] !== undefined && typeof field[flag] !== "boolean") {
-        throw ApiError.badRequest(`Field "${code}" ${flag} must be a boolean.`);
-      }
-    }
-
-    if (
-      field.options !== undefined &&
-      (field.options === null || typeof field.options !== "object" || Array.isArray(field.options))
-    ) {
-      throw ApiError.badRequest(`Field "${code}" options must be an object.`);
-    }
-
-    const dataType = await query.getDataType(type);
-    if (!dataType || !dataType.is_active) {
-      throw ApiError.badRequest(`Data type "${type}" does not exist or is inactive.`);
-    }
-
-    out.push({
-      code,
-      name,
-      type,
-      section: field.section,
-      required: field.required ?? false,
-      propagate: field.propagate ?? false,
-      options: field.options ?? {},
-    });
   }
 
   return out;
 }
 
+/** One field of one section. @throws {ApiError} 400. */
+async function validateField(field, section, seen) {
+  if (!field || typeof field !== "object" || Array.isArray(field)) {
+    throw ApiError.badRequest(`Each field of "${section}" must be an object.`);
+  }
+
+  const code = typeof field.code === "string" ? field.code.trim() : "";
+  if (!code) throw ApiError.badRequest(`Each field of "${section}" must have a code.`);
+  if (!FIELD_CODE.test(code)) {
+    throw ApiError.badRequest(
+      `Field "${code}" code must be snake_case: a lowercase letter, then letters, digits or _ (100 max).`,
+    );
+  }
+  if (seen.has(code)) {
+    throw ApiError.badRequest(`Field "${code}" is repeated; codes are unique across both sections.`);
+  }
+  seen.add(code);
+
+  const name = typeof field.name === "string" ? field.name.trim() : "";
+  if (!name) throw ApiError.badRequest(`Field "${code}" must have a name.`);
+
+  const type = typeof field.type === "string" ? field.type.trim().toLowerCase() : "";
+  if (!type) throw ApiError.badRequest(`Field "${code}" must have a type.`);
+
+  if (field.required !== undefined && typeof field.required !== "boolean") {
+    throw ApiError.badRequest(`Field "${code}" required must be a boolean.`);
+  }
+
+  if (field.note !== undefined && field.note !== null && typeof field.note !== "string") {
+    throw ApiError.badRequest(`Field "${code}" note must be a string.`);
+  }
+
+  const dataType = await query.getDataType(type);
+  if (!dataType || !dataType.is_active) {
+    throw ApiError.badRequest(`Data type "${type}" does not exist or is inactive.`);
+  }
+
+  return {
+    code,
+    name,
+    type,
+    note: (field.note ?? "").trim(),
+    required: field.required ?? false,
+  };
+}
+
+/**
+ * Both sections as one list, each field carrying the `section` it came from. What the
+ * validators, the column map and the convert step want: they care about the codes, not
+ * about how a form groups them.
+ *
+ * @param {{ deliverables: object[], information: object[] }} fields
+ * @returns {object[]}
+ */
+export function fieldList(fields) {
+  return SECTIONS.flatMap((section) =>
+    (fields?.[section] ?? []).map((field) => ({ ...field, section })),
+  );
+}
+
+/**
+ * `data_types.code` -> `base_type`, read once per response rather than per field. A client
+ * that only cares about string-vs-number reads `baseType` and never learns the catalogue.
+ */
+async function baseTypes() {
+  const rows = await query.getDataTypes();
+  return new Map(rows.map((row) => [row.code, row.base_type]));
+}
+
+/** The stored document with `baseType` attached to every field. */
+function withBaseTypes(fields, types) {
+  if (!fields) return fields ?? null;
+  const decorate = (list) =>
+    (list ?? []).map((field) => ({ ...field, baseType: types.get(field.type) ?? null }));
+  return { deliverables: decorate(fields.deliverables), information: decorate(fields.information) };
+}
+
 /** snake_case row in, camelCase JSON out. The version keys are null on a schema with none. */
-function shapeSchema(row) {
+function shapeSchema(row, types) {
   return {
     id: row.id,
     code: row.code,
@@ -329,19 +403,19 @@ function shapeSchema(row) {
     isActive: row.is_active,
     createdAt: row.created_at,
     version: row.version ?? null,
-    fields: row.fields ?? null,
+    fields: row.fields ? withBaseTypes(row.fields, types) : null,
     publishedAt: row.published_at ?? null,
     publishedBy: row.published_by ?? null,
     schemaVersionId: row.schema_version_id ?? null,
   };
 }
 
-export function shapeSchemaVersion(row) {
+export function shapeSchemaVersion(row, types) {
   return {
     id: row.id,
     schemaId: row.schema_id,
     version: row.version,
-    fields: row.fields,
+    fields: withBaseTypes(row.fields, types),
     publishedAt: row.published_at,
     publishedBy: row.published_by,
     schemaCode: row.schema_code ?? undefined,

@@ -51,10 +51,13 @@ describe('POST /api/schemas/:id/clone', () => {
     const v2 = await server.post(`/api/schemas/${source.id}/versions`, {
       token: adminToken,
       body: {
-        fields: [
-          { code: 'evento', name: 'Evento', type: 'text', section: 'deliverables', required: true, propagate: true },
-          { code: 'fecha', name: 'Fecha', type: 'date', section: 'deliverables' },
-        ],
+        fields: {
+          deliverables: [
+            { code: 'evento', name: 'Evento', type: 'text', required: true },
+            { code: 'fecha', name: 'Fecha', type: 'date' },
+          ],
+          information: [],
+        },
       },
     });
     assert.equal(v2.status, 201);
@@ -66,7 +69,8 @@ describe('POST /api/schemas/:id/clone', () => {
     assert.equal(schema.code, `${TEST_SCHEMA_PREFIX}copia`);
     assert.equal(schema.version, 1);
     assert.equal(schema.publishedBy, admin.id);
-    assert.deepEqual(schema.fields.map((f) => f.code), ['evento', 'fecha']);
+    assert.deepEqual(schema.fields.deliverables.map((f) => f.code), ['evento', 'fecha']);
+    assert.deepEqual(schema.fields.information, []);
     assert.notEqual(schema.id, source.id);
 
     // The copy is its own identity: a version on it does not touch the source.
@@ -83,7 +87,7 @@ describe('POST /api/schemas/:id/clone', () => {
     const res = await clone(starter.id, { code: `${TEST_SCHEMA_PREFIX}papel_fcq`, name: 'Papel FCQ' });
 
     assert.equal(res.status, 201);
-    assert.ok(res.body.schema.fields.some((f) => f.code === 'tiraje' && f.propagate === true));
+    assert.ok(res.body.schema.fields.deliverables.some((f) => f.code === 'tiraje' && f.required === true));
   });
 
   test('refuses a taken code with 409 and leaves nothing behind', async () => {
