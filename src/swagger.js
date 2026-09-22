@@ -224,6 +224,20 @@ export function buildOpenApiDocument() {
           'signed-in user; writes require `schema.manage`.',
       },
       {
+        name: 'requesters',
+        description:
+          'The requesting party is a string on the request and the project, not a row ' +
+          '(RF-SOL-07). This is the autocomplete over the strings already in use, so a ' +
+          'correction at conversion converges on one spelling instead of adding another.',
+      },
+      {
+        name: 'statuses',
+        description:
+          'The status catalogue, configurable per area (RF-EST-02). `areaId` null is the ' +
+          'global catalogue every area starts from. Reads need only a session; writes need ' +
+          '`status.manage`.',
+      },
+      {
         name: 'data-types',
         description:
           'The catalogue of field types a format may use. Read-only: a type is a coercion ' +
@@ -909,6 +923,58 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['sheet', 'kind', 'name', 'headers', 'rows'],
+        },
+        Requester: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', example: 'Facultad de Química' },
+            uses: { type: 'integer', description: 'Requests plus projects carrying it.', example: 12 },
+          },
+          required: ['name', 'uses'],
+        },
+        Status: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 3 },
+            areaId: { type: ['integer', 'null'], description: 'Null: the global catalogue.' },
+            areaName: { type: ['string', 'null'], readOnly: true },
+            code: { type: 'string', example: 'esperando_vb' },
+            label: { type: 'string', example: 'Esperando visto bueno' },
+            sortOrder: { type: 'integer', example: 30 },
+            isTerminal: {
+              type: 'boolean',
+              description: 'RF-EST-05 validates closing with pending work against these.',
+            },
+            isActive: { type: 'boolean' },
+            isGlobal: { type: 'boolean', readOnly: true },
+          },
+          required: ['id', 'code', 'label', 'sortOrder', 'isTerminal', 'isActive'],
+        },
+        CreateStatusRequest: {
+          type: 'object',
+          properties: {
+            areaId: {
+              type: ['integer', 'null'],
+              description: 'Omitted or null creates a global status. An area may reuse a global code.',
+            },
+            code: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,49}$', example: 'en_prensa' },
+            label: { type: 'string', maxLength: 200, example: 'En prensa' },
+            sortOrder: { type: 'integer', default: 0 },
+            isTerminal: { type: 'boolean', default: false },
+          },
+          required: ['code', 'label'],
+        },
+        UpdateStatusRequest: {
+          type: 'object',
+          description:
+            'At least one key. `code` and `areaId` are not editable: they are what existing ' +
+            'requests and projects were filed under.',
+          properties: {
+            label: { type: 'string', maxLength: 200 },
+            sortOrder: { type: 'integer' },
+            isTerminal: { type: 'boolean' },
+            isActive: { type: 'boolean' },
+          },
         },
         DataType: {
           type: 'object',
@@ -2373,6 +2439,109 @@ export function buildOpenApiDocument() {
         },
       },
       
+      // --- requesters ---
+
+      '/api/requesters': {
+        get: {
+          tags: ['requesters'],
+          summary: 'Requester strings already in use, most used first',
+          description:
+            'Needs request.read. Distinct across requests and projects. `q` matches by ' +
+            'prefix, case-insensitively, which is what the index on lower(requester) serves.',
+          parameters: [
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Prefix of the name.' },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          ],
+          responses: {
+            200: wrapped('The strings in use.', 'requesters', 'Requester', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+
+      // --- statuses ---
+
+      '/api/statuses': {
+        get: {
+          tags: ['statuses'],
+          summary: 'The catalogue, global plus one area',
+          description:
+            'Without `areaId`, the global catalogue alone. With it, that area\'s statuses and ' +
+            'the global ones, globals first then by sortOrder.',
+          parameters: [
+            { name: 'areaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            {
+              name: 'includeInactive',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: 'Send `true` to include deactivated statuses.',
+            },
+          ],
+          responses: {
+            200: wrapped('The statuses.', 'statuses', 'Status', true),
+            400: errorResponse('A bad areaId.', 'areaId must be a positive integer.'),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['statuses'],
+          summary: 'Add a status to a catalogue',
+          description: 'Needs status.manage.',
+          requestBody: jsonBody('CreateStatusRequest'),
+          responses: {
+            201: wrapped('The status.', 'status', 'Status'),
+            400: errorResponse('A bad code, label or area.', 'code must be snake_case: a lowercase letter, then letters, digits or _ (50 max).'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The code exists in that catalogue.', 'That catalogue already has a status with that code.'),
+          },
+        },
+      },
+      '/api/statuses/{id}': {
+        get: {
+          tags: ['statuses'],
+          summary: 'One status',
+          parameters: [pathId('id', 'statuses.id')],
+          responses: {
+            200: wrapped('The status.', 'status', 'Status'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid status id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such status.', 'Status not found.'),
+          },
+        },
+        patch: {
+          tags: ['statuses'],
+          summary: 'Edit a status',
+          parameters: [pathId('id', 'statuses.id')],
+          requestBody: jsonBody('UpdateStatusRequest'),
+          responses: {
+            200: wrapped('The status after the change.', 'status', 'Status'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update: send label, sortOrder, isTerminal or isActive.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such status.', 'Status not found.'),
+          },
+        },
+        delete: {
+          tags: ['statuses'],
+          summary: 'Deactivate a status',
+          description:
+            'Needs status.manage. Deactivates rather than deletes: requests and projects ' +
+            'reference the row, so it leaves the pickers without rewriting history.',
+          parameters: [pathId('id', 'statuses.id')],
+          responses: {
+            200: wrapped('The deactivated status.', 'status', 'Status'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid status id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such status.', 'Status not found.'),
+            409: errorResponse('It is already inactive.', 'Status is already inactive.'),
+          },
+        },
+      },
+
       // --- data types ---
 
       '/api/data-types': {

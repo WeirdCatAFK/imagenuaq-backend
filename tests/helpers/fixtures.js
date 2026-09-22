@@ -61,8 +61,9 @@ export async function reset() {
 // moment a fixture is deleted and re-created.
 export const TEST_PREFIX = 'zz-test:';
 export const TEST_PERMISSION_PREFIX = 'zz.test.';
-// Schema codes are snake_case by rule, so their prefix has to be one too.
+// Schema and status codes are snake_case by rule, so their prefixes have to be too.
 export const TEST_SCHEMA_PREFIX = 'zztest_';
+export const TEST_STATUS_PREFIX = 'zztest_';
 
 // Wipe what a case created, keeping the accounts the file logs in with.
 //
@@ -103,6 +104,17 @@ export async function resetCases(keepEmails = []) {
   await sql('delete from sheets');
   await sql('delete from microsoft_accounts');
   await sql('delete from microsoft_app');
+  // The spine rows a test inserted directly, before the formats they point at.
+  await sql('delete from approvals');
+  await sql('delete from project_field_values');
+  await sql('delete from project_stages');
+  await sql('delete from requests');
+  await sql('delete from projects');
+  // Statuses a test added. The global catalogue is seeded by projects-spine and
+  // status-manage and must survive, so only area rows and prefixed codes go.
+  await sql('delete from statuses where area_id is not null or code like $1', [
+    `${TEST_STATUS_PREFIX}%`,
+  ]);
   // Formats a test published, after sheets (which point at a version). The starter formats
   // seeded by schema-field-shape carry real codes and stay.
   await sql(

@@ -1022,6 +1022,120 @@ class Query {
     return rows;
   }
 
+  //--- REQUESTERS (RF-SOL-07) ---
+
+  /**
+   * The requester strings already in use, for the autocomplete that keeps a person from
+   * inventing a fifth spelling. Distinct across requests and projects, prefix-matched so
+   * the index on lower(requester) is usable.
+   */
+  async listRequesters({ q = null, limit = 20 } = {}) {
+    return this.#rows(
+      `select requester, count(*)::int as uses
+      from (
+        select requester from requests where requester is not null and deleted_at is null
+        union all
+        select requester from projects where requester is not null and deleted_at is null
+      ) used
+      where $1::text is null or lower(requester) like lower($1) || '%'
+      group by requester
+      order by count(*) desc, requester
+      limit $2`,
+      [q, limit],
+    );
+  }
+
+  //--- STATUSES (RF-EST-02) ---
+
+  /**
+   * The catalogue an area works with: its own rows plus the global ones. Without an area,
+   * the global catalogue alone.
+   */
+  async listStatuses({ areaId = null, includeInactive = false } = {}) {
+    return this.#rows(
+      `select
+        s.id, s.area_id, s.code, s.label, s.sort_order, s.is_terminal, s.is_active,
+        a.name as area_name
+      from statuses s
+      left join areas a on a.id = s.area_id
+      where (s.area_id is null or s.area_id = $1::bigint)
+        and ($2 or s.is_active)
+      order by s.area_id nulls first, s.sort_order, s.id`,
+      [areaId, includeInactive],
+    );
+  }
+
+  async getStatus(statusId) {
+    const [row] = await this.#rows(
+      `select
+        s.id, s.area_id, s.code, s.label, s.sort_order, s.is_terminal, s.is_active,
+        a.name as area_name
+      from statuses s
+      left join areas a on a.id = s.area_id
+      where s.id = $1`,
+      [statusId],
+    );
+    return row ?? null;
+  }
+
+  /** A code in one catalogue. `areaId` null looks in the global one, matching the two partial indexes. */
+  async findStatusByCode(code, areaId = null) {
+    const [row] = await this.#rows(
+      `select id, area_id, code, label, sort_order, is_terminal, is_active
+      from statuses
+      where code = $1
+        and (($2::bigint is null and area_id is null) or area_id = $2::bigint)
+      limit 1`,
+      [code, areaId],
+    );
+    return row ?? null;
+  }
+
+  async createStatus({
+    areaId = null,
+    code,
+    label,
+    sortOrder = 0,
+    isTerminal = false,
+  }) {
+    const [row] = await this.#rows(
+      `insert into statuses (area_id, code, label, sort_order, is_terminal)
+      values ($1, $2, $3, $4, $5)
+      returning id, area_id, code, label, sort_order, is_terminal, is_active`,
+      [areaId, code, label, sortOrder, isTerminal],
+    );
+    return row;
+  }
+
+  async updateStatus(
+    statusId,
+    { label = null, sortOrder = null, isTerminal = null, isActive = null },
+  ) {
+    const [row] = await this.#rows(
+      `update statuses
+        set label       = coalesce($2, label),
+            sort_order  = coalesce($3, sort_order),
+            is_terminal = coalesce($4, is_terminal),
+            is_active   = coalesce($5, is_active)
+      where id = $1
+      returning id, area_id, code, label, sort_order, is_terminal, is_active`,
+      [statusId, label, sortOrder, isTerminal, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** Deactivates: the rows are referenced by requests and projects, so they never leave. */
+  async deactivateStatus(statusId) {
+    const [row] = await this.#rows(
+      `update statuses
+        set is_active = false
+      where id = $1
+      returning id, area_id, code, label, sort_order, is_terminal, is_active`,
+      [statusId],
+    );
+    return row ?? null;
+  }
+
   //--- DATA TYPES ---
 
   async getDataType(code) {

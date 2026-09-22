@@ -446,9 +446,11 @@ Table "projects" {
   "closed_at" timestamptz
   "archived_at" timestamptz
   "deleted_at" timestamptz
-  "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se hereda de la solicitud al convertir.']
+  "entity_id" int8
+  "contact_id" int8
 
   Indexes {
+    entity_id [type: btree, name: "idx_projects_entity_id"]
     (priority, created_at) [type: btree, name: "idx_projects_open"]
     (status_id, status_since) [type: btree, name: "idx_projects_status_id"]
   }
@@ -475,10 +477,12 @@ Table "requests" {
   "created_by" int8
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "deleted_at" timestamptz
-  "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se corrige al convertir, con autocompletado sobre las ya usadas.']
+  "entity_id" int8
+  "contact_id" int8
 
   Indexes {
     assignee_id [type: btree, name: "idx_requests_assignee_id"]
+    entity_id [type: btree, name: "idx_requests_entity_id"]
     (area_id, status_id, priority, created_at) [type: btree, name: "idx_requests_inbox"]
     project_id [type: btree, name: "idx_requests_project_id"]
   }
@@ -521,14 +525,16 @@ Table "approvals" {
   "id" int8 [pk, not null, increment]
   "project_stage_id" int8 [not null]
   "decision" varchar(20) [not null]
-  "approver_user_id" int8 [not null, note: 'RF-FLW-03: quien dio el visto bueno. Siempre interno.']
+  "approver_user_id" int8
   "comment" text
   "decided_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "approver_contact_id" int8 [note: 'RF-FLW-05: el lado externo del visto bueno de doble parte. Una fila por lado.']
 
   Indexes {
     project_stage_id [type: btree, name: "idx_approvals_project_stage_id"]
   }
   Note: '''RF-FLW-03. Objeto de negocio, no traza: RF-EST-05 pregunta por los que faltan.
+CHECK approvals_one_approver: num_nonnulls(approver_user_id, approver_contact_id) = 1
 CHECK approvals_decision_valid: (decision)::text = ANY ((ARRAY[\'approved\'::character varying, \'rejected\'::character varying])::text[])'''
 }
 
@@ -590,6 +596,32 @@ Table "data_types" {
   Note: 'DEFAULT created_at: now()'
 }
 
+Table "entities" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(300) [unique, not null]
+  "kind" varchar(20) [note: 'facultad, dependencia, coordinacion, externo']
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+  Note: '''RF-SOL-07: la entidad solicitante. Persiste entre solicitudes; sus contactos cambian y viven aparte.
+CHECK entities_kind_valid: (kind IS NULL) OR ((kind)::text = ANY ((ARRAY[\'facultad\'::character varying, \'dependencia\'::character varying, \'coordinacion\'::character varying, \'externo\'::character varying])::text[]))'''
+}
+
+Table "entity_contacts" {
+  "id" int8 [pk, not null, increment]
+  "entity_id" int8 [unique, not null]
+  "full_name" varchar(200) [not null]
+  "email" varchar(320)
+  "phone" varchar(50)
+  "job_title" varchar(200)
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    entity_id [type: btree, name: "idx_entity_contacts_entity_id"]
+  }
+  Note: 'RF-SOL-07. Es tambien la identidad del externo para RF-EXT-01 y quien firma el lado externo de RF-FLW-05.'
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -607,6 +639,8 @@ Ref "access_tokens_authorizer_fkey":"users"."id" < "access_tokens"."authorizer"
 Ref "access_tokens_file_id_fkey":"files"."id" < "access_tokens"."file_id" [delete: cascade]
 
 Ref "access_tokens_folder_id_fkey":"folders"."id" < "access_tokens"."folder_id" [delete: cascade]
+
+Ref "approvals_approver_contact_id_fkey":"entity_contacts"."id" < "approvals"."approver_contact_id"
 
 Ref "approvals_approver_user_id_fkey":"users"."id" < "approvals"."approver_user_id"
 
@@ -627,6 +661,8 @@ Ref "fk_collection_events_event_id_events_id":"events"."id" < "collection_events
 Ref "contract_type_entitlements_absence_type_id_fkey":"absence_types"."id" < "contract_type_entitlements"."absence_type_id"
 
 Ref "contract_type_entitlements_contract_type_id_fkey":"contract_types"."id" < "contract_type_entitlements"."contract_type_id"
+
+Ref "entity_contacts_entity_id_fkey":"entities"."id" < "entity_contacts"."entity_id"
 
 Ref "fk_event_exceptions_event_id_events_id":"events"."id" < "event_exceptions"."event_id"
 
@@ -680,7 +716,11 @@ Ref "project_stages_event_id_fkey":"events"."id" < "project_stages"."event_id"
 
 Ref "project_stages_project_id_fkey":"projects"."id" < "project_stages"."project_id"
 
+Ref "projects_contact_id_fkey":"entity_contacts"."id" < "projects"."contact_id"
+
 Ref "projects_created_by_fkey":"users"."id" < "projects"."created_by"
+
+Ref "projects_entity_id_fkey":"entities"."id" < "projects"."entity_id"
 
 Ref "projects_event_collection_id_fkey":"event_collections"."id" < "projects"."event_collection_id"
 
@@ -694,7 +734,11 @@ Ref "requests_area_id_fkey":"areas"."id" < "requests"."area_id"
 
 Ref "requests_assignee_id_fkey":"users"."id" < "requests"."assignee_id"
 
+Ref "requests_contact_id_fkey":"entity_contacts"."id" < "requests"."contact_id"
+
 Ref "requests_created_by_fkey":"users"."id" < "requests"."created_by"
+
+Ref "requests_entity_id_fkey":"entities"."id" < "requests"."entity_id"
 
 Ref "requests_folder_id_fkey":"folders"."id" < "requests"."folder_id"
 

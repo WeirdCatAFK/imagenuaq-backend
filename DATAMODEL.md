@@ -17,7 +17,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
-| SOL / PRY / EST                   | `entities`, `entity_contacts`, `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Implementado por`projects-spine`; falta la definición de formatos por UI            |
+| SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`. Con API: `schemas` (§2.2), `statuses` (`RF-EST-02`) y `/api/requesters` (§2.11). `requests` y `projects` siguen solo en `psql` |
 | MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`                                                                                                                                                  | Registro de libros implementado por`microsoft-accounts` y `microsoft-app`; falta el mapeo de columnas (§2.10) |
 | FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
@@ -41,9 +41,9 @@ Cinco módulos que se leen como una sola cadena, y de los que cuelgan todos los 
 ```
 schemas → schema_versions ─┬─ sheets                     (RF-MIG-01: el Excel sigue vivo)
                            │
-entities ─┬─ requests ─────┴──→ projects ─┬─ project_stages ──→ approvals
+           requests ─────┴──→ projects ─┬─ project_stages ──→ approvals
           │   (data JSONB)                ├─ project_field_values
-          └─ entity_contacts              └─ tasks / notes / time_entries   (sin modelar)
+                                          └─ tasks / notes / time_entries   (sin modelar)
 
 statuses  (catálogo por área; projects.status_id, requests.status_id)
 
@@ -117,7 +117,7 @@ Las dos cosas no quieren el mismo almacenamiento:
 - `requests.data jsonb` guarda la captura completa, sea cual sea el formato. Un modelo EAV
   (`request_field_values`) daría lo mismo con un join por campo y sin ganar nada: nadie
   consulta un campo suelto de un formato arbitrario.
-- Lo que `RF-SOL-05` busca sube a columnas reales (`folio`, `title`, `entity_id`,
+- Lo que `RF-SOL-05` busca sube a columnas reales (`folio`, `title`, `requester`,
   `status_id`, `assignee_id`). Son las mismas para todos los formatos, así que no
   dependen de la definición dinámica.
 - La definición de los campos vive en `schema_versions.fields jsonb`, un arreglo ordenado.
@@ -259,6 +259,20 @@ máquina del flujo (`pending`, `active`, `waiting_external`, `done`, `cancelled`
 si el área puede trabajar; `statuses` contesta qué muestra el tablero (`RF-EST-01`). Son dos
 preguntas distintas y por eso son dos columnas en dos tablas.
 
+**El catálogo se edita en caliente y nada se borra.** `status.manage` es un tercer código de
+permiso porque el catálogo no es un registro de trabajo: lo edita la coordinación, no quien
+atiende un proyecto. Las lecturas se quedan en la sesión, porque todo tablero y todo
+formulario necesitan su selector. Un estatus sale del catálogo poniéndose `is_active = false`,
+nunca borrándose: `requests.status_id` y `projects.status_id` lo referencian, y desactivar
+quita la opción de los selectores sin reescribir lo que ya pasó. El `code` y el `area_id`
+tampoco se editan —son la etiqueta bajo la que se archivó lo anterior—, así que renombrar es
+crear otro estatus.
+
+`status-manage` agrega `rechazada` (global, terminal) porque los siete que sembró
+`projects-spine` describen trabajo que avanza y ninguno dice "esto no se va a hacer"; sin él,
+una solicitud rechazada se queda en `recibido` para siempre o se borra, y §2.8 existe
+justamente para no perder lo que no se convirtió.
+
 ### 2.8 La solicitud no es un proyecto temprano
 
 Es la fusión que casi todo borrador hace, y la que más cuesta deshacer. `RF-SOL-03` le da
@@ -342,6 +356,46 @@ mecanismo inventado para un único uso. `.env` (`MS_*`) queda como respaldo cuan
 existe, y es lo que usa la suite de pruebas. Crear el registro en sí sigue siendo un acto en
 el portal: Microsoft no ofrece API para ello.
 
+### 2.11 El solicitante es una cadena, no un padrón
+
+`projects-spine` normalizó al solicitante en `entities` + `entity_contacts`, con llaves
+foráneas desde `requests`, `projects` y `approvals`. **`requester-string` revierte eso.** La
+coordinación decidió no llevar ese padrón, y el motivo es operativo: un registro de
+solicitantes que cualquier captura alimenta acumula "Facultad de Química", "Fac. de Química",
+"FCQ" y "facultad de quimica" como cuatro solicitantes, y el peor alimentador sería la
+importación de hojas, que crearía una fila por cada variante que alguien escribió en un
+formulario. Un padrón mal etiquetado es peor que una cadena: miente con estructura.
+
+Lo que el padrón iba a sostener ya está sostenido por otra cosa:
+
+- **Los externos** ven sus archivos por `access_tokens`, el mismo mecanismo temporal del
+  drive personal, sin pantalla propia (`RF-EXT-01`, `RF-EXT-03`); no hace falta una fila que
+  los identifique.
+- **Los vistos buenos son internos** (`RF-FLW-03`). La conformidad del solicitante se captura
+  como evidencia —un archivo, una nota—, no como firma, así que `approvals.approver_user_id`
+  es obligatorio y no hay firmante externo.
+- **Los pantones por facultad** (`RF-IMP-06`) ya son un catálogo indexado por nombre; el
+  selector resuelve por cadena.
+- **FIN** cobrará contra los datos fiscales que capture el formato, no contra una ficha de
+  solicitante.
+
+La cadena **sube a columna** (`requests.requester`, `projects.requester`) y no se queda en
+`requests.data`, por el criterio de §2.3: `RF-SOL-05` busca por entidad solicitante, y el
+autocompletado necesita un lugar del cual juntar las cadenas ya usadas. En el JSON la llave
+cambiaría con cada formato (`dependencia`, `inst_pet`, ...) y las dos cosas tendrían que
+adivinarla. Por lo mismo, los cinco formatos sembrados perdieron su campo `dependencia`.
+
+**La deriva se contiene con autocompletado, no con una tabla.** `GET /api/requesters` regresa
+las cadenas en uso con su número de apariciones, de más usada a menos; el nombre se corrige al
+convertir la solicitud, que es donde un humano ya está viendo el registro. El índice es btree
+sobre `lower(requester)`, que sirve al prefijo y a la igualdad; un `ilike '%algo%'` lo ignora,
+y a esta escala eso es aceptable. El día que no lo sea, la respuesta es `pg_trgm`.
+
+**Revisable.** Si aparece un dato que de verdad pertenezca al solicitante y no a la solicitud
+—datos fiscales que no se recapturan, un portal con sesión propia—, la salida es una tabla
+`requesters` con la cadena como llave natural y un `requester_id` nulable al lado de la
+columna, no revivir `entities` con sus contactos.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -354,7 +408,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8)                                                   | ✔ |
 | RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3)                                                 | ✔ |
 | RF-SOL-06                       | `requests.data`, `requests.folder_id`                                                                           | ✔ |
-| RF-SOL-07                       | `entities`, `entity_contacts`                                                                                   | ✔ |
+| RF-SOL-07                       | `requests.requester` /`projects.requester` como cadena, con autocompletado en `/api/requesters`; el contacto es un campo del formato (§2.11) | ✔ |
 | RF-SOL-08                       | `requests.source`                                                                                                 | ✔ |
 | RF-PRY-01                       | `requests.project_id` (§2.8)                                                                                      | ✔ |
 | RF-PRY-02                       | `projects`, `project_members`; las áreas participantes se derivan, no se guardan                               | ◑ falta`project_members` |
@@ -368,7 +422,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1, §6)                                                        | ✗ etapas a mano |
 | RF-FLW-03                       | `approvals`                                                                                                       | ✔ |
 | RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        | ✗ |
-| RF-FLW-05                       | `approvals.approver_contact_id`, una fila por lado                                                                | ◑ falta`requires_entity_approval`, que es del flujo |
+| RF-FLW-05                       | Descartado como firma: el visto bueno es interno y la conformidad del solicitante se captura como evidencia (§2.11) | ✗ por decisión |
 | RF-FLW-06                       | `project_field_values` (§2.4)                                                                                    | ✔ |
 | RF-FLW-07                       | `project_stages.status = 'waiting_external'` + `blocked_reason` (CHECK)                                        | ✔ |
 | RF-FLW-08                       | `projects.priority`, `requests.priority`; sin orden por fecha de llegada                                        | ✔ |
@@ -376,7 +430,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-TSK-01 … RF-TSK-05          | `tasks`; hoy solo`project_stages.assigned_to`, una persona por etapa                                          | ◑ |
 | RF-TSK-06, RF-TSK-07            | Consulta sobre`events` + `area_members`; sin tabla nueva                                                        | ✔ |
 | RF-EST-01                       | `projects.status_id` → `statuses`                                                                              | ✔ |
-| RF-EST-02                       | `statuses.area_id`; el catálogo global viene sembrado, los de área los pone coordinación                       | ✔ |
+| RF-EST-02                       | `statuses.area_id`; el catálogo global viene sembrado, los de área los pone coordinación por`/api/statuses`   | ✔ |
 | RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since`                                                                                  | ◑ `status_since` sí, `alert_rules` no |
 | RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
 | RF-EST-06, RF-EST-10            | `notifications`                                                                                                   | ✗ |
@@ -400,7 +454,7 @@ fechas y duración pero nunca el motivo.
 Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ellos. Desde
 `projects-spine`, los enganches marcados existen de verdad y no son promesas:
 
-- **FIN** — `entities` (existe) como destinatario del cobro y `project_field_values`
+- **FIN** — `projects.requester` como destinatario del cobro y `project_field_values`
   (existe) para el número de orden que `RF-IMP-08` pasa a facturación imprenta. Faltan
   `projects.expected_invoice_count`, `providers`, `quotes`, `invoices`, `oficios`,
   `payments`. Ojo con §5.6: el despachador de eventos deja que una escritura tenga éxito
@@ -409,11 +463,11 @@ Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ell
 - **INV** — independiente del proyecto salvo por préstamos ligados a uno. Faltan
   `inventory_items`, `inventory_loans`, `inventory_movements`, y para `RF-INV-07` las
   licencias compartidas con su bitácora de sesiones.
-- **IMP** — `print_orders` cuelga de `projects`; los pantones por facultad cuelgan de
-  `entities` (`RF-IMP-06`).
-- **EXT** — `entity_contacts` ya es la identidad del externo y `access_tokens` ya da
-  compartición de solo lectura (`RF-ARC-03`, `RF-EXT-03`). Falta el token de portal para
-  `RF-EXT-01`.
+- **IMP** — `print_orders` cuelga de `projects`; los pantones por facultad son un catálogo
+  indexado por nombre que resuelve contra `projects.requester` (`RF-IMP-06`).
+- **EXT** — `access_tokens` ya da compartición temporal de solo lectura (`RF-ARC-03`,
+  `RF-EXT-03`), y por §2.11 eso es todo lo que `RF-EXT-01` necesita: el externo recibe un
+  enlace con vigencia, no una cuenta ni una pantalla.
 - **RPT** — sin tablas: son consultas. `RF-RPT-02` (carga por persona) sale de
   `project_members` y `time_entries`; `RF-RPT-03` de `status_since`.
 
@@ -1217,116 +1271,6 @@ saltarse la fila: un hueco silencioso en una bitácora es peor que uno ruidoso.
 
 ### 7.5 SOL / PRY / FLW / EST — solicitudes, proyectos, etapas y estatus
 
-#### `entities`
-
-La entidad solicitante: una facultad, una dependencia, una coordinación o alguien externo
-(`RF-SOL-07`). Persiste entre solicitudes; sus contactos cambian y viven aparte.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `name` | varchar(300) | no | | Único entre las vivas |
-| `kind` | varchar(20) | sí | | `facultad`, `dependencia`, `coordinacion`, `externo` |
-| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
-| `deleted_at` | timestamptz | sí | | Baja lógica |
-
-#### `entity_contacts`
-
-La persona con la que se trata. Es también la identidad del externo para `RF-EXT-01` y
-quien firma el lado externo del visto bueno de `RF-FLW-05`.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `entity_id` | bigint | no | | → `entities.id` |
-| `full_name` | varchar(200) | no | | Nombre |
-| `email` | varchar(320) | sí | | Correo. Único por entidad, comparado en minúsculas, para que la misma persona no acabe en dos filas |
-| `phone` | varchar(50) | sí | | Teléfono |
-| `job_title` | varchar(200) | sí | | Puesto o cargo |
-| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
-| `deleted_at` | timestamptz | sí | | Baja lógica |
-
-#### `schemas`
-
-Identidad estable de un formato de solicitud (`RF-SOL-01`). Su contenido vive en
-`schema_versions`; esta fila solo lo nombra.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `code` | varchar(50) | no | | Único. `formato_02`, `papel_institucional` |
-| `name` | varchar(300) | no | | Nombre visible |
-| `is_active` | boolean | no | `true` | Si se puede seguir usando para capturar |
-| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
-
-#### `schema_versions`
-
-Cómo se veía el formato cuando se capturó algo con él. **Inmutable una vez publicada**
-(§2.2): editar publica una versión nueva, y un trigger rechaza todo `UPDATE` sobre la tabla.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `schema_id` | bigint | no | | → `schemas.id` |
-| `version` | int | no | | Consecutivo desde 1. Único junto con `schema_id` |
-| `fields` | jsonb | no | `[]` | Arreglo **ordenado** de definiciones de campo: `key`, `label`, `type`, `required`, `options`. El orden de captura es el orden del arreglo |
-| `published_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Publicación |
-| `published_by` | bigint | sí | | Quién publicó → `users.id` |
-
-#### `sheets`
-
-El libro de Excel que sigue vivo durante la transición, y cómo sus columnas caen en un
-formato (`RF-MIG-01`, `RF-MIG-02`).
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `name` | varchar(300) | no | | Cómo se le dice al libro |
-| `drive_id` | varchar(255) | no | | Drive de Graph. Junto con `item_id` y `table_name` identifica el libro; único entre los vivos |
-| `item_id` | varchar(255) | no | | Elemento de Graph |
-| `table_name` | varchar(200) | sí | | Tabla dentro del libro. `NULL` = la primera o única |
-| `web_url` | text | sí | | Enlace que un humano pega. Decorativo: la llave es el par drive/item |
-| `schema_version_id` | bigint | sí | | Formato destino → `schema_versions.id`. Apunta a la **versión**, no al formato, porque el mapeo se escribe contra columnas concretas. `NULL` = registrado sin mapear (§2.10) |
-| `column_map` | jsonb | no | `{}` | Encabezado del Excel → campo de `schema_versions.fields` o columna promovida de `requests` |
-| `microsoft_account_id` | bigint | no | | Con el acceso de qué cuenta se lee → `microsoft_accounts.id` |
-| `registered_by` | bigint | sí | | Quién lo registró → `users.id` |
-| `last_imported_at` | timestamptz | sí | | Hasta dónde llegó la última importación, para que la siguiente sepa desde dónde seguir |
-| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
-| `deleted_at` | timestamptz | sí | | Baja lógica |
-
-#### `microsoft_app`
-
-El registro de aplicación de Azure con el que se inicia sesión en Microsoft (§2.10). Una
-sola fila; si no existe se leen `MS_TENANT_ID`, `MS_CLIENT_ID` y `MS_CLIENT_SECRET` de `.env`.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | smallint | no | `1` | Siempre `1` (`CHECK`): es un singleton |
-| `tenant_id` | varchar(64) | no | `common` | `common`, `organizations` o el id del tenant de la UAQ |
-| `client_id` | varchar(64) | no | | Application (client) ID del portal. No es secreto: viaja en cada URL de autorización |
-| `client_secret_enc` | bytea | no | | Secreto de cliente cifrado con `MS_TOKEN_KEY`. Nunca se devuelve; redactado en `logs` |
-| `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Último guardado |
-| `updated_by` | bigint | sí | | Quién lo guardó → `users.id` |
-
-#### `microsoft_accounts`
-
-La cuenta Microsoft con cuyo acceso delegado se leen los libros registrados (§2.10). Una
-fila por persona y cuenta; se revoca, nunca se borra.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `user_id` | bigint | no | | Quién la conectó → `users.id`. Solo esa persona y `admin` pueden usarla |
-| `ms_object_id` | varchar(64) | no | | Claim `oid` del id_token: identifica la cuenta aunque cambie el correo. Único junto con `user_id` entre las vivas |
-| `tenant_id` | varchar(64) | no | | Claim `tid`: el tenant de la organización, o el de cuentas personales |
-| `email` | varchar(320) | sí | | `preferred_username` del id_token |
-| `display_name` | varchar(300) | sí | | `name` del id_token |
-| `refresh_token_enc` | bytea | no | | Refresh token cifrado con `MS_TOKEN_KEY`. Se reescribe en cada uso porque Microsoft lo rota. Redactado en `logs` |
-| `scopes` | text | no | | Los permisos delegados concedidos, tal como los devolvió Microsoft |
-| `connected_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Última conexión; reconectar la misma cuenta lo actualiza |
-| `last_used_at` | timestamptz | sí | | Último refresh |
-| `revoked_at` | timestamptz | sí | | Retirada por la persona o por Microsoft. Los libros que la usaban siguen apuntando aquí |
-
 #### `statuses`
 
 Catálogo de estatus, con dimensión de área (`RF-EST-02`). `area_id` nulo es el catálogo
@@ -1354,8 +1298,7 @@ exactamente lo que consulta la bandeja del área.
 | `folio` | varchar(50) | no | secuencia | Único y consultable (`RF-SOL-03`). Lo genera `requests_folio_seq` con formato `SOL-000001`, no la orquestación |
 | `schema_version_id` | bigint | no | | Formato con el que se capturó → `schema_versions.id` |
 | `project_id` | bigint | sí | | Proyecto al que se convirtió → `projects.id`. `NULL` = sin convertir. Varias solicitudes pueden apuntar al mismo (`RF-PRY-01`) |
-| `entity_id` | bigint | sí | | Quién solicita → `entities.id` |
-| `contact_id` | bigint | sí | | Con quién se trata → `entity_contacts.id` |
+| `requester` | varchar(300) | sí | | Quién solicita, como cadena (§2.11). Se corrige al convertir, con autocompletado sobre las ya usadas |
 | `area_id` | bigint | sí | | Bandeja en la que cayó → `areas.id`. Puente hasta que el flujo enrute (§2.5) |
 | `title` | varchar(300) | no | | Nombre corto de lo solicitado |
 | `data` | jsonb | no | `{}` | **La captura completa** (`RF-SOL-06`), con la forma que dicte `schema_versions.fields`. Lo que `RF-SOL-05` busca sube a columnas reales en vez de quedarse aquí |
@@ -1381,8 +1324,7 @@ guardan, y no hay etapa actual: eso es el conjunto de `project_stages` activas (
 | `key` | varchar(50) | no | | Identificador corto y legible; sirve como nombre de carpeta. Se asigna, no se genera. Único entre los vivos, y restringido a mayúsculas, dígitos, `-` y `_` |
 | `title` | varchar(300) | no | | Nombre del proyecto |
 | `description` | text | sí | | Detalle |
-| `entity_id` | bigint | sí | | Quién lo pidió → `entities.id` |
-| `contact_id` | bigint | sí | | Con quién se trata → `entity_contacts.id` |
+| `requester` | varchar(300) | sí | | Quién lo pidió, como cadena (§2.11). Se hereda de la solicitud al convertir |
 | `schema_version_id` | bigint | sí | | Formato del que nació → `schema_versions.id` |
 | `status_id` | bigint | no | | Estatus visible → `statuses.id` (`RF-EST-01`) |
 | `status_since` | timestamptz | no | `CURRENT_TIMESTAMP` | Desde cuándo. Desnormalizado para que la alerta de `RF-EST-03`/`RF-EST-04` no recorra la bitácora |
@@ -1431,8 +1373,7 @@ doble parte de `RF-FLW-05` son dos filas, una por lado.
 | `id` | bigint | no | identidad | Llave primaria |
 | `project_stage_id` | bigint | no | | Etapa que se aprueba → `project_stages.id`, en cascada |
 | `decision` | varchar(20) | no | | `approved` o `rejected` |
-| `approver_user_id` | bigint | sí | | Firmante interno → `users.id` |
-| `approver_contact_id` | bigint | sí | | Firmante externo → `entity_contacts.id`. Exactamente uno de los dos va lleno |
+| `approver_user_id` | bigint | no | | Quien firmó → `users.id`. Siempre interno (§2.11) |
 | `comment` | text | sí | | Comentario opcional de la decisión |
 | `decided_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se firmó |
 
