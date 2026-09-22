@@ -804,6 +804,23 @@ async function emitStage(action, stage) {
   });
 }
 
+/**
+ * A `date` column as `YYYY-MM-DD`.
+ *
+ * postgrejs hands back a JS Date built at **local** midnight, and JSON.stringify turns that
+ * into an instant: `2026-04-01` leaves as `2026-04-01T06:00:00.000Z` here, and as
+ * `2026-03-31T22:00:00.000Z` for a reader east of UTC -- a delivery date that moves a day
+ * depending on who reads it. The local parts are what the column held, so they are what goes
+ * back out.
+ */
+function asDate(value) {
+  if (value === null || value === undefined) return null;
+  if (!(value instanceof Date)) return value;
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${value.getFullYear()}-${month}-${day}`;
+}
+
 function shapeProject(row) {
   return {
     id: row.id,
@@ -820,8 +837,8 @@ function shapeProject(row) {
     priority: row.priority,
     hasCost: row.has_cost,
     carriedOver: row.carried_over,
-    startsOn: row.starts_on,
-    dueOn: row.due_on,
+    startsOn: asDate(row.starts_on),
+    dueOn: asDate(row.due_on),
     folderId: row.folder_id,
     eventCollectionId: row.event_collection_id,
     createdBy: row.created_by,
@@ -854,8 +871,8 @@ function shapeListed(row) {
     priority: row.priority,
     hasCost: row.has_cost,
     carriedOver: row.carried_over,
-    startsOn: row.starts_on,
-    dueOn: row.due_on,
+    startsOn: asDate(row.starts_on),
+    dueOn: asDate(row.due_on),
     closedAt: row.closed_at,
     archivedAt: row.archived_at,
     createdAt: row.created_at,

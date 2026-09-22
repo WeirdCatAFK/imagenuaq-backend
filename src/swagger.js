@@ -224,6 +224,14 @@ export function buildOpenApiDocument() {
           'signed-in user; writes require `schema.manage`.',
       },
       {
+        name: 'requests',
+        description:
+          'The intake (RF-SOL-03 … RF-SOL-08). A request is not an early project: they are ' +
+          'separate rows, `projectId` is the link, and `convert` is the one crossing. Values ' +
+          'are coerced against the format\'s fields, so a value typed here and the same value ' +
+          'read out of a spreadsheet land identically.',
+      },
+      {
         name: 'projects',
         description:
           'Projects (RF-PRY-02), their stages (RF-FLW-01), the sign-offs that move them ' +
@@ -931,6 +939,189 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['sheet', 'kind', 'name', 'headers', 'rows'],
+        },
+        RequestListItem: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            folio: { type: 'string', example: 'SOL-000004', description: 'From a sequence (RF-SOL-03).' },
+            title: { type: 'string' },
+            requester: { type: ['string', 'null'], example: 'Facultad de Química' },
+            areaId: { type: ['integer', 'null'], description: 'The inbox it landed in (RF-SOL-02).' },
+            areaName: { type: ['string', 'null'] },
+            statusId: { type: 'integer' },
+            statusCode: { type: 'string', example: 'recibido' },
+            statusLabel: { type: 'string' },
+            statusSince: { type: 'string', format: 'date-time' },
+            assigneeId: { type: ['integer', 'null'] },
+            assigneeName: { type: ['string', 'null'] },
+            priority: { type: 'integer', description: 'Higher is more urgent (RF-FLW-08).' },
+            source: { type: 'string', enum: ['manual', 'form', 'email', 'sheet'] },
+            sheetId: { type: ['integer', 'null'] },
+            schemaCode: { type: 'string', example: 'papel_institucional' },
+            schemaName: { type: 'string' },
+            possibleDuplicateOf: {
+              type: ['integer', 'null'],
+              description: 'Set by the import when a row looks like a correction of an earlier one.',
+            },
+            projectId: { type: ['integer', 'null'], description: 'Null: not converted yet.' },
+            projectKey: { type: ['string', 'null'] },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'folio', 'title', 'statusId', 'priority', 'source'],
+        },
+        Request: {
+          allOf: [
+            { $ref: '#/components/schemas/RequestListItem' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  description:
+                    'The whole capture (RF-SOL-06), keyed by field code and coerced by type. ' +
+                    'Keys the format no longer has are kept as captured.',
+                },
+                schemaVersionId: { type: 'integer' },
+                schemaId: { type: 'integer' },
+                schemaVersion: { type: 'integer' },
+                fields: { $ref: '#/components/schemas/SchemaFields' },
+                statusIsTerminal: { type: 'boolean' },
+                sheetName: { type: ['string', 'null'] },
+                sourceIndex: { type: ['integer', 'null'], description: 'The row it came from; decorative.' },
+                sourceData: {
+                  type: ['object', 'null'],
+                  description: 'The raw spreadsheet row by header, unmapped columns included.',
+                },
+                sourceHash: { type: ['string', 'null'] },
+                duplicateOfFolio: { type: ['string', 'null'] },
+                projectTitle: { type: ['string', 'null'] },
+                folderId: { type: ['integer', 'null'] },
+                createdBy: { type: ['integer', 'null'] },
+                createdByName: { type: ['string', 'null'] },
+                deletedAt: { type: ['string', 'null'], format: 'date-time' },
+                warnings: {
+                  type: 'array',
+                  readOnly: true,
+                  description:
+                    'Only on a write, and only when there were any: a kept unknown key, or a ' +
+                    'value that could not be read.',
+                  items: {
+                    type: 'object',
+                    properties: { key: { type: 'string' }, message: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          ],
+        },
+        CreateRequestRequest: {
+          type: 'object',
+          description: 'Send `schemaId` for the format\'s latest version, or `schemaVersionId` for one exactly.',
+          properties: {
+            schemaId: { type: 'integer' },
+            schemaVersionId: { type: 'integer' },
+            title: { type: 'string', maxLength: 300 },
+            requester: { type: 'string', maxLength: 300, example: 'Facultad de Química' },
+            data: {
+              type: 'object',
+              description:
+                'Keyed by field code. Values are coerced by the field\'s type: `1,250` becomes ' +
+                '1250, `15/03/2026` becomes 2026-03-15, `sí` becomes true. A required field ' +
+                'missing, or a value that cannot be read, is a 400 naming every complaint.',
+              example: { descripcion: 'Carteles para el congreso', tiraje: '1,000', fecha_entrega: '15/03/2026' },
+            },
+            areaId: { type: 'integer', description: 'The inbox it lands in (RF-SOL-02).' },
+            assigneeId: { type: 'integer' },
+            statusId: { type: 'integer', description: 'Omitted: the global `recibido`.' },
+            priority: { type: 'integer', default: 0 },
+            source: {
+              type: 'string',
+              enum: ['manual', 'form', 'email'],
+              default: 'manual',
+              description: '`sheet` is refused here: those rows are created by the import.',
+            },
+          },
+          required: ['title'],
+        },
+        UpdateRequestRequest: {
+          type: 'object',
+          description:
+            'At least one key. Refused once the request belongs to a project, except ' +
+            '`requester` and `possibleDuplicateOf`, which stay editable so a name can be ' +
+            'corrected and a false duplicate cleared (send `possibleDuplicateOf: null`).',
+          properties: {
+            title: { type: 'string', maxLength: 300 },
+            requester: { type: 'string', maxLength: 300 },
+            data: { type: 'object', description: 'Replaces the capture whole, re-coerced.' },
+            areaId: { type: 'integer' },
+            assigneeId: { type: 'integer' },
+            priority: { type: 'integer' },
+            possibleDuplicateOf: { type: ['integer', 'null'] },
+          },
+        },
+        ConvertRequestRequest: {
+          type: 'object',
+          description:
+            'Anything omitted is taken from the request. Every captured value becomes a ' +
+            'project field value keyed by its field code.',
+          properties: {
+            key: { type: 'string', maxLength: 50, description: 'Omitted: `PRY-000001` from the sequence.' },
+            title: { type: 'string', maxLength: 300 },
+            requester: {
+              type: 'string',
+              maxLength: 300,
+              description: 'The correction moment: this is where the /api/requesters autocomplete lands.',
+            },
+            description: { type: 'string' },
+            statusId: { type: 'integer' },
+            priority: { type: 'integer' },
+            hasCost: { type: 'boolean', default: false },
+            carriedOver: { type: 'boolean', default: false },
+            startsOn: { type: 'string', format: 'date' },
+            dueOn: { type: 'string', format: 'date' },
+            stages: {
+              type: 'array',
+              description: 'The first stages, as on POST /api/projects.',
+              items: {
+                type: 'object',
+                properties: {
+                  areaId: { type: 'integer' },
+                  title: { type: 'string' },
+                  seq: { type: 'integer' },
+                  assignedTo: { type: 'integer' },
+                },
+                required: ['areaId', 'title'],
+              },
+            },
+            requestIds: {
+              type: 'array',
+              items: { type: 'integer' },
+              description: 'More requests to answer with the same project (RF-PRY-01).',
+            },
+          },
+        },
+        ConvertResponse: {
+          type: 'object',
+          properties: {
+            project: { $ref: '#/components/schemas/Project' },
+            conflicts: {
+              type: 'array',
+              description:
+                'Keys two requests both captured: the first wins and the rest are reported ' +
+                'here rather than silently dropped.',
+              items: {
+                type: 'object',
+                properties: {
+                  key: { type: 'string' },
+                  folio: { type: 'string', description: 'The request whose value was discarded.' },
+                  kept: { type: 'string' },
+                  discarded: { type: 'string' },
+                },
+              },
+            },
+          },
+          required: ['project', 'conflicts'],
         },
         ProjectStage: {
           type: 'object',
@@ -2707,6 +2898,157 @@ export function buildOpenApiDocument() {
         },
       },
       
+      // --- requests ---
+
+      '/api/requests': {
+        get: {
+          tags: ['requests'],
+          summary: 'The inbox',
+          description:
+            'Needs request.read. RF-SOL-04: ordered and filterable, so nobody has to read ' +
+            'email, Excel, Teams and WhatsApp to find their work. RF-SOL-05 is the filters.',
+          parameters: [
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Title fragment, or folio prefix.' },
+            { name: 'areaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'statusId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'assigneeId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'schemaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'sheetId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'requester', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact match, case-insensitive.' },
+            {
+              name: 'converted',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: 'Omitted: everything. `false`: still unconverted, which is the working inbox.',
+            },
+            { name: 'duplicates', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: only rows flagged as a probable correction.' },
+            { name: 'source', in: 'query', required: false, schema: { type: 'string', enum: ['manual', 'form', 'email', 'sheet'] } },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'created'], default: 'priority' } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
+          responses: {
+            200: wrapped('The requests.', 'requests', 'RequestListItem', true),
+            400: errorResponse('A bad filter.', 'limit must be between 1 and 200.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['requests'],
+          summary: 'Capture a request',
+          description:
+            'Needs request.write. RF-SOL-08: what arrives by email is registered here, so one ' +
+            'channel holds everything. The folio comes from a sequence.',
+          requestBody: jsonBody('CreateRequestRequest'),
+          responses: {
+            201: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('A bad payload, or a value that will not coerce.', '"Tiraje" is not a number.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such format or version.', 'That format has no published version.'),
+          },
+        },
+      },
+      '/api/requests/{id}': {
+        get: {
+          tags: ['requests'],
+          summary: 'One request, with its format and its raw row',
+          parameters: [pathId('id', 'requests.id')],
+          responses: {
+            200: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid request id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+          },
+        },
+        patch: {
+          tags: ['requests'],
+          summary: 'Edit a request',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: jsonBody('UpdateRequestRequest'),
+          responses: {
+            200: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('Nothing valid to update, or a bad value.', 'Nothing to update.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('It already belongs to a project.', 'That request already belongs to a project; edit the project instead.'),
+          },
+        },
+        delete: {
+          tags: ['requests'],
+          summary: 'Soft-delete a request',
+          description: 'Refused once it belongs to a project: the project would lose what it answers.',
+          parameters: [pathId('id', 'requests.id')],
+          responses: {
+            200: wrapped('The deleted request.', 'request', 'Request'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('It belongs to a project.', 'That request belongs to a project; it cannot be deleted.'),
+          },
+        },
+      },
+      '/api/requests/{id}/status': {
+        put: {
+          tags: ['requests'],
+          summary: 'Move a request through the catalogue',
+          description:
+            'Needs request.write. `status_since` moves in the same statement; the change is ' +
+            'recorded as `status_changed`. A `rechazada` here is how a request that will not be ' +
+            'done stops sitting in the inbox without being deleted.',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { statusId: { type: 'integer', minimum: 1 } },
+                  required: ['statusId'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('An unusable status.', 'That status belongs to another area.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+          },
+        },
+      },
+      '/api/requests/{id}/convert': {
+        post: {
+          tags: ['requests'],
+          summary: 'Turn the request into a project',
+          description:
+            'Needs request.write and project.write. RF-PRY-01: one project may answer several ' +
+            'requests, and the link is kept. The requester and the format version travel, and ' +
+            'every captured value becomes a project field value keyed by its field code, so ' +
+            'the print order and the billing read it without re-capture (RF-FLW-06). The ' +
+            'linking happens in the same statement as the project, so a request that somebody ' +
+            'else converted first fails the whole call.',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: jsonBody('ConvertRequestRequest'),
+          responses: {
+            201: {
+              description: 'The project, and any values two requests disagreed on.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/ConvertResponse' } } },
+            },
+            400: errorResponse('A bad payload or an unknown request in the list.', 'Request 7 does not exist.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('Already converted.', 'That request already belongs to a project.'),
+          },
+        },
+      },
+
       // --- projects ---
 
       '/api/projects': {

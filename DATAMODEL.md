@@ -17,7 +17,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
-| SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`. Con API: `schemas` (§2.2), `statuses` (`RF-EST-02`), `projects` con sus etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11). `requests` sigue solo en `psql` |
+| SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`, **todas con API**: `schemas` (§2.2), `statuses` (`RF-EST-02`), `requests` con su conversión (§2.13), `projects` con etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11) |
 | MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`                                                                                                                                                  | Registro de libros implementado por`microsoft-accounts` y `microsoft-app`; falta el mapeo de columnas (§2.10) |
 | FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
@@ -435,6 +435,53 @@ tiene su columna y su ruta.
 **El estatus que puede vestir un proyecto está acotado**: global, o de un área que tenga una
 etapa en ese proyecto. Si no, un tablero terminaría mostrando el vocabulario de otra área.
 
+### 2.13 Una fila de la hoja se reconoce por su contenido
+
+`request-intake` le dio a la solicitud lo que necesita para venir de un libro sin duplicarse.
+
+**Graph no da un identificador estable de renglón.** `/rows` los entrega por índice, y ese
+índice se mueve en cuanto alguien ordena la hoja, inserta arriba o arrastra celdas. Así que la
+huella es un `sha256` de las celdas que el mapeo declare (`hashColumns`), normalizadas
+—recortadas, en minúsculas, con los espacios colapsados—, guardada en `requests.source_hash` y
+única por libro (`uq_requests_sheet_hash`, parcial). Reimportar la misma hoja recalcula las
+mismas huellas y no crea nada; reordenarla tampoco. `source_index` se guarda, pero como
+decoración: sirve para volver a ver el renglón, no para identificarlo.
+
+**Se descartó escribir la marca de leído de vuelta en la hoja**, que es lo que `docs/Plan de
+desarrollo.md` proponía para I2. Habría necesitado permiso de escritura en Graph
+(`Files.ReadWrite.All`, otro consentimiento), una columna reservada en cada libro y la confianza
+de que nadie la borra. La huella en la base no le pide nada a la hoja y no se puede alterar
+desde Excel.
+
+**El costo, dicho:** la huella solo cubre las columnas que el mapeo nombra. Si alguien corrige
+una celda que sí entra, la fila se lee como nueva, y para eso está `possible_duplicate_of`: la
+importación busca una solicitud del mismo libro con el mismo título y solicitante normalizados y
+liga la nueva con ella, para que una persona decida. Si corrige una celda que no entra, el cambio
+es invisible por diseño.
+
+**`source_data` guarda el renglón completo indexado por encabezado, incluidas las columnas que el
+mapeo ignora.** `RF-SOL-06` pide conservar todo lo capturado, y el mapeo de hoy no sabe qué va a
+ocupar facturación mañana.
+
+**La coerción de valores es una sola** (`src/utils/fieldValues.js`, pura): el mismo valor llega
+escrito en un formulario, mandado por un cliente y leído de una celda, y los tres tienen que
+acabar igual en `requests.data` o la bandeja muestra una fecha como `45000` y otra como
+`15/03/2023`. El tipo decide la coerción, nunca la regla del mapeo: un mapeo puede decir en qué
+orden está escrita una fecha, no que una cantidad se lea como fecha. Las fechas de Excel llegan
+como serial —días desde 1899-12-30, por el bug del año bisiesto 1900 que Excel conserva— y los
+seriales 1 a 60 caen en el rango que ese bug corrompe, así que se rechazan en vez de contestar un
+día equivocado.
+
+**`source = 'sheet'` no se puede pedir por la API.** Solo la importación inserta esas filas,
+porque es la única que tiene la huella y el renglón crudo; el CHECK `requests_hash_origin` lo
+respalda.
+
+**Convertir lleva todo.** El solicitante (corregible en ese momento, que es donde cae el
+autocompletado), la versión del formato, y **cada valor capturado** como fila de
+`project_field_values` bajo su código. Si dos solicitudes traen la misma clave, gana la primera y
+las demás se regresan en `conflicts` en vez de perderse en silencio. Una solicitud ya convertida
+no se edita ni se borra —el proyecto perdería lo que contesta—, salvo el solicitante.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -444,9 +491,9 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------ |
 | RF-SOL-01                       | `schemas`, `schema_versions.fields` por secciones, clonado (§2.2, §2.3)                                      | ◑ API completa; falta la UI de armado |
 | RF-SOL-02                       | `requests.area_id` como puente; después`schema_versions` → flujo (§2.5)                                     | ◑ |
-| RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8)                                                   | ✔ |
-| RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3)                                                 | ✔ |
-| RF-SOL-06                       | `requests.data`, `requests.folder_id`                                                                           | ✔ |
+| RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8); API en `/api/requests`                           | ✔ |
+| RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3); `GET /api/requests` con sus filtros            | ✔ |
+| RF-SOL-06                       | `requests.data`, `requests.folder_id`, y`source_data` con el renglón crudo del libro (§2.13)                  | ✔ |
 | RF-SOL-07                       | `requests.requester` /`projects.requester` como cadena, con autocompletado en `/api/requesters`; el contacto es un campo del formato (§2.11) | ✔ |
 | RF-SOL-08                       | `requests.source`                                                                                                 | ✔ |
 | RF-PRY-01                       | `requests.project_id` (§2.8)                                                                                      | ✔ |
@@ -474,7 +521,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
 | RF-EST-06, RF-EST-10            | `notifications`                                                                                                   | ✗ |
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
-| RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`                                                | ◑ registro de libros sí; mapeo e importación no |
+| RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13)                          | ◑ registro y antiduplicado sí; mapeo e importación no |
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
 | RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         | ◑ |
 | RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   | ✔ |

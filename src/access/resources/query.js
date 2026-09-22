@@ -1025,6 +1025,201 @@ class Query {
     return rows;
   }
 
+  //--- REQUESTS (RF-SOL-03) ---
+
+  /**
+   * A request. `folio` comes from the sequence, never from the caller (RF-SOL-03). A 23505 on
+   * `uq_requests_sheet_hash` means that row of that book is already in.
+   */
+  async createRequest({
+    schemaVersionId, title, data = {}, requester = null, areaId = null, statusId,
+    assigneeId = null, priority = 0, source = 'manual', sheetId = null,
+    sourceIndex = null, sourceData = null, sourceHash = null, possibleDuplicateOf = null,
+    folderId = null, createdBy = null,
+  }) {
+    const [row] = await this.#rows(
+      `insert into requests (
+        schema_version_id, title, data, requester, area_id, status_id, assignee_id,
+        priority, source, sheet_id, source_index, source_data, source_hash,
+        possible_duplicate_of, folder_id, created_by
+      )
+      values (
+        $1, $2, $3::jsonb, $4, $5::bigint, $6, $7::bigint,
+        $8, $9, $10::bigint, $11::int, $12::jsonb, $13,
+        $14::bigint, $15::bigint, $16::bigint
+      )
+      returning *`,
+      [
+        schemaVersionId, title, JSON.stringify(data ?? {}), requester, areaId, statusId,
+        assigneeId, priority, source, sheetId, sourceIndex,
+        sourceData === null ? null : JSON.stringify(sourceData), sourceHash,
+        possibleDuplicateOf, folderId, createdBy,
+      ],
+    );
+    return row;
+  }
+
+  /** One request with the format it was captured under and the project it became. */
+  async getRequest(requestId) {
+    const [row] = await this.#rows(
+      `select
+        r.*,
+        v.version as schema_version, v.fields as schema_fields,
+        sc.id as schema_id, sc.code as schema_code, sc.name as schema_name,
+        st.code as status_code, st.label as status_label, st.is_terminal as status_is_terminal,
+        a.name as area_name,
+        u.full_name as assignee_name,
+        c.full_name as created_by_name,
+        p.key as project_key, p.title as project_title,
+        sh.name as sheet_name,
+        d.folio as duplicate_of_folio
+      from requests r
+      join schema_versions v on v.id = r.schema_version_id
+      join schemas sc on sc.id = v.schema_id
+      join statuses st on st.id = r.status_id
+      left join areas a on a.id = r.area_id
+      left join users u on u.id = r.assignee_id
+      left join users c on c.id = r.created_by
+      left join projects p on p.id = r.project_id
+      left join sheets sh on sh.id = r.sheet_id
+      left join requests d on d.id = r.possible_duplicate_of
+      where r.id = $1 and r.deleted_at is null`,
+      [requestId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The inbox (RF-SOL-04, RF-SOL-05). `converted` null means "not yet converted", which is what
+   * a working inbox shows; true or false ask for one side explicitly.
+   */
+  async listRequests({
+    areaId = null, statusId = null, assigneeId = null, requester = null, sheetId = null,
+    schemaId = null, q = null, converted = null, duplicates = null, source = null,
+    sort = 'priority', limit = 50, offset = 0,
+  } = {}) {
+    return this.#rows(
+      `select
+        r.id, r.folio, r.title, r.requester, r.area_id, r.status_id, r.status_since,
+        r.assignee_id, r.priority, r.source, r.sheet_id, r.project_id,
+        r.possible_duplicate_of, r.created_at,
+        st.code as status_code, st.label as status_label,
+        a.name as area_name,
+        u.full_name as assignee_name,
+        sc.code as schema_code, sc.name as schema_name,
+        p.key as project_key
+      from requests r
+      join schema_versions v on v.id = r.schema_version_id
+      join schemas sc on sc.id = v.schema_id
+      join statuses st on st.id = r.status_id
+      left join areas a on a.id = r.area_id
+      left join users u on u.id = r.assignee_id
+      left join projects p on p.id = r.project_id
+      where r.deleted_at is null
+        and ($1::bigint is null or r.area_id = $1::bigint)
+        and ($2::bigint is null or r.status_id = $2::bigint)
+        and ($3::bigint is null or r.assignee_id = $3::bigint)
+        and ($4::text is null or lower(r.requester) = lower($4))
+        and ($5::bigint is null or r.sheet_id = $5::bigint)
+        and ($6::bigint is null or sc.id = $6::bigint)
+        and ($7::text is null or r.title ilike '%' || $7 || '%' or r.folio ilike $7 || '%')
+        and ($8::boolean is null
+             or ($8::boolean and r.project_id is not null)
+             or (not $8::boolean and r.project_id is null))
+        and ($9::boolean is null
+             or ($9::boolean and r.possible_duplicate_of is not null)
+             or (not $9::boolean and r.possible_duplicate_of is null))
+        and ($10::text is null or r.source = $10::text)
+      order by
+        case when $11::text = 'priority' then r.priority end desc nulls last,
+        r.created_at desc, r.id desc
+      limit $12 offset $13`,
+      [
+        areaId, statusId, assigneeId, requester, sheetId, schemaId, q,
+        converted, duplicates, source, sort, limit, offset,
+      ],
+    );
+  }
+
+  /** Only the keys the caller sent; `data` is replaced whole when given. */
+  async updateRequest(requestId, {
+    title = null, requester = null, areaId = null, assigneeId = null, priority = null,
+    data = null, possibleDuplicateOf = null, clearDuplicate = false,
+  }) {
+    const [row] = await this.#rows(
+      `update requests set
+        title       = coalesce($2, title),
+        requester   = coalesce($3, requester),
+        area_id     = coalesce($4::bigint, area_id),
+        assignee_id = coalesce($5::bigint, assignee_id),
+        priority    = coalesce($6::int, priority),
+        data        = coalesce($7::jsonb, data),
+        possible_duplicate_of = case
+                                  when $9 then null
+                                  else coalesce($8::bigint, possible_duplicate_of)
+                                end
+      where id = $1 and deleted_at is null
+      returning *`,
+      [
+        requestId, title, requester, areaId, assigneeId, priority,
+        data === null ? null : JSON.stringify(data), possibleDuplicateOf, clearDuplicate,
+      ],
+    );
+    return row ?? null;
+  }
+
+  /** `status_since` moves in the same UPDATE, per DATAMODEL 2.7. */
+  async setRequestStatus(requestId, statusId) {
+    const [row] = await this.#rows(
+      `update requests
+        set status_id = $2, status_since = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [requestId, statusId],
+    );
+    return row ?? null;
+  }
+
+  async deleteRequest(requestId) {
+    const [row] = await this.#rows(
+      `update requests
+        set deleted_at = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [requestId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The request a freshly imported row is probably a correction of: same book, same normalised
+   * title and requester, not yet converted. What `possible_duplicate_of` points at.
+   */
+  async findProbableDuplicate({ sheetId, title, requester = null }) {
+    const [row] = await this.#rows(
+      `select id, folio, title
+      from requests
+      where sheet_id = $1
+        and deleted_at is null
+        and lower(btrim(title)) = lower(btrim($2))
+        and coalesce(lower(btrim(requester)), '') = coalesce(lower(btrim($3)), '')
+      order by id desc
+      limit 1`,
+      [sheetId, title, requester],
+    );
+    return row ?? null;
+  }
+
+  /** Every hash already taken from a book, so an import can skip what it has seen. */
+  async listSourceHashes(sheetId) {
+    const rows = await this.#rows(
+      `select source_hash from requests
+      where sheet_id = $1 and source_hash is not null and deleted_at is null`,
+      [sheetId],
+    );
+    return new Set(rows.map((row) => row.source_hash));
+  }
+
   //--- PROJECTS (RF-PRY-02) ---
 
   /**
