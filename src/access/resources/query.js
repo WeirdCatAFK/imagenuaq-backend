@@ -28,6 +28,9 @@ class Query {
    *
    * @param {Array} ids
    */
+  // An empty JS array serialises as '' and Postgres refuses it as an array literal, so an
+  // empty list becomes NULL: `= any(NULL)` matches nothing and `unnest(NULL)` yields no rows,
+  // which is what every caller means by "none".
   #idArray(ids) {
     return ids.length ? ids : null;
   }
@@ -1022,6 +1025,925 @@ class Query {
     return rows;
   }
 
+  //--- REQUESTS (RF-SOL-03) ---
+
+  /**
+   * A request. `folio` comes from the sequence, never from the caller (RF-SOL-03). A 23505 on
+   * `uq_requests_sheet_hash` means that row of that book is already in.
+   */
+  async createRequest({
+    schemaVersionId, title, data = {}, requester = null, areaId = null, statusId,
+    assigneeId = null, priority = 0, source = 'manual', sheetId = null,
+    sourceIndex = null, sourceData = null, sourceHash = null, possibleDuplicateOf = null,
+    folderId = null, createdBy = null,
+  }) {
+    const [row] = await this.#rows(
+      `insert into requests (
+        schema_version_id, title, data, requester, area_id, status_id, assignee_id,
+        priority, source, sheet_id, source_index, source_data, source_hash,
+        possible_duplicate_of, folder_id, created_by
+      )
+      values (
+        $1, $2, $3::jsonb, $4, $5::bigint, $6, $7::bigint,
+        $8, $9, $10::bigint, $11::int, $12::jsonb, $13,
+        $14::bigint, $15::bigint, $16::bigint
+      )
+      returning *`,
+      [
+        schemaVersionId, title, JSON.stringify(data ?? {}), requester, areaId, statusId,
+        assigneeId, priority, source, sheetId, sourceIndex,
+        sourceData === null ? null : JSON.stringify(sourceData), sourceHash,
+        possibleDuplicateOf, folderId, createdBy,
+      ],
+    );
+    return row;
+  }
+
+  /** One request with the format it was captured under and the project it became. */
+  async getRequest(requestId) {
+    const [row] = await this.#rows(
+      `select
+        r.*,
+        v.version as schema_version, v.fields as schema_fields,
+        sc.id as schema_id, sc.code as schema_code, sc.name as schema_name,
+        st.code as status_code, st.label as status_label, st.is_terminal as status_is_terminal,
+        a.name as area_name,
+        u.full_name as assignee_name,
+        c.full_name as created_by_name,
+        p.key as project_key, p.title as project_title,
+        sh.name as sheet_name,
+        d.folio as duplicate_of_folio
+      from requests r
+      join schema_versions v on v.id = r.schema_version_id
+      join schemas sc on sc.id = v.schema_id
+      join statuses st on st.id = r.status_id
+      left join areas a on a.id = r.area_id
+      left join users u on u.id = r.assignee_id
+      left join users c on c.id = r.created_by
+      left join projects p on p.id = r.project_id
+      left join sheets sh on sh.id = r.sheet_id
+      left join requests d on d.id = r.possible_duplicate_of
+      where r.id = $1 and r.deleted_at is null`,
+      [requestId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The inbox (RF-SOL-04, RF-SOL-05). `converted` null means "not yet converted", which is what
+   * a working inbox shows; true or false ask for one side explicitly.
+   */
+  async listRequests({
+    areaId = null, statusId = null, assigneeId = null, requester = null, sheetId = null,
+    schemaId = null, q = null, converted = null, duplicates = null, source = null,
+    sort = 'priority', limit = 50, offset = 0,
+  } = {}) {
+    return this.#rows(
+      `select
+        r.id, r.folio, r.title, r.requester, r.area_id, r.status_id, r.status_since,
+        r.assignee_id, r.priority, r.source, r.sheet_id, r.project_id,
+        r.possible_duplicate_of, r.created_at,
+        -- Cuántas hay en total con estos filtros, antes del limit: una bandeja tiene que poder
+        -- decir cuánto falta por ver, y repetir el WHERE en un count aparte es la forma de que
+        -- las dos consultas dejen de coincidir.
+        count(*) over () as total,
+        st.code as status_code, st.label as status_label,
+        a.name as area_name,
+        u.full_name as assignee_name,
+        sc.code as schema_code, sc.name as schema_name,
+        p.key as project_key
+      from requests r
+      join schema_versions v on v.id = r.schema_version_id
+      join schemas sc on sc.id = v.schema_id
+      join statuses st on st.id = r.status_id
+      left join areas a on a.id = r.area_id
+      left join users u on u.id = r.assignee_id
+      left join projects p on p.id = r.project_id
+      where r.deleted_at is null
+        -- -1 is "no area at all": an imported row arrives unrouted and somebody triages it, so
+        -- the inbox has to be able to ask for exactly those.
+        and ($1::bigint is null
+             or ($1::bigint = -1 and r.area_id is null)
+             or r.area_id = $1::bigint)
+        and ($2::bigint is null or r.status_id = $2::bigint)
+        and ($3::bigint is null or r.assignee_id = $3::bigint)
+        and ($4::text is null or lower(r.requester) = lower($4))
+        and ($5::bigint is null or r.sheet_id = $5::bigint)
+        and ($6::bigint is null or sc.id = $6::bigint)
+        and ($7::text is null or r.title ilike '%' || $7 || '%' or r.folio ilike $7 || '%')
+        and ($8::boolean is null
+             or ($8::boolean and r.project_id is not null)
+             or (not $8::boolean and r.project_id is null))
+        and ($9::boolean is null
+             or ($9::boolean and r.possible_duplicate_of is not null)
+             or (not $9::boolean and r.possible_duplicate_of is null))
+        and ($10::text is null or r.source = $10::text)
+      order by
+        case when $11::text = 'priority' then r.priority end desc nulls last,
+        r.created_at desc, r.id desc
+      limit $12 offset $13`,
+      [
+        areaId, statusId, assigneeId, requester, sheetId, schemaId, q,
+        converted, duplicates, source, sort, limit, offset,
+      ],
+    );
+  }
+
+  /** Only the keys the caller sent; `data` is replaced whole when given. */
+  async updateRequest(requestId, {
+    title = null, requester = null, areaId = null, assigneeId = null, priority = null,
+    data = null, possibleDuplicateOf = null, clearDuplicate = false,
+  }) {
+    const [row] = await this.#rows(
+      `update requests set
+        title       = coalesce($2, title),
+        requester   = coalesce($3, requester),
+        area_id     = coalesce($4::bigint, area_id),
+        assignee_id = coalesce($5::bigint, assignee_id),
+        priority    = coalesce($6::int, priority),
+        data        = coalesce($7::jsonb, data),
+        possible_duplicate_of = case
+                                  when $9 then null
+                                  else coalesce($8::bigint, possible_duplicate_of)
+                                end
+      where id = $1 and deleted_at is null
+      returning *`,
+      [
+        requestId, title, requester, areaId, assigneeId, priority,
+        data === null ? null : JSON.stringify(data), possibleDuplicateOf, clearDuplicate,
+      ],
+    );
+    return row ?? null;
+  }
+
+  /** `status_since` moves in the same UPDATE, per DATAMODEL 2.7. */
+  async setRequestStatus(requestId, statusId) {
+    const [row] = await this.#rows(
+      `update requests
+        set status_id = $2, status_since = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [requestId, statusId],
+    );
+    return row ?? null;
+  }
+
+  async deleteRequest(requestId) {
+    const [row] = await this.#rows(
+      `update requests
+        set deleted_at = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [requestId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The request a freshly imported row is probably a correction of: same book, same normalised
+   * title and requester, not yet converted. What `possible_duplicate_of` points at.
+   */
+  async findProbableDuplicate({ sheetId, title, requester = null }) {
+    const [row] = await this.#rows(
+      `select id, folio, title
+      from requests
+      where sheet_id = $1
+        and deleted_at is null
+        and lower(btrim(title)) = lower(btrim($2))
+        and coalesce(lower(btrim(requester)), '') = coalesce(lower(btrim($3)), '')
+      order by id desc
+      limit 1`,
+      [sheetId, title, requester],
+    );
+    return row ?? null;
+  }
+
+  /** Every hash already taken from a book, so an import can skip what it has seen. */
+  async listSourceHashes(sheetId) {
+    // Las dos formas de conocer una fila: tener su solicitud, o haberla marcado como ya vista sin
+    // importarla (`sheet_row_marks`). La importación las trata igual --- se saltan ---, que es
+    // justamente lo que hace utilizable un rastreador que ya traía historia.
+    const rows = await this.#rows(
+      `select source_hash from requests
+        where sheet_id = $1 and source_hash is not null and deleted_at is null
+      union
+      select source_hash from sheet_row_marks where sheet_id = $1`,
+      [sheetId],
+    );
+    return new Set(rows.map((row) => row.source_hash));
+  }
+
+  /**
+   * Marks rows as already seen without creating anything. Returns how many marks are new: a hash
+   * already marked, or already carried by a request, is left alone.
+   */
+  async markSheetRows({ sheetId, hashes, markedBy = null }) {
+    if (hashes.length === 0) return 0;
+
+    const rows = await this.#rows(
+      `insert into sheet_row_marks (sheet_id, source_hash, marked_by)
+      select $1, h, $3 from unnest($2::text[]) as h
+      on conflict (sheet_id, source_hash) do nothing
+      returning id`,
+      [sheetId, hashes, markedBy],
+    );
+    return rows.length;
+  }
+
+  /** Undoes the marking for a book. Returns how many marks went. */
+  async clearSheetMarks(sheetId) {
+    const rows = await this.#rows(
+      'delete from sheet_row_marks where sheet_id = $1 returning id',
+      [sheetId],
+    );
+    return rows.length;
+  }
+
+  /** How many rows of a book are marked as seen without a request behind them. */
+  async countSheetMarks(sheetId) {
+    const [row] = await this.#rows(
+      'select count(*)::int as n from sheet_row_marks where sheet_id = $1',
+      [sheetId],
+    );
+    return row?.n ?? 0;
+  }
+
+  //--- PROJECTS (RF-PRY-02) ---
+
+  /**
+   * A project, the requests it converts, its first field values and its first stages, in one
+   * statement. `key` omitted takes the sequence default.
+   *
+   * The requests update returns its own count so orchestration can tell "linked three" from
+   * "one of them was already converted" without a second read; a partial link is impossible
+   * because it is the same statement.
+   */
+  async createProject({
+    key = null, title, description = null, requester = null, schemaVersionId = null,
+    statusId, priority = 0, hasCost = false, carriedOver = false,
+    startsOn = null, dueOn = null, folderId = null, eventCollectionId = null, createdBy = null,
+    requestIds = [], fieldValues = [], stages = [],
+  }) {
+    const [row] = await this.#rows(
+      `with created as (
+        insert into projects (
+          key, title, description, requester, schema_version_id, status_id,
+          priority, has_cost, carried_over, starts_on, due_on,
+          folder_id, event_collection_id, created_by
+        )
+        values (
+          coalesce($1, 'PRY-' || to_char(nextval('projects_key_seq'), 'FM000000')),
+          $2, $3, $4, $5::bigint, $6,
+          $7, $8, $9, $10::date, $11::date,
+          $12::bigint, $13::bigint, $14::bigint
+        )
+        returning *
+      ),
+      linked as (
+        update requests r
+          set project_id = created.id
+        from created
+        where r.id = any($15::bigint[]) and r.project_id is null and r.deleted_at is null
+        returning r.id
+      ),
+      values_inserted as (
+        insert into project_field_values (project_id, key, value)
+        select created.id, v.key, v.value
+        from created, unnest($16::text[], $17::text[]) as v(key, value)
+        returning 1
+      ),
+      stages_inserted as (
+        insert into project_stages (
+          project_id, area_id, title, seq, status, started_at, assigned_to, inputs, outputs
+        )
+        select
+          created.id, st.area_id, st.title, st.seq, st.status,
+          case when st.status = 'active' then current_timestamp end,
+          nullif(st.assigned_to, '')::bigint,
+          st.inputs::jsonb, st.outputs::jsonb
+        from created, unnest(
+          $18::bigint[], $19::text[], $20::int[], $21::text[], $22::text[], $23::text[], $24::text[]
+        ) as st(area_id, title, seq, status, assigned_to, inputs, outputs)
+        returning 1
+      )
+      select
+        created.*,
+        (select count(*) from linked)::int as linked_count,
+        (select count(*) from stages_inserted)::int as stage_count
+      from created`,
+      [
+        key, title, description, requester, schemaVersionId, statusId,
+        priority, hasCost, carriedOver, startsOn, dueOn,
+        folderId, eventCollectionId, createdBy,
+        this.#idArray(requestIds),
+        this.#idArray(fieldValues.map((v) => v.key)),
+        this.#idArray(fieldValues.map((v) => v.value)),
+        this.#idArray(stages.map((st) => st.areaId)),
+        this.#idArray(stages.map((st) => st.title)),
+        this.#idArray(stages.map((st) => st.seq)),
+        this.#idArray(stages.map((st) => st.status)),
+        // postgrejs infers a param's type from its values and cannot type an all-null array,
+        // so "nobody" travels as '' and comes back to NULL in the statement.
+        this.#idArray(stages.map((st) => (st.assignedTo == null ? '' : String(st.assignedTo)))),
+        this.#idArray(stages.map((st) => JSON.stringify(st.inputs ?? []))),
+        this.#idArray(stages.map((st) => JSON.stringify(st.outputs ?? []))),
+      ],
+    );
+
+    return row;
+  }
+
+  /** One project with its stages (and their approvals), field values and linked requests. */
+  async getProject(projectId) {
+    const [row] = await this.#rows(
+      `select
+        p.*,
+        s.code as status_code, s.label as status_label, s.is_terminal as status_is_terminal,
+        u.full_name as created_by_name,
+        coalesce(stages.list, '[]'::json) as stages,
+        coalesce(fv.list, '[]'::json) as field_values,
+        coalesce(req.list, '[]'::json) as requests
+      from projects p
+      join statuses s on s.id = p.status_id
+      left join users u on u.id = p.created_by
+      left join lateral (
+        select json_agg(stage order by stage_seq, stage_attempt, stage_id) as list
+        from (
+          select
+            ps.id as stage_id, ps.seq as stage_seq, ps.attempt as stage_attempt,
+            json_build_object(
+              'id', ps.id, 'areaId', ps.area_id, 'areaName', a.name, 'title', ps.title,
+              'seq', ps.seq, 'attempt', ps.attempt, 'status', ps.status,
+              'blockedReason', ps.blocked_reason, 'assignedTo', ps.assigned_to,
+              'assignedToName', au.full_name, 'eventId', ps.event_id,
+              'startedAt', ps.started_at, 'endedAt', ps.ended_at, 'createdAt', ps.created_at,
+              'inputs', ps.inputs, 'outputs', ps.outputs,
+              'approvals', coalesce(ap.list, '[]'::json)
+            ) as stage
+          from project_stages ps
+          join areas a on a.id = ps.area_id
+          left join users au on au.id = ps.assigned_to
+          left join lateral (
+            select json_agg(json_build_object(
+              'id', v.id, 'decision', v.decision, 'approverUserId', v.approver_user_id,
+              'approverName', vu.full_name, 'comment', v.comment,
+              'evidenceFileId', v.evidence_file_id, 'decidedAt', v.decided_at
+            ) order by v.decided_at, v.id) as list
+            from approvals v
+            left join users vu on vu.id = v.approver_user_id
+            where v.project_stage_id = ps.id
+          ) ap on true
+          where ps.project_id = p.id
+        ) ordered
+      ) stages on true
+      left join lateral (
+        select json_agg(json_build_object(
+          'key', f.key, 'value', f.value, 'producedByStageId', f.produced_by_stage_id,
+          'updatedAt', f.updated_at
+        ) order by f.key) as list
+        from project_field_values f
+        where f.project_id = p.id
+      ) fv on true
+      left join lateral (
+        select json_agg(json_build_object(
+          'id', r.id, 'folio', r.folio, 'title', r.title
+        ) order by r.id) as list
+        from requests r
+        where r.project_id = p.id and r.deleted_at is null
+      ) req on true
+      where p.id = $1 and p.deleted_at is null`,
+      [projectId],
+    );
+
+    return row ?? null;
+  }
+
+  /**
+   * The board (RF-PRY-02, RF-SOL-05). `state` is open | closed | archived | all; `areaId`
+   * matches a project with a stage in that area; `fieldKey`/`fieldValue` is RF-IMP-08's
+   * equality lookup over produced values.
+   */
+  async listProjects({
+    q = null, statusId = null, areaId = null, requester = null,
+    hasCost = null, carriedOver = null, state = 'open',
+    fieldKey = null, fieldValue = null, assignedTo = null,
+    sort = 'priority', limit = 50, offset = 0,
+  } = {}) {
+    return this.#rows(
+      `select
+        p.id, p.key, p.title, p.requester, p.status_id, p.status_since, p.priority,
+        p.has_cost, p.carried_over, p.starts_on, p.due_on,
+        p.closed_at, p.archived_at, p.created_at,
+        s.code as status_code, s.label as status_label,
+        (select count(*) from project_stages ps
+          where ps.project_id = p.id and ps.status in ('active', 'waiting_external'))::int
+          as open_stage_count,
+        (select count(*) from requests r
+          where r.project_id = p.id and r.deleted_at is null)::int as request_count
+      from projects p
+      join statuses s on s.id = p.status_id
+      where p.deleted_at is null
+        and case $7::text
+              when 'open'     then p.closed_at is null and p.archived_at is null
+              when 'closed'   then p.closed_at is not null
+              when 'archived' then p.archived_at is not null
+              else true
+            end
+        and ($1::text is null or p.title ilike '%' || $1 || '%' or p.key ilike $1 || '%')
+        and ($2::bigint is null or p.status_id = $2::bigint)
+        and ($3::bigint is null or exists (
+              select 1 from project_stages ps
+              where ps.project_id = p.id and ps.area_id = $3::bigint))
+        and ($4::text is null or lower(p.requester) = lower($4))
+        and ($5::boolean is null or p.has_cost = $5::boolean)
+        and ($6::boolean is null or p.carried_over = $6::boolean)
+        and ($8::text is null or exists (
+              select 1 from project_field_values f
+              where f.project_id = p.id and f.key = $8::text
+                and ($9::text is null or f.value = $9::text)))
+        and ($10::bigint is null or exists (
+              select 1 from project_stages ps
+              where ps.project_id = p.id and ps.assigned_to = $10::bigint))
+      order by
+        case when $11::text = 'priority' then p.priority end desc nulls last,
+        case when $11::text = 'due' then p.due_on end asc nulls last,
+        p.created_at desc, p.id desc
+      limit $12 offset $13`,
+      [
+        q, statusId, areaId, requester, hasCost, carriedOver, state,
+        fieldKey, fieldValue, assignedTo, sort, limit, offset,
+      ],
+    );
+  }
+
+  /** Only the keys the caller sent; the row is merged in orchestration. */
+  async updateProject(projectId, {
+    title = null, description = null, requester = null, priority = null,
+    hasCost = null, carriedOver = null, startsOn = null, dueOn = null, key = null,
+  }) {
+    const [row] = await this.#rows(
+      `update projects set
+        key          = coalesce($2, key),
+        title        = coalesce($3, title),
+        description  = coalesce($4, description),
+        requester    = coalesce($5, requester),
+        priority     = coalesce($6, priority),
+        has_cost     = coalesce($7, has_cost),
+        carried_over = coalesce($8, carried_over),
+        starts_on    = coalesce($9::date, starts_on),
+        due_on       = coalesce($10::date, due_on)
+      where id = $1 and deleted_at is null
+      returning *`,
+      [projectId, key, title, description, requester, priority, hasCost, carriedOver, startsOn, dueOn],
+    );
+    return row ?? null;
+  }
+
+  /** `status_since` moves in the same UPDATE, per DATAMODEL 2.7. */
+  async setProjectStatus(projectId, statusId) {
+    const [row] = await this.#rows(
+      `update projects
+        set status_id = $2, status_since = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [projectId, statusId],
+    );
+    return row ?? null;
+  }
+
+  /** `closed_at` and `archived_at` are different acts; `stamp` names the column. */
+  async stampProject(projectId, stamp) {
+    const column = stamp === 'closed' ? 'closed_at' : 'archived_at';
+    const [row] = await this.#rows(
+      `update projects
+        set ${column} = current_timestamp
+      where id = $1 and deleted_at is null and ${column} is null
+      returning *`,
+      [projectId],
+    );
+    return row ?? null;
+  }
+
+  async deleteProject(projectId) {
+    const [row] = await this.#rows(
+      `update projects
+        set deleted_at = current_timestamp
+      where id = $1 and deleted_at is null
+      returning *`,
+      [projectId],
+    );
+    return row ?? null;
+  }
+
+  /** Links unconverted requests to an existing project (RF-PRY-01). */
+  async attachRequests(projectId, requestIds) {
+    return this.#rows(
+      `update requests
+        set project_id = $1
+      where id = any($2::bigint[]) and project_id is null and deleted_at is null
+      returning id, folio, title`,
+      [projectId, this.#idArray(requestIds)],
+    );
+  }
+
+  //--- PROJECT STAGES (RF-FLW-01) ---
+
+  async createProjectStage({
+    projectId, areaId, title, seq = 1, status = 'pending', assignedTo = null,
+    blockedReason = null, attempt = null, inputs = [], outputs = [],
+  }) {
+    const [row] = await this.#rows(
+      `insert into project_stages (
+        project_id, area_id, title, seq, attempt, status, blocked_reason, assigned_to,
+        started_at, inputs, outputs
+      )
+      select
+        $1, $2, $3, $4,
+        coalesce($8::int, (
+          select coalesce(max(attempt), 0) + 1 from project_stages
+          where project_id = $1 and area_id = $2 and seq = $4
+        )),
+        $5, $6, $7::bigint,
+        case when $5 = 'active' then current_timestamp end,
+        $9::jsonb, $10::jsonb
+      returning *`,
+      [
+        projectId, areaId, title, seq, status, blockedReason, assignedTo, attempt,
+        JSON.stringify(inputs), JSON.stringify(outputs),
+      ],
+    );
+    return row;
+  }
+
+  async getProjectStage(stageId) {
+    const [row] = await this.#rows(
+      `select ps.*, a.name as area_name, p.deleted_at as project_deleted_at
+      from project_stages ps
+      join areas a on a.id = ps.area_id
+      join projects p on p.id = ps.project_id
+      where ps.id = $1`,
+      [stageId],
+    );
+    return row ?? null;
+  }
+
+  async listProjectStages(projectId) {
+    return this.#rows(
+      `select ps.*, a.name as area_name, u.full_name as assigned_to_name
+      from project_stages ps
+      join areas a on a.id = ps.area_id
+      left join users u on u.id = ps.assigned_to
+      where ps.project_id = $1
+      order by ps.seq, ps.attempt, ps.id`,
+      [projectId],
+    );
+  }
+
+  /**
+   * `started_at` is stamped the first time a stage becomes active and `ended_at` when it
+   * leaves the flow, both here rather than in orchestration so a status change cannot forget
+   * its timestamp.
+   */
+  async updateProjectStage(stageId, {
+    title = null, status = null, blockedReason = null, assignedTo = null, clearBlocked = false,
+    inputs = null, outputs = null,
+  }) {
+    const [row] = await this.#rows(
+      `update project_stages set
+        inputs         = coalesce($7::jsonb, inputs),
+        outputs        = coalesce($8::jsonb, outputs),
+        title          = coalesce($2, title),
+        status         = coalesce($3, status),
+        blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
+        assigned_to    = coalesce($5::bigint, assigned_to),
+        started_at     = case
+                           when started_at is null and coalesce($3, status) = 'active'
+                           then current_timestamp else started_at
+                         end,
+        ended_at       = case
+                           when coalesce($3, status) in ('done', 'cancelled')
+                           then coalesce(ended_at, current_timestamp)
+                           else ended_at
+                         end
+      where id = $1
+      returning *`,
+      [
+        stageId, title, status, blockedReason, assignedTo, clearBlocked,
+        inputs === null ? null : JSON.stringify(inputs),
+        outputs === null ? null : JSON.stringify(outputs),
+      ],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Closes a stage and opens its follow-ups in one statement: a rejection that reruns the
+   * stage, or -- once E lands -- the targets of the transitions out of it. Each follow-up
+   * takes `attempt = max + 1` for its own (project, area, seq), which is what the unique
+   * index counts, so two callers racing collide on the index instead of on each other.
+   *
+   * @param {number} stageId
+   * @param {{ status?: string, nextStages?: {areaId:number,title:string,seq:number,
+   *   assignedTo?:number|null}[] }} input
+   * @returns {Promise<{ stage: object, opened: object[] }>}
+   */
+  async advanceStage(stageId, { status = 'done', nextStages = [] } = {}) {
+    const rows = await this.#rows(
+      `with closed as (
+        update project_stages
+          set status = $2, ended_at = coalesce(ended_at, current_timestamp)
+        where id = $1
+        returning *
+      ),
+      opened as (
+        insert into project_stages (
+          project_id, area_id, title, seq, attempt, status, assigned_to, started_at,
+          inputs, outputs
+        )
+        select
+          closed.project_id, n.area_id, n.title, n.seq,
+          coalesce((
+            select max(ps.attempt) from project_stages ps
+            where ps.project_id = closed.project_id
+              and ps.area_id = n.area_id and ps.seq = n.seq
+          ), 0) + 1,
+          'active', nullif(n.assigned_to, '')::bigint, current_timestamp,
+          n.inputs::jsonb, n.outputs::jsonb
+        from closed, unnest($3::bigint[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
+          as n(area_id, title, seq, assigned_to, inputs, outputs)
+        returning *
+      )
+      select 'closed' as kind, to_json(closed.*) as row from closed
+      union all
+      select 'opened' as kind, to_json(opened.*) as row from opened`,
+      [
+        stageId, status,
+        this.#idArray(nextStages.map((n) => n.areaId)),
+        this.#idArray(nextStages.map((n) => n.title)),
+        this.#idArray(nextStages.map((n) => n.seq)),
+        this.#idArray(nextStages.map((n) => (n.assignedTo == null ? '' : String(n.assignedTo)))),
+        this.#idArray(nextStages.map((n) => JSON.stringify(n.inputs ?? []))),
+        this.#idArray(nextStages.map((n) => JSON.stringify(n.outputs ?? []))),
+      ],
+    );
+
+    return {
+      stage: rows.find((r) => r.kind === 'closed')?.row ?? null,
+      opened: rows.filter((r) => r.kind === 'opened').map((r) => r.row),
+    };
+  }
+
+  //--- APPROVALS (RF-FLW-03) ---
+
+  async createApproval({ projectStageId, decision, approverUserId, comment = null, evidenceFileId = null }) {
+    const [row] = await this.#rows(
+      `insert into approvals (
+        project_stage_id, decision, approver_user_id, comment, evidence_file_id
+      )
+      values ($1, $2, $3, $4, $5::bigint)
+      returning *`,
+      [projectStageId, decision, approverUserId, comment, evidenceFileId],
+    );
+    return row;
+  }
+
+  async listApprovals(stageId) {
+    return this.#rows(
+      `select v.*, u.full_name as approver_name
+      from approvals v
+      left join users u on u.id = v.approver_user_id
+      where v.project_stage_id = $1
+      order by v.decided_at, v.id`,
+      [stageId],
+    );
+  }
+
+  //--- PROJECT FIELD VALUES (RF-FLW-06, RF-IMP-08) ---
+
+  /** One row per key per project; a correction is an UPDATE that moves the provenance with it. */
+  async upsertFieldValue(projectId, { key, value, producedByStageId = null }) {
+    const [row] = await this.#rows(
+      `insert into project_field_values (project_id, key, value, produced_by_stage_id)
+      values ($1, $2, $3, $4::bigint)
+      on conflict (project_id, key) do update
+        set value = excluded.value,
+            produced_by_stage_id = coalesce(excluded.produced_by_stage_id, project_field_values.produced_by_stage_id),
+            updated_at = current_timestamp
+      returning *`,
+      [projectId, key, value, producedByStageId],
+    );
+    return row;
+  }
+
+  async listFieldValues(projectId) {
+    return this.#rows(
+      `select * from project_field_values where project_id = $1 order by key`,
+      [projectId],
+    );
+  }
+
+  async deleteFieldValue(projectId, key) {
+    const [row] = await this.#rows(
+      `delete from project_field_values where project_id = $1 and key = $2 returning *`,
+      [projectId, key],
+    );
+    return row ?? null;
+  }
+
+  //--- SHEET MAPPING AND IMPORTS (RF-MIG-02) ---
+
+  /** Points a registered book at a format version and stores how its columns feed it. */
+  async setSheetMapping(sheetId, { schemaVersionId, columnMap }) {
+    const [row] = await this.#rows(
+      `update sheets
+        set schema_version_id = $2, column_map = $3::jsonb
+      where id = $1 and deleted_at is null
+      returning *`,
+      [sheetId, schemaVersionId, JSON.stringify(columnMap)],
+    );
+    return row ?? null;
+  }
+
+  /** Back to registered-but-unmapped, which is what an empty map and a null version mean. */
+  async clearSheetMapping(sheetId) {
+    const [row] = await this.#rows(
+      `update sheets
+        set schema_version_id = null, column_map = '{}'::jsonb
+      where id = $1 and deleted_at is null
+      returning *`,
+      [sheetId],
+    );
+    return row ?? null;
+  }
+
+  async createSheetImport({ sheetId, runBy = null }) {
+    const [row] = await this.#rows(
+      `insert into sheet_imports (sheet_id, run_by)
+      values ($1, $2::bigint)
+      returning *`,
+      [sheetId, runBy],
+    );
+    return row;
+  }
+
+  /** Closes the run with its counts. `errors` is [{ index, message }]. */
+  async finishSheetImport(importId, {
+    rowsRead = 0, rowsCreated = 0, rowsSkipped = 0, rowsFailed = 0, rowsFlagged = 0, errors = [],
+  }) {
+    const [row] = await this.#rows(
+      `update sheet_imports set
+        finished_at  = current_timestamp,
+        rows_read    = $2,
+        rows_created = $3,
+        rows_skipped = $4,
+        rows_failed  = $5,
+        rows_flagged = $6,
+        errors       = $7::jsonb
+      where id = $1
+      returning *`,
+      [importId, rowsRead, rowsCreated, rowsSkipped, rowsFailed, rowsFlagged, JSON.stringify(errors)],
+    );
+    return row ?? null;
+  }
+
+  async listSheetImports(sheetId, limit = 20) {
+    return this.#rows(
+      `select i.*, u.full_name as run_by_name
+      from sheet_imports i
+      left join users u on u.id = i.run_by
+      where i.sheet_id = $1
+      order by i.started_at desc, i.id desc
+      limit $2`,
+      [sheetId, limit],
+    );
+  }
+
+  /** How far the last import got, for the next one to say "since when" (RF-MIG-02). */
+  async markSheetImported(sheetId) {
+    const [row] = await this.#rows(
+      `update sheets
+        set last_imported_at = current_timestamp
+      where id = $1
+      returning *`,
+      [sheetId],
+    );
+    return row ?? null;
+  }
+
+  //--- REQUESTERS (RF-SOL-07) ---
+
+  /**
+   * The requester strings already in use, for the autocomplete that keeps a person from
+   * inventing a fifth spelling. Distinct across requests and projects, prefix-matched so
+   * the index on lower(requester) is usable.
+   */
+  async listRequesters({ q = null, limit = 20 } = {}) {
+    return this.#rows(
+      `select requester, count(*)::int as uses
+      from (
+        select requester from requests where requester is not null and deleted_at is null
+        union all
+        select requester from projects where requester is not null and deleted_at is null
+      ) used
+      where $1::text is null or lower(requester) like lower($1) || '%'
+      group by requester
+      order by count(*) desc, requester
+      limit $2`,
+      [q, limit],
+    );
+  }
+
+  //--- STATUSES (RF-EST-02) ---
+
+  /**
+   * The catalogue an area works with: its own rows plus the global ones. Without an area,
+   * the global catalogue alone.
+   */
+  async listStatuses({ areaId = null, includeInactive = false } = {}) {
+    return this.#rows(
+      `select
+        s.id, s.area_id, s.code, s.label, s.sort_order, s.is_terminal, s.is_active,
+        a.name as area_name
+      from statuses s
+      left join areas a on a.id = s.area_id
+      where (s.area_id is null or s.area_id = $1::bigint)
+        and ($2 or s.is_active)
+      order by s.area_id nulls first, s.sort_order, s.id`,
+      [areaId, includeInactive],
+    );
+  }
+
+  async getStatus(statusId) {
+    const [row] = await this.#rows(
+      `select
+        s.id, s.area_id, s.code, s.label, s.sort_order, s.is_terminal, s.is_active,
+        a.name as area_name
+      from statuses s
+      left join areas a on a.id = s.area_id
+      where s.id = $1`,
+      [statusId],
+    );
+    return row ?? null;
+  }
+
+  /** A code in one catalogue. `areaId` null looks in the global one, matching the two partial indexes. */
+  async findStatusByCode(code, areaId = null) {
+    const [row] = await this.#rows(
+      `select id, area_id, code, label, sort_order, is_terminal, is_active
+      from statuses
+      where code = $1
+        and (($2::bigint is null and area_id is null) or area_id = $2::bigint)
+      limit 1`,
+      [code, areaId],
+    );
+    return row ?? null;
+  }
+
+  async createStatus({
+    areaId = null,
+    code,
+    label,
+    sortOrder = 0,
+    isTerminal = false,
+  }) {
+    const [row] = await this.#rows(
+      `insert into statuses (area_id, code, label, sort_order, is_terminal)
+      values ($1, $2, $3, $4, $5)
+      returning id, area_id, code, label, sort_order, is_terminal, is_active`,
+      [areaId, code, label, sortOrder, isTerminal],
+    );
+    return row;
+  }
+
+  async updateStatus(
+    statusId,
+    { label = null, sortOrder = null, isTerminal = null, isActive = null },
+  ) {
+    const [row] = await this.#rows(
+      `update statuses
+        set label       = coalesce($2, label),
+            sort_order  = coalesce($3, sort_order),
+            is_terminal = coalesce($4, is_terminal),
+            is_active   = coalesce($5, is_active)
+      where id = $1
+      returning id, area_id, code, label, sort_order, is_terminal, is_active`,
+      [statusId, label, sortOrder, isTerminal, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** Deactivates: the rows are referenced by requests and projects, so they never leave. */
+  async deactivateStatus(statusId) {
+    const [row] = await this.#rows(
+      `update statuses
+        set is_active = false
+      where id = $1
+      returning id, area_id, code, label, sort_order, is_terminal, is_active`,
+      [statusId],
+    );
+    return row ?? null;
+  }
+
   //--- DATA TYPES ---
 
   async getDataType(code) {
@@ -1237,6 +2159,135 @@ class Query {
     return row ?? null;
   }
 
+  /**
+   * Clones a schema: a new identity whose version 1 carries the LATEST version's fields of
+   * the source, in one statement. `null` when the source does not exist or has no version.
+   */
+  async cloneSchema(sourceId, { code, name, publishedBy = null }) {
+    const [row] = await this.#rows(
+      `with source as (
+        select fields
+        from schema_versions
+        where schema_id = $1
+        order by version desc
+        limit 1
+      ),
+      created_schema as (
+        insert into schemas (code, name)
+        select $2, $3 from source
+        returning id, code, name, is_active, created_at
+      ),
+      created_version as (
+        insert into schema_versions (schema_id, version, fields, published_by)
+        select created_schema.id, 1, source.fields, $4::bigint
+        from created_schema, source
+        returning id, schema_id, version, fields, published_at, published_by
+      )
+      select
+        s.id, s.code, s.name, s.is_active, s.created_at,
+        v.id as schema_version_id, v.version, v.fields, v.published_at, v.published_by
+      from created_schema s
+      join created_version v on v.schema_id = s.id`,
+      [sourceId, code, name, publishedBy],
+    );
+    return row ?? null;
+  }
+
+  /** Every version of a schema, newest first. */
+  async getSchemaVersions(schemaId) {
+    return this.#rows(
+      `select id, schema_id, version, fields, published_at, published_by
+      from schema_versions
+      where schema_id = $1
+      order by version desc`,
+      [schemaId],
+    );
+  }
+
+  /** One version by its own id, with the identity it belongs to. */
+  async getSchemaVersion(versionId) {
+    const [row] = await this.#rows(
+      `select
+        v.id, v.schema_id, v.version, v.fields, v.published_at, v.published_by,
+        s.code as schema_code, s.name as schema_name, s.is_active as schema_is_active
+      from schema_versions v
+      join schemas s on s.id = v.schema_id
+      where v.id = $1`,
+      [versionId],
+    );
+    return row ?? null;
+  }
+
+  /** The newest version of a schema, or null. Used wherever "the schema" means its current shape. */
+  async getLatestSchemaVersion(schemaId) {
+    const [row] = await this.#rows(
+      `select
+        v.id, v.schema_id, v.version, v.fields, v.published_at, v.published_by,
+        s.code as schema_code, s.name as schema_name, s.is_active as schema_is_active
+      from schema_versions v
+      join schemas s on s.id = v.schema_id
+      where v.schema_id = $1
+      order by v.version desc
+      limit 1`,
+      [schemaId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The field vocabulary: every key ever published, with its most recent definition and where it
+   * is used.
+   *
+   * A key is not local to a format -- it is what the value is stored under in `requests.data` and
+   * in `project_field_values`, so `numero_orden` has to mean one thing system-wide. Keys from
+   * retired versions stay in the list: they have captured data under them.
+   */
+  async listFieldKeys() {
+    return this.#rows(
+      `with campos as (
+        select
+          f->>'code' as key,
+          f->>'name' as name,
+          f->>'type' as type,
+          coalesce(f->>'note', '') as note,
+          v.schema_id, v.published_at, v.id as version_id
+        from schema_versions v
+        cross join lateral (
+          select value as f from jsonb_array_elements(coalesce(v.fields->'deliverables', '[]'::jsonb))
+          union all
+          select value as f from jsonb_array_elements(coalesce(v.fields->'information', '[]'::jsonb))
+        ) campo
+        where f->>'code' is not null
+      ),
+      ultima as (
+        select distinct on (key) key, name, type, note
+        from campos
+        order by key, published_at desc, version_id desc
+      )
+      select
+        u.key, u.name, u.type, u.note,
+        (select count(distinct c.schema_id) from campos c where c.key = u.key)::int as schema_count,
+        (select json_agg(distinct s.name)
+           from campos c join schemas s on s.id = c.schema_id
+          where c.key = u.key) as schemas
+      from ultima u
+      order by u.key`,
+    );
+  }
+
+  /** Identity-level edit: name and active flag. Versions are never touched. */
+  async updateSchema(schemaId, { name, isActive }) {
+    const [row] = await this.#rows(
+      `update schemas
+        set name = coalesce($2, name),
+            is_active = coalesce($3, is_active)
+      where id = $1
+      returning id, code, name, is_active, created_at`,
+      [schemaId, name ?? null, isActive ?? null],
+    );
+    return row ?? null;
+  }
+
   // --- Microsoft app registration (RF-MIG-01) ---
 
   /** The one row, with who last saved it, or null when the registration lives in .env. */
@@ -1427,7 +2478,10 @@ class Query {
            a.email        as account_email,
            a.display_name as account_display_name,
            a.revoked_at   as account_revoked_at,
-           u.full_name    as registered_by_name
+           u.full_name    as registered_by_name,
+           -- Cuántas filas se marcaron como ya vistas sin importarlas: una pantalla que ofrece
+           -- deshacerlo tiene que poder decir cuántas son.
+           (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows
       from sheets s
       join microsoft_accounts a on a.id = s.microsoft_account_id
       left join users u on u.id = s.registered_by`;

@@ -38,15 +38,19 @@ export async function sql(text, params = []) {
 
 // Wipe the rows a test file creates, leaving the catalogs alone.
 //
-// CASCADE looks alarming and is not: TRUNCATE cascades along INBOUND foreign keys, to the
-// tables that reference these two, all of which are empty in a test database. It does not
-// touch roles, areas or contract_types, which users references rather than the other way
-// round -- those are seeded by the catalog-bootstrap migration and must survive.
+// This used to be `truncate users, area_members restart identity cascade`, and CASCADE
+// stopped being harmless the day a SEEDED table gained a foreign key to users:
+// schema-field-shape publishes the starter formats into schema_versions, whose
+// published_by references users, so the cascade emptied every version and left five
+// schemas with nothing in them. Deleting through resetCases() takes the same rows in the
+// same foreign-key order without following the key into tables it should not touch.
 //
-// RESTART IDENTITY is for determinism: every file starts from id 1 regardless of what ran
-// before it.
+// The identities are restarted for the reason the truncate did it: every file starts from
+// id 1 regardless of what ran before it.
 export async function reset() {
-  await sql('truncate users, area_members restart identity cascade');
+  await resetCases([]);
+  await sql('alter table users alter column id restart with 1');
+  await sql('alter table area_members alter column id restart with 1');
 }
 
 // The prefix every area and role a test creates is named with, and the one every test
@@ -57,6 +61,9 @@ export async function reset() {
 // moment a fixture is deleted and re-created.
 export const TEST_PREFIX = 'zz-test:';
 export const TEST_PERMISSION_PREFIX = 'zz.test.';
+// Schema and status codes are snake_case by rule, so their prefixes have to be too.
+export const TEST_SCHEMA_PREFIX = 'zztest_';
+export const TEST_STATUS_PREFIX = 'zztest_';
 
 // Wipe what a case created, keeping the accounts the file logs in with.
 //
@@ -92,11 +99,35 @@ export async function resetCases(keepEmails = []) {
   // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
   // follows inbound foreign keys and takes logs with it.
   await sql('delete from logs');
-  // Books before accounts before users: sheets reference microsoft_accounts, which
-  // reference users, and neither is seeded.
+  // The foreign keys read backwards, and the order is load-bearing: `requests.sheet_id`
+  // references `sheets`, so an imported request has to go before the book it came from -- which
+  // only started mattering when the import began creating such rows.
+  await sql('delete from approvals');
+  await sql('delete from project_field_values');
+  await sql('delete from project_stages');
+  await sql('delete from requests');
+  await sql('delete from projects');
+  // Import runs, then the books, then the accounts: each references the next, and none is seeded.
+  await sql('delete from sheet_imports');
+  // Las marcas van con su libro por CASCADE, pero se borran aquí igual: el orden de esta función
+  // es explícito a propósito, y depender del cascade esconde de qué depende qué.
+  await sql('delete from sheet_row_marks');
   await sql('delete from sheets');
   await sql('delete from microsoft_accounts');
   await sql('delete from microsoft_app');
+  // Statuses a test added. The global catalogue is seeded by projects-spine and
+  // status-manage and must survive, so only area rows and prefixed codes go.
+  await sql('delete from statuses where area_id is not null or code like $1', [
+    `${TEST_STATUS_PREFIX}%`,
+  ]);
+  // Formats a test published, after sheets (which point at a version). The starter formats
+  // seeded by schema-field-shape carry real codes and stay.
+  await sql(
+    `delete from schema_versions
+      where schema_id in (select id from schemas where code like $1)`,
+    [`${TEST_SCHEMA_PREFIX}%`],
+  );
+  await sql('delete from schemas where code like $1', [`${TEST_SCHEMA_PREFIX}%`]);
   await sql(
     `delete from role_permissions
       where role_id in (select id from roles where name like $1)`,
@@ -192,6 +223,43 @@ export async function createMicrosoftAccount(userId, { email = 'cuenta@outlook.c
     displayName: 'Cuenta de Prueba',
     refreshTokenEnc: seal('not-a-real-refresh-token'),
     scopes: 'Files.Read.All User.Read',
+  });
+}
+
+// A published format straight through query.js, prefixed so resetCases() finds it. Fields
+// default to the smallest valid list; pass your own to test a shape.
+export async function createSchema(code, fields = null, name = null) {
+  return query.createSchema({
+    code: `${TEST_SCHEMA_PREFIX}${code}`,
+    name: name ?? `Formato ${code}`,
+    fields: fields ?? {
+      deliverables: [
+        { code: 'entregable', name: 'Entregable', type: 'text', note: '', required: true },
+      ],
+      information: [
+        { code: 'dependencia', name: 'Dependencia', type: 'text', note: '', required: true },
+      ],
+    },
+    publishedBy: null,
+  });
+}
+
+// A registered book, mapped or not, through query.js. `microsoftAccountId` comes from
+// createMicrosoftAccount().
+export async function createSheet({
+  microsoftAccountId,
+  name = 'Seguimiento de prueba',
+  tableName = 'Sheet1',
+  registeredBy = null,
+}) {
+  return query.createSheet({
+    name,
+    driveId: `b!drive-${microsoftAccountId}`,
+    itemId: `01ITEM-${name}`,
+    tableName,
+    webUrl: null,
+    microsoftAccountId,
+    registeredBy,
   });
 }
 

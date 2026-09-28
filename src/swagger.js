@@ -220,8 +220,44 @@ export function buildOpenApiDocument() {
       {
         name: 'schemas',
         description:
-          'Dynamic schemas and their versions. READs are open to any signed-in user; ' +
-          'WRITEs require the `schema.manage` permission.',
+          'Request formats (RF-SOL-01) and their immutable versions. Reads are open to any ' +
+          'signed-in user; writes require `schema.manage`.',
+      },
+      {
+        name: 'requests',
+        description:
+          'The intake (RF-SOL-03 … RF-SOL-08). A request is not an early project: they are ' +
+          'separate rows, `projectId` is the link, and `convert` is the one crossing. Values ' +
+          'are coerced against the format\'s fields, so a value typed here and the same value ' +
+          'read out of a spreadsheet land identically.',
+      },
+      {
+        name: 'projects',
+        description:
+          'Projects (RF-PRY-02), their stages (RF-FLW-01), the sign-offs that move them ' +
+          '(RF-FLW-03) and the values that cross stages (RF-FLW-06). A project has no ' +
+          'current stage: the active stage is the set of stages whose status is `active`, ' +
+          'which is what `activeStageIds` reports.',
+      },
+      {
+        name: 'requesters',
+        description:
+          'The requesting party is a string on the request and the project, not a row ' +
+          '(RF-SOL-07). This is the autocomplete over the strings already in use, so a ' +
+          'correction at conversion converges on one spelling instead of adding another.',
+      },
+      {
+        name: 'statuses',
+        description:
+          'The status catalogue, configurable per area (RF-EST-02). `areaId` null is the ' +
+          'global catalogue every area starts from. Reads need only a session; writes need ' +
+          '`status.manage`.',
+      },
+      {
+        name: 'data-types',
+        description:
+          'The catalogue of field types a format may use. Read-only: a type is a coercion ' +
+          'rule the server implements, so adding one is a migration.',
       },
     ],
     components: {
@@ -857,6 +893,12 @@ export function buildOpenApiDocument() {
             columnMap: { type: 'object', description: 'Excel header -> field key. Empty until mapped.' },
             mapped: { type: 'boolean', description: 'schemaVersionId is not null.' },
             lastImportedAt: { type: ['string', 'null'], format: 'date-time' },
+            markedRows: {
+              type: 'integer',
+              readOnly: true,
+              description:
+                'Rows marked as already seen without being imported (see POST /baseline).',
+            },
             accountId: { type: 'integer', description: 'The microsoft account that reads it.' },
             accountEmail: { type: ['string', 'null'] },
             accountDisplayName: { type: ['string', 'null'] },
@@ -904,16 +946,786 @@ export function buildOpenApiDocument() {
           },
           required: ['sheet', 'kind', 'name', 'headers', 'rows'],
         },
-        SchemaField: {
+        RequestListItem: {
           type: 'object',
           properties: {
-            code: { type: 'string', example: 'client_name' },
-            name: { type: 'string', example: 'Client Name' },
-            type: { type: 'string', example: 'text' },
-            section: { type: 'string', enum: ['deliverables', 'information'], example: 'information' },
-            required: { type: 'boolean', example: true },
+            id: { type: 'integer' },
+            folio: { type: 'string', example: 'SOL-000004', description: 'From a sequence (RF-SOL-03).' },
+            title: { type: 'string' },
+            requester: { type: ['string', 'null'], example: 'Facultad de Química' },
+            areaId: { type: ['integer', 'null'], description: 'The inbox it landed in (RF-SOL-02).' },
+            areaName: { type: ['string', 'null'] },
+            statusId: { type: 'integer' },
+            statusCode: { type: 'string', example: 'recibido' },
+            statusLabel: { type: 'string' },
+            statusSince: { type: 'string', format: 'date-time' },
+            assigneeId: { type: ['integer', 'null'] },
+            assigneeName: { type: ['string', 'null'] },
+            priority: { type: 'integer', description: 'Higher is more urgent (RF-FLW-08).' },
+            source: { type: 'string', enum: ['manual', 'form', 'email', 'sheet'] },
+            sheetId: { type: ['integer', 'null'] },
+            schemaCode: { type: 'string', example: 'papel_institucional' },
+            schemaName: { type: 'string' },
+            possibleDuplicateOf: {
+              type: ['integer', 'null'],
+              description: 'Set by the import when a row looks like a correction of an earlier one.',
+            },
+            projectId: { type: ['integer', 'null'], description: 'Null: not converted yet.' },
+            projectKey: { type: ['string', 'null'] },
+            createdAt: { type: 'string', format: 'date-time' },
           },
-          required: ['code', 'name', 'type', 'section'],
+          required: ['id', 'folio', 'title', 'statusId', 'priority', 'source'],
+        },
+        Request: {
+          allOf: [
+            { $ref: '#/components/schemas/RequestListItem' },
+            {
+              type: 'object',
+              properties: {
+                data: {
+                  type: 'object',
+                  description:
+                    'The whole capture (RF-SOL-06), keyed by field code and coerced by type. ' +
+                    'Keys the format no longer has are kept as captured.',
+                },
+                schemaVersionId: { type: 'integer' },
+                schemaId: { type: 'integer' },
+                schemaVersion: { type: 'integer' },
+                fields: { $ref: '#/components/schemas/SchemaFields' },
+                statusIsTerminal: { type: 'boolean' },
+                sheetName: { type: ['string', 'null'] },
+                sourceIndex: { type: ['integer', 'null'], description: 'The row it came from; decorative.' },
+                sourceData: {
+                  type: ['object', 'null'],
+                  description: 'The raw spreadsheet row by header, unmapped columns included.',
+                },
+                sourceHash: { type: ['string', 'null'] },
+                duplicateOfFolio: { type: ['string', 'null'] },
+                projectTitle: { type: ['string', 'null'] },
+                folderId: { type: ['integer', 'null'] },
+                createdBy: { type: ['integer', 'null'] },
+                createdByName: { type: ['string', 'null'] },
+                deletedAt: { type: ['string', 'null'], format: 'date-time' },
+                warnings: {
+                  type: 'array',
+                  readOnly: true,
+                  description:
+                    'Only on a write, and only when there were any: a kept unknown key, or a ' +
+                    'value that could not be read.',
+                  items: {
+                    type: 'object',
+                    properties: { key: { type: 'string' }, message: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          ],
+        },
+        CreateRequestRequest: {
+          type: 'object',
+          description: 'Send `schemaId` for the format\'s latest version, or `schemaVersionId` for one exactly.',
+          properties: {
+            schemaId: { type: 'integer' },
+            schemaVersionId: { type: 'integer' },
+            title: { type: 'string', maxLength: 300 },
+            requester: { type: 'string', maxLength: 300, example: 'Facultad de Química' },
+            data: {
+              type: 'object',
+              description:
+                'Keyed by field code. Values are coerced by the field\'s type: `1,250` becomes ' +
+                '1250, `15/03/2026` becomes 2026-03-15, `sí` becomes true. A required field ' +
+                'missing, or a value that cannot be read, is a 400 naming every complaint.',
+              example: { descripcion: 'Carteles para el congreso', tiraje: '1,000', fecha_entrega: '15/03/2026' },
+            },
+            areaId: { type: 'integer', description: 'The inbox it lands in (RF-SOL-02).' },
+            assigneeId: { type: 'integer' },
+            statusId: { type: 'integer', description: 'Omitted: the global `recibido`.' },
+            priority: { type: 'integer', default: 0 },
+            source: {
+              type: 'string',
+              enum: ['manual', 'form', 'email'],
+              default: 'manual',
+              description: '`sheet` is refused here: those rows are created by the import.',
+            },
+          },
+          required: ['title'],
+        },
+        UpdateRequestRequest: {
+          type: 'object',
+          description:
+            'At least one key. Refused once the request belongs to a project, except ' +
+            '`requester` and `possibleDuplicateOf`, which stay editable so a name can be ' +
+            'corrected and a false duplicate cleared (send `possibleDuplicateOf: null`).',
+          properties: {
+            title: { type: 'string', maxLength: 300 },
+            requester: { type: 'string', maxLength: 300 },
+            data: { type: 'object', description: 'Replaces the capture whole, re-coerced.' },
+            areaId: { type: 'integer' },
+            assigneeId: { type: 'integer' },
+            priority: { type: 'integer' },
+            possibleDuplicateOf: { type: ['integer', 'null'] },
+          },
+        },
+        ConvertRequestRequest: {
+          type: 'object',
+          description:
+            'Anything omitted is taken from the request. Every captured value becomes a ' +
+            'project field value keyed by its field code.',
+          properties: {
+            key: { type: 'string', maxLength: 50, description: 'Omitted: `PRY-000001` from the sequence.' },
+            title: { type: 'string', maxLength: 300 },
+            requester: {
+              type: 'string',
+              maxLength: 300,
+              description: 'The correction moment: this is where the /api/requesters autocomplete lands.',
+            },
+            description: { type: 'string' },
+            statusId: { type: 'integer' },
+            priority: { type: 'integer' },
+            hasCost: { type: 'boolean', default: false },
+            carriedOver: { type: 'boolean', default: false },
+            startsOn: { type: 'string', format: 'date' },
+            dueOn: { type: 'string', format: 'date' },
+            stages: {
+              type: 'array',
+              description: 'The first stages, as on POST /api/projects.',
+              items: {
+                type: 'object',
+                properties: {
+                  areaId: { type: 'integer' },
+                  title: { type: 'string' },
+                  seq: { type: 'integer' },
+                  assignedTo: { type: 'integer' },
+                },
+                required: ['areaId', 'title'],
+              },
+            },
+            requestIds: {
+              type: 'array',
+              items: { type: 'integer' },
+              description: 'More requests to answer with the same project (RF-PRY-01).',
+            },
+          },
+        },
+        ConvertResponse: {
+          type: 'object',
+          properties: {
+            project: { $ref: '#/components/schemas/Project' },
+            conflicts: {
+              type: 'array',
+              description:
+                'Keys two requests both captured: the first wins and the rest are reported ' +
+                'here rather than silently dropped.',
+              items: {
+                type: 'object',
+                properties: {
+                  key: { type: 'string' },
+                  folio: { type: 'string', description: 'The request whose value was discarded.' },
+                  kept: { type: 'string' },
+                  discarded: { type: 'string' },
+                },
+              },
+            },
+          },
+          required: ['project', 'conflicts'],
+        },
+        ProjectStage: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 9 },
+            projectId: { type: 'integer', example: 4 },
+            areaId: { type: 'integer', example: 3 },
+            areaName: { type: ['string', 'null'], example: 'Diseño Gráfico' },
+            title: { type: 'string', example: 'Diseño de la propuesta' },
+            seq: { type: 'integer', description: 'Display order only; it decides nothing.', example: 1 },
+            attempt: {
+              type: 'integer',
+              description: 'Rises when a rejected sign-off sends the work back (RF-FLW-03).',
+              example: 1,
+            },
+            status: {
+              type: 'string',
+              enum: ['pending', 'active', 'waiting_external', 'done', 'cancelled'],
+              description:
+                'The flow machine, not the visible catalogue. `done` is reached only by ' +
+                'recording an approval.',
+            },
+            blockedReason: {
+              type: ['string', 'null'],
+              description: 'Required while `waiting_external` (RF-FLW-07).',
+            },
+            assignedTo: { type: ['integer', 'null'] },
+            assignedToName: { type: ['string', 'null'] },
+            eventId: { type: ['integer', 'null'], description: 'The calendar entry, RF-CAL-02.' },
+            startedAt: { type: ['string', 'null'], format: 'date-time' },
+            endedAt: { type: ['string', 'null'], format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+            inputs: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Field keys this stage needs to do the work (RF-FLW-06). Informational: a value ' +
+                'that never arrived is why a stage waits, not a capture error.',
+              example: ['dependencia', 'tiraje'],
+            },
+            outputs: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Field keys this stage owes. **Enforced**: an approval is refused while one of ' +
+                'them has no value, which is what makes the next stage find it.',
+              example: ['numero_orden'],
+            },
+            approvals: {
+              type: 'array',
+              readOnly: true,
+              description: 'Only inside a single project read.',
+              items: { $ref: '#/components/schemas/Approval' },
+            },
+          },
+          required: ['id', 'projectId', 'areaId', 'title', 'seq', 'attempt', 'status'],
+        },
+        Approval: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 2 },
+            projectStageId: { type: 'integer', example: 9 },
+            decision: { type: 'string', enum: ['approved', 'rejected'] },
+            approverUserId: { type: 'integer', description: 'Always internal (DATAMODEL 2.11).' },
+            approverName: { type: ['string', 'null'] },
+            comment: { type: ['string', 'null'], example: 'Conformidad por correo del 3 de marzo' },
+            evidenceFileId: {
+              type: ['integer', 'null'],
+              description:
+                "The requester's conformity as evidence rather than a signature. Empty until " +
+                'ARC can accept an upload.',
+            },
+            decidedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'projectStageId', 'decision', 'approverUserId', 'decidedAt'],
+        },
+        ProjectFieldValue: {
+          type: 'object',
+          description:
+            'A value one stage produced and another reads (RF-FLW-06): the order number, the ' +
+            'SIN folio, the pantone. One row per key per project, stored as text.',
+          properties: {
+            key: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$', example: 'numero_orden' },
+            value: { type: 'string', example: 'A-77' },
+            producedByStageId: {
+              type: ['integer', 'null'],
+              description: 'Which stage produced it (RF-PRY-03). Null: it came from the request.',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['key', 'value'],
+        },
+        ProjectListItem: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            key: { type: 'string', example: 'PRY-000012' },
+            title: { type: 'string' },
+            requester: { type: ['string', 'null'], example: 'Facultad de Química' },
+            statusId: { type: 'integer' },
+            statusCode: { type: 'string', example: 'en_proceso' },
+            statusLabel: { type: 'string', example: 'En proceso' },
+            statusSince: { type: 'string', format: 'date-time' },
+            priority: { type: 'integer', description: 'Higher is more urgent (RF-FLW-08).' },
+            hasCost: { type: 'boolean', description: 'RF-PRY-07.' },
+            carriedOver: { type: 'boolean', description: 'RF-PRY-08.' },
+            startsOn: { type: ['string', 'null'], format: 'date' },
+            dueOn: { type: ['string', 'null'], format: 'date' },
+            closedAt: { type: ['string', 'null'], format: 'date-time' },
+            archivedAt: { type: ['string', 'null'], format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+            openStageCount: { type: 'integer', description: 'Stages that are active or waiting.' },
+            requestCount: { type: 'integer' },
+          },
+          required: ['id', 'key', 'title', 'statusId', 'priority'],
+        },
+        Project: {
+          allOf: [
+            { $ref: '#/components/schemas/ProjectListItem' },
+            {
+              type: 'object',
+              properties: {
+                description: { type: ['string', 'null'] },
+                schemaVersionId: { type: ['integer', 'null'] },
+                statusIsTerminal: { type: 'boolean' },
+                folderId: { type: ['integer', 'null'] },
+                eventCollectionId: { type: ['integer', 'null'] },
+                createdBy: { type: ['integer', 'null'] },
+                createdByName: { type: ['string', 'null'] },
+                deletedAt: { type: ['string', 'null'], format: 'date-time' },
+                stages: { type: 'array', items: { $ref: '#/components/schemas/ProjectStage' } },
+                fieldValues: { type: 'array', items: { $ref: '#/components/schemas/ProjectFieldValue' } },
+                requests: {
+                  type: 'array',
+                  description: 'The requests this project answers (RF-PRY-01).',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'integer' },
+                      folio: { type: 'string', example: 'SOL-000004' },
+                      title: { type: 'string' },
+                    },
+                  },
+                },
+                activeStageIds: {
+                  type: 'array',
+                  items: { type: 'integer' },
+                  description:
+                    'The current stage, as a set: a project may be worked by more than one ' +
+                    'area at a time (RF-FLW-09).',
+                },
+              },
+            },
+          ],
+        },
+        CreateProjectRequest: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', maxLength: 300 },
+            key: {
+              type: 'string',
+              maxLength: 50,
+              description:
+                'Omitted: generated as `PRY-000001`. Sent: uppercased, and must hold only ' +
+                'A-Z, 0-9, - and _. Doubles as the folder name.',
+              example: 'PAPEL-FCQ-03',
+            },
+            description: { type: 'string' },
+            requester: { type: 'string', maxLength: 300, example: 'Facultad de Química' },
+            schemaVersionId: { type: 'integer' },
+            statusId: { type: 'integer', description: 'Omitted: the global `recibido`.' },
+            priority: { type: 'integer', default: 0 },
+            hasCost: { type: 'boolean', default: false },
+            carriedOver: { type: 'boolean', default: false },
+            startsOn: { type: 'string', format: 'date' },
+            dueOn: { type: 'string', format: 'date' },
+            fieldValues: {
+              type: 'array',
+              description: 'Values to seed; empty ones are dropped rather than stored as "".',
+              items: {
+                type: 'object',
+                properties: { key: { type: 'string' }, value: {} },
+                required: ['key', 'value'],
+              },
+            },
+            stages: {
+              type: 'array',
+              description: 'The lowest `seq` starts `active`, the rest `pending`.',
+              items: {
+                type: 'object',
+                properties: {
+                  areaId: { type: 'integer' },
+                  title: { type: 'string', maxLength: 300 },
+                  seq: { type: 'integer' },
+                  assignedTo: { type: 'integer' },
+                },
+                required: ['areaId', 'title'],
+              },
+            },
+            requestIds: {
+              type: 'array',
+              items: { type: 'integer' },
+              description: 'Requests to convert (RF-PRY-01). Linked in the same statement.',
+            },
+          },
+          required: ['title'],
+        },
+        UpdateProjectRequest: {
+          type: 'object',
+          description: 'At least one key. Status, closing and archiving have their own routes.',
+          properties: {
+            key: { type: 'string', maxLength: 50 },
+            title: { type: 'string', maxLength: 300 },
+            description: { type: 'string' },
+            requester: { type: 'string', maxLength: 300 },
+            priority: { type: 'integer' },
+            hasCost: { type: 'boolean' },
+            carriedOver: { type: 'boolean' },
+            startsOn: { type: 'string', format: 'date' },
+            dueOn: { type: 'string', format: 'date' },
+          },
+        },
+        CreateStageRequest: {
+          type: 'object',
+          properties: {
+            areaId: { type: 'integer' },
+            title: { type: 'string', maxLength: 300 },
+            seq: { type: 'integer', default: 1 },
+            status: { type: 'string', enum: ['pending', 'active'], default: 'pending' },
+            assignedTo: { type: 'integer' },
+            inputs: {
+              type: 'array',
+              items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' },
+              description: 'Field keys the stage needs. Informational.',
+            },
+            outputs: {
+              type: 'array',
+              items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' },
+              description: 'Field keys the stage owes; its sign-off is refused without them.',
+            },
+          },
+          required: ['areaId', 'title'],
+        },
+        UpdateStageRequest: {
+          type: 'object',
+          description:
+            'At least one key. `done` is refused here: a stage is completed by recording an ' +
+            'approval on it.',
+          properties: {
+            title: { type: 'string', maxLength: 300 },
+            status: { type: 'string', enum: ['pending', 'active', 'waiting_external', 'cancelled'] },
+            blockedReason: { type: 'string', description: 'Required when moving to `waiting_external`.' },
+            assignedTo: { type: 'integer' },
+            inputs: { type: 'array', items: { type: 'string' }, description: 'Replaces the list whole.' },
+            outputs: { type: 'array', items: { type: 'string' }, description: 'Replaces the list whole.' },
+          },
+        },
+        ApprovalRequest: {
+          type: 'object',
+          description: 'The approver is the session; `rejected` reruns the stage at attempt + 1.',
+          properties: {
+            decision: { type: 'string', enum: ['approved', 'rejected'] },
+            comment: { type: 'string' },
+            evidenceFileId: { type: 'integer' },
+          },
+          required: ['decision'],
+        },
+        ApprovalResponse: {
+          type: 'object',
+          properties: {
+            approval: { $ref: '#/components/schemas/Approval' },
+            stage: { $ref: '#/components/schemas/ProjectStage' },
+            reopened: {
+              type: 'array',
+              description: 'The fresh attempt a rejection opened; empty on an approval.',
+              items: { $ref: '#/components/schemas/ProjectStage' },
+            },
+          },
+          required: ['approval', 'stage', 'reopened'],
+        },
+        FinanceRequestRequest: {
+          type: 'object',
+          description:
+            'Finance marks that the project needs a quote or an invoice. It writes one of two ' +
+            'reserved field values (`requiere_cotizacion`, `requiere_factura`), so the board ' +
+            'filter and every later reader see it with no special case.',
+          properties: {
+            kind: { type: 'string', enum: ['quote', 'invoice'] },
+            needed: {
+              type: 'boolean',
+              default: true,
+              description:
+                'false withdraws the request by removing the value: a stored "no" is ' +
+                'indistinguishable from a project nobody ever asked about.',
+            },
+            note: {
+              type: 'string',
+              description: 'What finance wants the project to know. Omitted, the value is `sí`.',
+              example: 'Falta el desglose por partida',
+            },
+          },
+          required: ['kind'],
+        },
+        FinanceRequestResponse: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', example: 'requiere_factura' },
+            needed: { type: 'boolean' },
+            note: { type: ['string', 'null'] },
+          },
+          required: ['key', 'needed'],
+        },
+        SetFieldValueRequest: {
+          type: 'object',
+          properties: {
+            value: { description: 'Stringified before storage; null or empty is refused.' },
+            producedByStageId: { type: 'integer', description: 'Must be a stage of this project.' },
+          },
+          required: ['value'],
+        },
+        ColumnRule: {
+          type: 'object',
+          description:
+            'How one target is fed. Columns are named by their header text, so the map survives ' +
+            'a reordered sheet and refuses a renamed column by name.',
+          properties: {
+            op: { type: 'string', enum: ['column', 'constant', 'concat', 'split'] },
+            column: { type: 'string', description: 'For `column` and `split`.', example: 'ESTATUS' },
+            columns: { type: 'array', items: { type: 'string' }, description: 'For `concat`.' },
+            value: { description: 'For `constant`.' },
+            separator: { type: 'string', description: 'For `concat` (the joiner) and `split`.' },
+            index: { type: 'integer', minimum: 0, description: 'For `split`: which piece.' },
+            from: {
+              type: 'string',
+              enum: ['value', 'text'],
+              default: 'value',
+              description:
+                'A real date arrives as an Excel serial in `value` and as what Excel shows in ' +
+                '`text`. Tables carry no text, so `text` falls back to the value there.',
+            },
+            default: { description: 'Used when the cell is empty.' },
+            format: {
+              type: 'string',
+              enum: ['DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD'],
+              description: 'For a date field whose column holds a written date.',
+            },
+            truthy: { type: 'array', items: { type: 'string' }, description: 'For a boolean field.' },
+            falsy: { type: 'array', items: { type: 'string' } },
+            map: {
+              type: 'object',
+              description:
+                'Only on `status`: the sheet\'s own words to a status code, e.g. ' +
+                '`{"VoBo": "esperando_vb"}`. Matched case-insensitively.',
+            },
+          },
+          required: ['op'],
+        },
+        ColumnMap: {
+          type: 'object',
+          description:
+            'How a row becomes a request (RF-MIG-02), edited by coordination without a deploy. ' +
+            'The target\'s data type decides the coercion; a rule may only say what the sheet ' +
+            'knows, like which order a date is written in.',
+          properties: {
+            version: { type: 'integer', default: 1 },
+            title: { $ref: '#/components/schemas/ColumnRule' },
+            requester: { $ref: '#/components/schemas/ColumnRule' },
+            priority: { $ref: '#/components/schemas/ColumnRule' },
+            status: {
+              allOf: [{ $ref: '#/components/schemas/ColumnRule' }],
+              description:
+                'Translates the sheet\'s status into a catalogue code, so importing an existing ' +
+                'tracker lands with its real state instead of 24 rows pretending to be new. Its ' +
+                '`default` is a status CODE, not a cell value.',
+            },
+            hashColumns: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'The row\'s identity. A Forms `Id` column is better than content: correcting a ' +
+                'typo then does not look like a new row -- and the edit is invisible, because ' +
+                'the state lives here from the import onwards. Omitted, every mapped cell is ' +
+                'hashed, and an edit reads as a new row flagged as a probable duplicate.',
+              example: ['Id'],
+            },
+            fields: {
+              type: 'object',
+              description: 'Keyed by field code of the target version.',
+              additionalProperties: { $ref: '#/components/schemas/ColumnRule' },
+            },
+          },
+          required: ['title'],
+        },
+        SetMappingRequest: {
+          type: 'object',
+          properties: {
+            schemaVersionId: { type: 'integer' },
+            columnMap: { $ref: '#/components/schemas/ColumnMap' },
+            headers: {
+              type: 'array',
+              items: {},
+              description:
+                'The sheet\'s header row, when the caller has it. Every column the map names is ' +
+                'then checked against it, which turns a renamed column into a refusal here ' +
+                'rather than a surprise on row 200 of an import.',
+            },
+          },
+          required: ['schemaVersionId', 'columnMap'],
+        },
+        MappingPreview: {
+          type: 'object',
+          properties: {
+            sheet: { $ref: '#/components/schemas/Sheet' },
+            schemaVersionId: { type: 'integer' },
+            kind: { type: 'string', enum: ['table', 'worksheet'] },
+            headers: { type: 'array', items: {} },
+            rows: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  index: { type: 'integer' },
+                  ok: { type: 'boolean', description: 'False when this row would not import.' },
+                  alreadyImported: { type: 'boolean', description: 'Its hash is already known.' },
+                  title: { type: ['string', 'null'] },
+                  requester: { type: ['string', 'null'] },
+                  statusCode: { type: ['string', 'null'] },
+                  data: { type: 'object' },
+                  errors: { type: 'array', items: { type: 'object' } },
+                  warnings: { type: 'array', items: { type: 'object' } },
+                },
+              },
+            },
+          },
+          required: ['headers', 'rows'],
+        },
+        SheetImport: {
+          type: 'object',
+          description: 'One import run. It outlives the response so "why did that row not come in" stays answerable.',
+          properties: {
+            id: { type: 'integer' },
+            sheetId: { type: 'integer' },
+            runBy: { type: ['integer', 'null'] },
+            runByName: { type: ['string', 'null'] },
+            startedAt: { type: 'string', format: 'date-time' },
+            finishedAt: { type: ['string', 'null'], format: 'date-time' },
+            rowsRead: { type: 'integer', description: 'Rows under the header, before deciding anything.' },
+            rowsCreated: { type: 'integer' },
+            rowsSkipped: { type: 'integer', description: 'Already imported: the hash is known.' },
+            rowsFailed: { type: 'integer' },
+            rowsFlagged: { type: 'integer', description: 'Imported, but look like a correction of an earlier row.' },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { index: { type: 'integer' }, message: { type: 'string' } },
+              },
+            },
+            truncated: { type: 'boolean', readOnly: true, description: 'The sheet is longer than one run reads.' },
+            dryRun: { type: 'boolean', readOnly: true },
+          },
+        },
+        Requester: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', example: 'Facultad de Química' },
+            uses: { type: 'integer', description: 'Requests plus projects carrying it.', example: 12 },
+          },
+          required: ['name', 'uses'],
+        },
+        Status: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 3 },
+            areaId: { type: ['integer', 'null'], description: 'Null: the global catalogue.' },
+            areaName: { type: ['string', 'null'], readOnly: true },
+            code: { type: 'string', example: 'esperando_vb' },
+            label: { type: 'string', example: 'Esperando visto bueno' },
+            sortOrder: { type: 'integer', example: 30 },
+            isTerminal: {
+              type: 'boolean',
+              description: 'RF-EST-05 validates closing with pending work against these.',
+            },
+            isActive: { type: 'boolean' },
+            isGlobal: { type: 'boolean', readOnly: true },
+          },
+          required: ['id', 'code', 'label', 'sortOrder', 'isTerminal', 'isActive'],
+        },
+        CreateStatusRequest: {
+          type: 'object',
+          properties: {
+            areaId: {
+              type: ['integer', 'null'],
+              description: 'Omitted or null creates a global status. An area may reuse a global code.',
+            },
+            code: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,49}$', example: 'en_prensa' },
+            label: { type: 'string', maxLength: 200, example: 'En prensa' },
+            sortOrder: { type: 'integer', default: 0 },
+            isTerminal: { type: 'boolean', default: false },
+          },
+          required: ['code', 'label'],
+        },
+        UpdateStatusRequest: {
+          type: 'object',
+          description:
+            'At least one key. `code` and `areaId` are not editable: they are what existing ' +
+            'requests and projects were filed under.',
+          properties: {
+            label: { type: 'string', maxLength: 200 },
+            sortOrder: { type: 'integer' },
+            isTerminal: { type: 'boolean' },
+            isActive: { type: 'boolean' },
+          },
+        },
+        DataType: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 5 },
+            code: { type: 'string', example: 'quantity' },
+            name: { type: 'string', example: 'Cantidad' },
+            baseType: { type: 'string', example: 'number' },
+            properties: { type: 'object', example: { integer: true, min: 0 } },
+            isActive: { type: 'boolean' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'code', 'name', 'baseType', 'properties', 'isActive'],
+        },
+        SchemaField: {
+          type: 'object',
+          description:
+            'One field of a format. `code` is snake_case and unique across BOTH sections: it ' +
+            'is the key in `requests.data`, the target a sheet column map names, and the ' +
+            '`project_field_values.key` the value lands under when the request is converted.',
+          properties: {
+            code: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$', example: 'd_entrega' },
+            name: { type: 'string', example: 'Fecha de entrega' },
+            type: { type: 'string', description: 'A data_types.code.', example: 'date' },
+            note: {
+              type: 'string',
+              default: '',
+              description: 'The human hint shown beside the field.',
+              example: 'Documento PDF con la firma de Alma',
+            },
+            required: { type: 'boolean', default: false, example: true },
+            baseType: {
+              type: ['string', 'null'],
+              readOnly: true,
+              description:
+                "The type's base_type from the catalogue, so a client that only cares about " +
+                'string-vs-number need not know the codes. Never sent on a write.',
+              example: 'date',
+            },
+          },
+          required: ['code', 'name', 'type'],
+        },
+        FieldKey: {
+          type: 'object',
+          description:
+            'One entry of the field vocabulary. A key is what the value is stored under in ' +
+            '`requests.data` and `project_field_values`, so it means one thing system-wide: ' +
+            'publishing it with another type is refused.',
+          properties: {
+            key: { type: 'string', example: 'numero_orden' },
+            name: { type: 'string', description: 'Its most recent name.', example: 'Número de orden' },
+            type: { type: 'string', description: 'A data_types.code. Fixed once published.', example: 'text' },
+            note: { type: 'string', example: 'Lo genera diseño y lo ocupa facturación de imprenta' },
+            schemaCount: { type: 'integer', description: 'How many formats declare it.', example: 2 },
+            schemas: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'The formats that declare it, by name.',
+            },
+          },
+          required: ['key', 'name', 'type', 'schemaCount'],
+        },
+        SchemaFields: {
+          type: 'object',
+          description:
+            'What a format asks for, in two sections: `deliverables` is what the area must ' +
+            'produce, `information` what the requester states. Each is an ordered array -- ' +
+            'arrays rather than objects keyed by code because jsonb does not preserve object ' +
+            'key order. Both keys are required; either may be empty, but not both.',
+          properties: {
+            deliverables: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            information: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+          },
+          required: ['deliverables', 'information'],
+          example: {
+            deliverables: [
+              { code: 'doc_cot', name: 'Documento de cotización', type: 'document', note: 'PDF con la firma de Alma', required: true },
+              { code: 'd_entrega', name: 'Fecha de entrega', type: 'date', note: '', required: true },
+            ],
+            information: [
+              { code: 'inst_pet', name: 'Institución que hace la petición', type: 'text', note: '', required: true },
+              { code: 'cant_mat', name: 'Cantidad de material', type: 'quantity', note: 'Cantidad total solicitada', required: false },
+            ],
+          },
         },
         Schema: {
           type: 'object',
@@ -924,7 +1736,7 @@ export function buildOpenApiDocument() {
             isActive: { type: 'boolean', example: true },
             createdAt: { type: 'string', format: 'date-time' },
             version: { type: ['integer', 'null'], example: 1 },
-            fields: { type: ['array', 'null'], items: { $ref: '#/components/schemas/SchemaField' } },
+            fields: { oneOf: [{ $ref: '#/components/schemas/SchemaFields' }, { type: 'null' }] },
             publishedAt: { type: ['string', 'null'], format: 'date-time' },
             publishedBy: { type: ['integer', 'null'], example: 12 },
             schemaVersionId: { type: ['integer', 'null'], example: 1 },
@@ -937,29 +1749,47 @@ export function buildOpenApiDocument() {
             id: { type: 'integer', example: 2 },
             schemaId: { type: 'integer', example: 1 },
             version: { type: 'integer', example: 2 },
-            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
+            fields: { $ref: '#/components/schemas/SchemaFields' },
             publishedAt: { type: ['string', 'null'], format: 'date-time' },
             publishedBy: { type: ['integer', 'null'], example: 12 },
+            schemaCode: { type: 'string', description: 'Only when read by version id.', example: 'papel_institucional' },
+            schemaName: { type: 'string', description: 'Only when read by version id.' },
+            schemaIsActive: { type: 'boolean', description: 'Only when read by version id.' },
           },
           required: ['id', 'schemaId', 'version', 'fields'],
         },
         CreateSchemaRequest: {
           type: 'object',
+          description: 'The publisher is the session; a `publishedBy` in the body is ignored.',
           properties: {
-            code: { type: 'string', maxLength: 100, example: 'project_brief' },
-            name: { type: 'string', maxLength: 200, example: 'Project Brief' },
-            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
-            publishedBy: { type: ['integer', 'null'], example: 12 },
+            code: { type: 'string', maxLength: 50, example: 'papel_institucional' },
+            name: { type: 'string', maxLength: 300, example: 'Papel institucional' },
+            fields: { $ref: '#/components/schemas/SchemaFields' },
           },
           required: ['code', 'name', 'fields'],
         },
         CreateSchemaVersionRequest: {
           type: 'object',
           properties: {
-            fields: { type: 'array', items: { $ref: '#/components/schemas/SchemaField' } },
-            publishedBy: { type: ['integer', 'null'], example: 12 },
+            fields: { $ref: '#/components/schemas/SchemaFields' },
           },
           required: ['fields'],
+        },
+        CloneSchemaRequest: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', maxLength: 50, example: 'papel_institucional_fcq' },
+            name: { type: 'string', maxLength: 300, example: 'Papel institucional FCQ' },
+          },
+          required: ['code', 'name'],
+        },
+        UpdateSchemaRequest: {
+          type: 'object',
+          description: 'At least one of the two. Fields are never edited here: publish a version.',
+          properties: {
+            name: { type: 'string', maxLength: 300 },
+            isActive: { type: 'boolean' },
+          },
         },
       },
       responses: {
@@ -2296,6 +3126,864 @@ export function buildOpenApiDocument() {
         },
       },
       
+      // --- requests ---
+
+      '/api/requests': {
+        get: {
+          tags: ['requests'],
+          summary: 'The inbox',
+          description:
+            'Needs request.read. RF-SOL-04: ordered and filterable, so nobody has to read ' +
+            'email, Excel, Teams and WhatsApp to find their work. RF-SOL-05 is the filters.',
+          parameters: [
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Title fragment, or folio prefix.' },
+            {
+              name: 'areaId',
+              in: 'query',
+              required: false,
+              schema: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', enum: ['none'] }] },
+              description:
+                '`none` asks for the requests with no area at all -- what an import leaves ' +
+                'behind, since imported rows are routed by hand from here.',
+            },
+            { name: 'statusId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'assigneeId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'schemaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'sheetId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'requester', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact match, case-insensitive.' },
+            {
+              name: 'converted',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: 'Omitted: everything. `false`: still unconverted, which is the working inbox.',
+            },
+            { name: 'duplicates', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: only rows flagged as a probable correction.' },
+            { name: 'source', in: 'query', required: false, schema: { type: 'string', enum: ['manual', 'form', 'email', 'sheet'] } },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'created'], default: 'priority' } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
+          responses: {
+            200: {
+              description: 'The page of requests, and how many match the filters in total.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      requests: {
+                        type: 'array',
+                        items: { $ref: '#/components/schemas/RequestListItem' },
+                      },
+                      total: {
+                        type: 'integer',
+                        description:
+                          'Every request matching the filters, not just this page: an inbox has ' +
+                          'to be able to say how much is left to look at.',
+                      },
+                      limit: { type: 'integer' },
+                      offset: { type: 'integer' },
+                    },
+                    required: ['requests', 'total', 'limit', 'offset'],
+                  },
+                },
+              },
+            },
+            400: errorResponse('A bad filter.', 'limit must be between 1 and 200.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['requests'],
+          summary: 'Capture a request',
+          description:
+            'Needs request.write. RF-SOL-08: what arrives by email is registered here, so one ' +
+            'channel holds everything. The folio comes from a sequence.',
+          requestBody: jsonBody('CreateRequestRequest'),
+          responses: {
+            201: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('A bad payload, or a value that will not coerce.', '"Tiraje" is not a number.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such format or version.', 'That format has no published version.'),
+          },
+        },
+      },
+      '/api/requests/{id}': {
+        get: {
+          tags: ['requests'],
+          summary: 'One request, with its format and its raw row',
+          parameters: [pathId('id', 'requests.id')],
+          responses: {
+            200: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid request id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+          },
+        },
+        patch: {
+          tags: ['requests'],
+          summary: 'Edit a request',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: jsonBody('UpdateRequestRequest'),
+          responses: {
+            200: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('Nothing valid to update, or a bad value.', 'Nothing to update.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('It already belongs to a project.', 'That request already belongs to a project; edit the project instead.'),
+          },
+        },
+        delete: {
+          tags: ['requests'],
+          summary: 'Soft-delete a request',
+          description: 'Refused once it belongs to a project: the project would lose what it answers.',
+          parameters: [pathId('id', 'requests.id')],
+          responses: {
+            200: wrapped('The deleted request.', 'request', 'Request'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('It belongs to a project.', 'That request belongs to a project; it cannot be deleted.'),
+          },
+        },
+      },
+      '/api/requests/{id}/status': {
+        put: {
+          tags: ['requests'],
+          summary: 'Move a request through the catalogue',
+          description:
+            'Needs request.write. `status_since` moves in the same statement; the change is ' +
+            'recorded as `status_changed`. A `rechazada` here is how a request that will not be ' +
+            'done stops sitting in the inbox without being deleted.',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { statusId: { type: 'integer', minimum: 1 } },
+                  required: ['statusId'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('An unusable status.', 'That status belongs to another area.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+          },
+        },
+      },
+      '/api/requests/{id}/convert': {
+        post: {
+          tags: ['requests'],
+          summary: 'Turn the request into a project',
+          description:
+            'Needs request.write and project.write. RF-PRY-01: one project may answer several ' +
+            'requests, and the link is kept. The requester and the format version travel, and ' +
+            'every captured value becomes a project field value keyed by its field code, so ' +
+            'the print order and the billing read it without re-capture (RF-FLW-06). The ' +
+            'linking happens in the same statement as the project, so a request that somebody ' +
+            'else converted first fails the whole call.',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: jsonBody('ConvertRequestRequest'),
+          responses: {
+            201: {
+              description: 'The project, and any values two requests disagreed on.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/ConvertResponse' } } },
+            },
+            400: errorResponse('A bad payload or an unknown request in the list.', 'Request 7 does not exist.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('Already converted.', 'That request already belongs to a project.'),
+          },
+        },
+      },
+
+      // --- projects ---
+
+      '/api/projects': {
+        get: {
+          tags: ['projects'],
+          summary: 'The board',
+          description: 'Needs project.read. Defaults to the open projects, most urgent first.',
+          parameters: [
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Title fragment, or key prefix.' },
+            { name: 'state', in: 'query', required: false, schema: { type: 'string', enum: ['open', 'closed', 'archived', 'all'], default: 'open' } },
+            { name: 'statusId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            { name: 'areaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 }, description: 'Projects with a stage in that area.' },
+            { name: 'assignedTo', in: 'query', required: false, schema: { type: 'integer', minimum: 1 }, description: 'Projects with a stage assigned to that person.' },
+            { name: 'requester', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact match, case-insensitive.' },
+            { name: 'hasCost', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-07.' },
+            { name: 'carriedOver', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-08.' },
+            { name: 'fieldKey', in: 'query', required: false, schema: { type: 'string' }, description: 'RF-IMP-08: look a project up by a value a stage produced.' },
+            { name: 'fieldValue', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact value; needs fieldKey.' },
+            { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'due'], default: 'priority' } },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
+          responses: {
+            200: wrapped('The projects.', 'projects', 'ProjectListItem', true),
+            400: errorResponse('A bad filter.', 'state must be one of: open, closed, archived, all.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['projects'],
+          summary: 'Create a project, with its first stages and values',
+          description:
+            'Needs project.write. Everything happens in one statement: the project, the ' +
+            'requests it converts, its field values and its stages. A request that already ' +
+            'belongs to a project makes the whole call fail.',
+          requestBody: jsonBody('CreateProjectRequest'),
+          responses: {
+            201: wrapped('The project.', 'project', 'Project'),
+            400: errorResponse('A bad payload or an unknown reference.', 'title is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The key is taken, or a request is already converted.', 'A project with that key already exists.'),
+          },
+        },
+      },
+      '/api/projects/{id}': {
+        get: {
+          tags: ['projects'],
+          summary: 'One project with its stages, values and requests',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The project.', 'project', 'Project'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid project id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+        patch: {
+          tags: ['projects'],
+          summary: 'Edit a project',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('UpdateProjectRequest'),
+          responses: {
+            200: wrapped('The project after the change.', 'project', 'Project'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('The key is taken.', 'A project with that key already exists.'),
+          },
+        },
+        delete: {
+          tags: ['projects'],
+          summary: 'Soft-delete a project',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The deleted project.', 'project', 'Project'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/status': {
+        put: {
+          tags: ['projects'],
+          summary: 'Move the visible status',
+          description:
+            'Needs project.write. `status_since` moves in the same statement, and the change ' +
+            'is recorded as `status_changed` in the trail rather than in a table of its own. ' +
+            'The status must be global or belong to an area with a stage in this project.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { statusId: { type: 'integer', minimum: 1 } },
+                  required: ['statusId'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The project.', 'project', 'Project'),
+            400: errorResponse('An unusable status.', 'That status belongs to an area with no stage in this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/close': {
+        post: {
+          tags: ['projects'],
+          summary: 'Close a project',
+          description:
+            'Needs project.write. Refused while a stage is still active or waiting on a third ' +
+            "party -- RF-EST-05's question about what is pending, in the cheapest form it has.",
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The closed project.', 'project', 'Project'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('A stage is still open, or it is already closed.', 'Project is already closed.'),
+          },
+        },
+      },
+      '/api/projects/{id}/archive': {
+        post: {
+          tags: ['projects'],
+          summary: 'Archive a project',
+          description: 'A different act from closing: finished work versus out of the way.',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The archived project.', 'project', 'Project'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('Already archived.', 'Project is already archived.'),
+          },
+        },
+      },
+      '/api/projects/{id}/requests': {
+        post: {
+          tags: ['projects'],
+          summary: 'Link more requests to the project',
+          description: 'Needs project.write and request.write. RF-PRY-01: one project may answer several requests.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { requestIds: { type: 'array', items: { type: 'integer' } } },
+                  required: ['requestIds'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The project with its requests.', 'project', 'Project'),
+            400: errorResponse('An empty list.', 'requestIds must not be empty.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('One is already converted.', 'One of those requests does not exist or already has a project.'),
+          },
+        },
+      },
+      '/api/projects/{id}/finance-request': {
+        post: {
+          tags: ['projects'],
+          summary: 'Mark that the project needs a quote or an invoice',
+          description:
+            'Needs `finance.request` and nothing else -- deliberately not `project.write`, which ' +
+            'would also allow stages, sign-offs and closing (RF-USR-05 separates reading from ' +
+            'writing). The finance role holds `project.read` and this, so it can see the whole ' +
+            'board and ask, without editing the work.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('FinanceRequestRequest'),
+          responses: {
+            200: wrapped('What was recorded.', 'request', 'FinanceRequestResponse'),
+            400: errorResponse('An unknown kind.', 'kind must be one of: quote, invoice.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages': {
+        get: {
+          tags: ['projects'],
+          summary: 'The stages of a project, every attempt',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The stages.', 'stages', 'ProjectStage', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+        post: {
+          tags: ['projects'],
+          summary: 'Add a stage by hand',
+          description:
+            'Needs project.write. Until the node editor exists (RF-FLW-02) stages are created ' +
+            'here. Adding the same area and seq again reruns it as the next attempt.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('CreateStageRequest'),
+          responses: {
+            201: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('A bad payload or an unknown area.', 'A stage is completed by an approval, not created done.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages/{stageId}': {
+        patch: {
+          tags: ['projects'],
+          summary: 'Start, block, unblock or cancel a stage',
+          description:
+            'Needs project.write. `waiting_external` needs a `blockedReason` (RF-FLW-07) and ' +
+            'leaving it clears the reason. `done` is not reachable here.',
+          parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
+          requestBody: jsonBody('UpdateStageRequest'),
+          responses: {
+            200: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('An illegal transition or a missing reason.', 'blockedReason is required when a stage waits on a third party.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('The stage is gone, or belongs to another project.', 'Stage not found for that project.'),
+            409: errorResponse('A finished stage cannot change status.', 'A done stage cannot change status; it reruns instead.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages/{stageId}/approvals': {
+        post: {
+          tags: ['projects'],
+          summary: 'Record a visto bueno on the stage',
+          description:
+            'Needs project.write, and that is the whole policy: RF-FLW-03 asks for the ' +
+            'decision to be recorded with its author, not for a second authorisation model. ' +
+            'The approver is the session. `approved` completes the stage; `rejected` completes ' +
+            'it and opens the same stage again at attempt + 1, so the returned work stays ' +
+            'visible. Which stage follows is the flow\'s business and the flow does not exist ' +
+            'yet, so the next stage is started by hand.',
+          parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
+          requestBody: jsonBody('ApprovalRequest'),
+          responses: {
+            201: {
+              description: 'The approval, the stage it closed and any attempt it reopened.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/ApprovalResponse' } } },
+            },
+            400: errorResponse('A bad decision or unknown evidence file.', 'decision must be "approved" or "rejected".'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('The stage is gone, or belongs to another project.', 'Stage not found for that project.'),
+            409: errorResponse(
+              'The stage is not open, or it owes a value it declared as an output.',
+              'This stage owes a value it has not captured: numero_orden. Write it before signing off.',
+            ),
+          },
+        },
+      },
+      '/api/projects/{id}/field-values': {
+        get: {
+          tags: ['projects'],
+          summary: 'The values this project carries',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The values.', 'fieldValues', 'ProjectFieldValue', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/projects/{id}/field-values/{key}': {
+        put: {
+          tags: ['projects'],
+          summary: 'Write a value another stage will read',
+          description:
+            'Needs project.write. RF-FLW-06: the order number diseño generates appears in the ' +
+            "print shop's billing without re-capture. One row per key; a correction is an " +
+            'update and the provenance moves with it.',
+          parameters: [
+            pathId('id', 'projects.id'),
+            { name: 'key', in: 'path', required: true, schema: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' } },
+          ],
+          requestBody: jsonBody('SetFieldValueRequest'),
+          responses: {
+            200: wrapped('The value.', 'fieldValue', 'ProjectFieldValue'),
+            400: errorResponse('A bad key, an empty value or a stage of another project.', 'producedByStageId must be a stage of this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+        delete: {
+          tags: ['projects'],
+          summary: 'Remove a value',
+          parameters: [
+            pathId('id', 'projects.id'),
+            { name: 'key', in: 'path', required: true, schema: { type: 'string' } },
+          ],
+          responses: {
+            200: wrapped('The removed value.', 'fieldValue', 'ProjectFieldValue'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project, or no value under that key.', 'That project has no value under that key.'),
+          },
+        },
+      },
+
+      '/api/spreadsheets/{id}/mapping': {
+        put: {
+          tags: ['spreadsheets'],
+          summary: 'Map the book onto a format',
+          description:
+            'Needs spreadsheet.write. RF-MIG-02: coordination says which format the rows become ' +
+            'and which column feeds each field, without touching code. Saving checks the map ' +
+            'against that version\'s fields and, when `headers` is sent, against the sheet ' +
+            'itself.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: jsonBody('SetMappingRequest'),
+          responses: {
+            200: wrapped('The book, now mapped.', 'sheet', 'Sheet'),
+            400: errorResponse(
+              'Every problem with the map, in one message.',
+              'field "tiraje" names the column "Cantidad", which the sheet does not have.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book or version.', 'Spreadsheet not found.'),
+          },
+        },
+        delete: {
+          tags: ['spreadsheets'],
+          summary: 'Unmap the book',
+          description:
+            'Back to registered-but-unmapped. What was already imported keeps its own capture, ' +
+            'so this does not rewrite history.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: wrapped('The book, unmapped.', 'sheet', 'Sheet'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/mapping/preview': {
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'The first rows as the map would read them',
+          description:
+            'Needs spreadsheet.read, and writes nothing. Send an unsaved `columnMap` to try one ' +
+            'before committing: the questions a mapping answers are about the data, so the only ' +
+            'honest way to judge it is to see the rows transformed. Reads the book live.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    columnMap: { $ref: '#/components/schemas/ColumnMap' },
+                    schemaVersionId: { type: 'integer', description: 'Omitted: the one the book is mapped to.' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'The headers and the sample rows, transformed.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/MappingPreview' } } },
+            },
+            400: errorResponse('A map that will not validate.', '"title" is required: a request needs one.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book, or the worksheet is gone.', 'Spreadsheet not found.'),
+            409: errorResponse(
+              'Nothing mapped and no version offered, or the account needs reconnecting.',
+              'That book has no format yet: send schemaVersionId to try one.',
+            ),
+            502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/import': {
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'Turn the book\'s rows into requests',
+          description:
+            'Needs spreadsheet.write **and** request.write. Reads every row and creates a ' +
+            'request for each one not already imported -- identity is the hash of the columns ' +
+            '`hashColumns` names, so a second run creates nothing. Rows are independent: one ' +
+            'that cannot be read is reported and the run continues. Imported rows arrive with ' +
+            '**no area** and are routed by hand from the inbox. Nothing is written back to the ' +
+            'sheet.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    dryRun: {
+                      type: 'boolean',
+                      default: false,
+                      description: 'Count what would happen and write nothing.',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The run.', 'import', 'SheetImport'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book, or the worksheet is gone.', 'Spreadsheet not found.'),
+            409: errorResponse(
+              'Not mapped, the format is gone, the sheet no longer matches the map, or the account needs reconnecting.',
+              'Map the book to a format before importing it.',
+            ),
+            502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/baseline': {
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'Mark the rows the book has now as already seen',
+          description:
+            'Needs spreadsheet.write, and creates nothing. This is how a tracker that already ' +
+            'carries months of history becomes usable: a line is drawn under what was handled ' +
+            'before the system existed, and from then on only rows somebody adds get imported. ' +
+            'Needs the mapping, because a row is identified by the hash of the columns ' +
+            '`hashColumns` names — but it does **not** read or validate the values, so a row ' +
+            'missing a required field can be marked, which is the normal case. Marks already ' +
+            'known rows are left alone.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    dryRun: {
+                      type: 'boolean',
+                      default: false,
+                      description: 'Count what would be marked and write nothing.',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'What was marked.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      rowsRead: { type: 'integer' },
+                      rowsMarked: { type: 'integer', description: 'Rows that were not known before.' },
+                      rowsAlreadyKnown: {
+                        type: 'integer',
+                        description: 'Already imported, or already marked.',
+                      },
+                      truncated: { type: 'boolean' },
+                      dryRun: { type: 'boolean' },
+                    },
+                    required: ['rowsRead', 'rowsMarked', 'rowsAlreadyKnown'],
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book, or the worksheet is gone.', 'Spreadsheet not found.'),
+            409: errorResponse(
+              'Not mapped, the format is gone, or the sheet no longer matches the map.',
+              'Map the book to a format before marking its rows.',
+            ),
+            502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+        delete: {
+          tags: ['spreadsheets'],
+          summary: 'Undo the marking',
+          description:
+            'The marked rows become unknown again and the next import brings them in. Exists ' +
+            'because marking is one click with a large consequence: a decision with no way back ' +
+            'would leave rows outside the system for good. Requests already imported are not ' +
+            'touched — their own hash still keeps them from coming in twice.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: {
+              description: 'How many marks went.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: { rowsCleared: { type: 'integer' } },
+                    required: ['rowsCleared'],
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/imports': {
+        get: {
+          tags: ['spreadsheets'],
+          summary: 'The import runs of a book, newest first',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: wrapped('The runs.', 'imports', 'SheetImport', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
+          },
+        },
+      },
+
+      // --- requesters ---
+
+      '/api/requesters': {
+        get: {
+          tags: ['requesters'],
+          summary: 'Requester strings already in use, most used first',
+          description:
+            'Needs request.read. Distinct across requests and projects. `q` matches by ' +
+            'prefix, case-insensitively, which is what the index on lower(requester) serves.',
+          parameters: [
+            { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Prefix of the name.' },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 } },
+          ],
+          responses: {
+            200: wrapped('The strings in use.', 'requesters', 'Requester', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+
+      // --- statuses ---
+
+      '/api/statuses': {
+        get: {
+          tags: ['statuses'],
+          summary: 'The catalogue, global plus one area',
+          description:
+            'Without `areaId`, the global catalogue alone. With it, that area\'s statuses and ' +
+            'the global ones, globals first then by sortOrder.',
+          parameters: [
+            { name: 'areaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            {
+              name: 'includeInactive',
+              in: 'query',
+              required: false,
+              schema: { type: 'string', enum: ['true', 'false'] },
+              description: 'Send `true` to include deactivated statuses.',
+            },
+          ],
+          responses: {
+            200: wrapped('The statuses.', 'statuses', 'Status', true),
+            400: errorResponse('A bad areaId.', 'areaId must be a positive integer.'),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['statuses'],
+          summary: 'Add a status to a catalogue',
+          description: 'Needs status.manage.',
+          requestBody: jsonBody('CreateStatusRequest'),
+          responses: {
+            201: wrapped('The status.', 'status', 'Status'),
+            400: errorResponse('A bad code, label or area.', 'code must be snake_case: a lowercase letter, then letters, digits or _ (50 max).'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The code exists in that catalogue.', 'That catalogue already has a status with that code.'),
+          },
+        },
+      },
+      '/api/statuses/{id}': {
+        get: {
+          tags: ['statuses'],
+          summary: 'One status',
+          parameters: [pathId('id', 'statuses.id')],
+          responses: {
+            200: wrapped('The status.', 'status', 'Status'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid status id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such status.', 'Status not found.'),
+          },
+        },
+        patch: {
+          tags: ['statuses'],
+          summary: 'Edit a status',
+          parameters: [pathId('id', 'statuses.id')],
+          requestBody: jsonBody('UpdateStatusRequest'),
+          responses: {
+            200: wrapped('The status after the change.', 'status', 'Status'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update: send label, sortOrder, isTerminal or isActive.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such status.', 'Status not found.'),
+          },
+        },
+        delete: {
+          tags: ['statuses'],
+          summary: 'Deactivate a status',
+          description:
+            'Needs status.manage. Deactivates rather than deletes: requests and projects ' +
+            'reference the row, so it leaves the pickers without rewriting history.',
+          parameters: [pathId('id', 'statuses.id')],
+          responses: {
+            200: wrapped('The deactivated status.', 'status', 'Status'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid status id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such status.', 'Status not found.'),
+            409: errorResponse('It is already inactive.', 'Status is already inactive.'),
+          },
+        },
+      },
+
+      // --- data types ---
+
+      '/api/data-types': {
+        get: {
+          tags: ['data-types'],
+          summary: 'Every active field type',
+          responses: {
+            200: wrapped('The active types.', 'dataTypes', 'DataType', true),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/data-types/{code}': {
+        get: {
+          tags: ['data-types'],
+          summary: 'One field type by code',
+          parameters: [
+            { name: 'code', in: 'path', required: true, schema: { type: 'string' }, description: 'data_types.code' },
+          ],
+          responses: {
+            200: wrapped('The type.', 'dataType', 'DataType'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such type.', 'Data type not found.'),
+          },
+        },
+      },
+
       // --- schemas ---
       
       '/api/schemas': {
@@ -2315,7 +4003,10 @@ export function buildOpenApiDocument() {
           requestBody: jsonBody('CreateSchemaRequest'),
           responses: {
             201: wrapped('The created schema.', 'schema', 'Schema'),
-            400: errorResponse('Missing fields or invalid code/name.', 'Schema code is required.'),
+            400: errorResponse(
+              'Missing fields, an invalid code/name, or a key that already exists with another type.',
+              'Field "numero_orden" already exists as "text" in Papel institucional, so it cannot be published as "date". Reuse it with that type, or pick another key.',
+            ),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             409: errorResponse('The code is taken.', 'A schema with that code already exists.'),
@@ -2335,6 +4026,20 @@ export function buildOpenApiDocument() {
             404: errorResponse('No such schema.', 'Schema not found.'),
           },
         },
+        patch: {
+          tags: ['schemas'],
+          summary: 'Rename a schema or flip its active flag',
+          description: 'Needs schema.manage. Reactivation goes through here with `isActive: true`.',
+          parameters: [pathId('id', 'schemas.id')],
+          requestBody: jsonBody('UpdateSchemaRequest'),
+          responses: {
+            200: wrapped('The schema after the change.', 'schema', 'Schema'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update: send name or isActive.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+          },
+        },
         delete: {
           tags: ['schemas'],
           summary: 'Deactivate a schema',
@@ -2351,19 +4056,87 @@ export function buildOpenApiDocument() {
         },
       },
       '/api/schemas/{id}/versions': {
+        get: {
+          tags: ['schemas'],
+          summary: 'Every version of a schema, newest first',
+          parameters: [pathId('id', 'schemas.id')],
+          responses: {
+            200: wrapped('The versions.', 'versions', 'SchemaVersion', true),
+            400: errorResponse('The id is not a positive integer.', 'Invalid schema id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such schema.', 'Schema not found.'),
+          },
+        },
         post: {
           tags: ['schemas'],
-          summary: 'Create a new version of the schema',
-          description: 'Needs schema.manage. The previous version remains intact. If the schema is inactive, this fails.',
+          summary: 'Publish the next version of the schema',
+          description:
+            'Needs schema.manage. Earlier versions are immutable (a trigger rejects the ' +
+            'UPDATE); requests captured under them keep reading as they were. Refused on an ' +
+            'inactive schema.',
           parameters: [pathId('id', 'schemas.id')],
           requestBody: jsonBody('CreateSchemaVersionRequest'),
           responses: {
             201: wrapped('The created version.', 'version', 'SchemaVersion'),
-            400: errorResponse('Missing fields or invalid payload.', 'Fields must be an array.'),
+            400: errorResponse(
+              'Missing fields or invalid payload.',
+              'Section "deliverables" is required and must be an array.',
+            ),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such schema.', 'Schema not found.'),
-            409: errorResponse('Cannot create a version for an inactive schema.', 'Cannot create a version for a inactive schema.'),
+            409: errorResponse('The schema is inactive.', 'Cannot create a version for an inactive schema.'),
+          },
+        },
+      },
+      '/api/schemas/field-keys': {
+        get: {
+          tags: ['schemas'],
+          summary: 'The field vocabulary: every key ever published',
+          description:
+            'What the format builder reads to autofill a key that already exists instead of ' +
+            'letting somebody re-invent it. Keys from retired versions are included -- they have ' +
+            'captured data under them, so they are still part of the system\'s vocabulary. ' +
+            'Publishing a field whose key exists with another type is refused.',
+          responses: {
+            200: wrapped('The vocabulary, by key.', 'fieldKeys', 'FieldKey', true),
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/schemas/versions/{versionId}': {
+        get: {
+          tags: ['schemas'],
+          summary: 'One version by its own id',
+          description:
+            "What a request, project or sheet points at. Carries the schema's code, name " +
+            'and active flag beside the fields.',
+          parameters: [pathId('versionId', 'schema_versions.id')],
+          responses: {
+            200: wrapped('The version.', 'version', 'SchemaVersion'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid version id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such version.', 'Schema version not found.'),
+          },
+        },
+      },
+      '/api/schemas/{id}/clone': {
+        post: {
+          tags: ['schemas'],
+          summary: 'Start a new schema from an existing one',
+          description:
+            'Needs schema.manage. RF-SOL-01 templates: a new identity whose version 1 is a ' +
+            "copy of the source's latest fields. The seeded starter formats exist to be " +
+            'cloned this way.',
+          parameters: [pathId('id', 'schemas.id')],
+          requestBody: jsonBody('CloneSchemaRequest'),
+          responses: {
+            201: wrapped('The new schema with its version 1.', 'schema', 'Schema'),
+            400: errorResponse('Missing code or name.', 'code is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such source schema.', 'Schema not found.'),
+            409: errorResponse('The code is taken.', 'A schema with that code already exists.'),
           },
         },
       },

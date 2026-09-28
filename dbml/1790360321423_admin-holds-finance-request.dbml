@@ -624,19 +624,6 @@ Table "sheet_imports" {
 CHECK sheet_imports_errors_is_array: jsonb_typeof(errors) = \'array\'::text'''
 }
 
-Table "sheet_row_marks" {
-  "id" int8 [pk, not null, increment]
-  "sheet_id" int8 [not null]
-  "source_hash" varchar(64) [not null, note: 'La huella de la fila, calculada con el mapeo vigente al marcarla. Si hashColumns cambia, las marcas dejan de corresponder.']
-  "marked_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "marked_by" int8 [note: 'Quién decidió no importar esas filas. Nulo si lo hizo un proceso sin sesión.']
-
-  Indexes {
-    (sheet_id, source_hash) [type: btree, unique, name: "uq_sheet_row_marks"]
-  }
-  Note: 'RF-MIG-02: filas de un libro marcadas como ya vistas sin haberlas importado. Sirve para poner en cero un rastreador que ya traía historia: la importación las salta igual que si existiera la solicitud.'
-}
-
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -768,10 +755,6 @@ Ref "schema_versions_schema_id_fkey":"schemas"."id" < "schema_versions"."schema_
 Ref "sheet_imports_run_by_fkey":"users"."id" < "sheet_imports"."run_by"
 
 Ref "sheet_imports_sheet_id_fkey":"sheets"."id" < "sheet_imports"."sheet_id"
-
-Ref "sheet_row_marks_marked_by_fkey":"users"."id" < "sheet_row_marks"."marked_by"
-
-Ref "sheet_row_marks_sheet_id_fkey":"sheets"."id" < "sheet_row_marks"."sheet_id" [delete: cascade]
 
 Ref "sheets_microsoft_account_id_fkey":"microsoft_accounts"."id" < "sheets"."microsoft_account_id"
 

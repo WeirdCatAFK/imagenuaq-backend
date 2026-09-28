@@ -363,6 +363,32 @@ Table "area_hierarchy" {
 CHECK area_hierarchy_no_self: parent_area_id <> child_area_id'''
 }
 
+Table "entities" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(300) [unique, not null]
+  "kind" varchar(20) [note: 'facultad, dependencia, coordinacion, externo']
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+  Note: '''RF-SOL-07: la entidad solicitante. Persiste entre solicitudes; sus contactos cambian y viven aparte.
+CHECK entities_kind_valid: (kind IS NULL) OR ((kind)::text = ANY ((ARRAY[\'facultad\'::character varying, \'dependencia\'::character varying, \'coordinacion\'::character varying, \'externo\'::character varying])::text[]))'''
+}
+
+Table "entity_contacts" {
+  "id" int8 [pk, not null, increment]
+  "entity_id" int8 [unique, not null]
+  "full_name" varchar(200) [not null]
+  "email" varchar(320)
+  "phone" varchar(50)
+  "job_title" varchar(200)
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    entity_id [type: btree, name: "idx_entity_contacts_entity_id"]
+  }
+  Note: 'RF-SOL-07. Es tambien la identidad del externo para RF-EXT-01 y quien firma el lado externo de RF-FLW-05.'
+}
+
 Table "statuses" {
   "id" int8 [pk, not null, increment]
   "area_id" int8
@@ -411,7 +437,7 @@ Table "sheets" {
   "table_name" varchar(200)
   "web_url" text
   "schema_version_id" int8 [note: 'Formato destino. NULL = registrado pero sin mapear; la importacion lo rechaza en vez de adivinar.']
-  "column_map" jsonb [not null, default: `{}`, note: 'RF-MIG-02: cómo una fila se vuelve solicitud. { version, title, requester, priority, status: {op, column, map: {texto: codigo}, default}, hashColumns, fields: {codigo: regla} }. Las reglas son column | constant | concat | split, y nombran columnas por el texto de su encabezado. hashColumns es la identidad de la fila: la columna Id del formulario si la hay, y si no las celdas mapeadas. Ver src/utils/columnMap.js.']
+  "column_map" jsonb [not null, default: `{}`, note: 'Encabezado del Excel -> campo de schema_versions.fields o columna promovida de requests']
   "last_imported_at" timestamptz [note: 'Hasta donde llego la ultima importacion, para que la siguiente sepa desde donde seguir']
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "deleted_at" timestamptz
@@ -428,9 +454,11 @@ INDEX uq_sheets_item (drive_id, item_id, COALESCE(table_name, \'\'::character va
 
 Table "projects" {
   "id" int8 [pk, not null, increment]
-  "key" varchar(50) [unique, not null, note: 'Identificador corto y legible; sirve como nombre de carpeta. Se genera como PRY-000001 si no se manda, y se puede sobrescribir con uno propio.']
+  "key" varchar(50) [unique, not null, note: 'Identificador corto y legible; sirve como nombre de carpeta. Se asigna, no se genera.']
   "title" varchar(300) [not null]
   "description" text
+  "entity_id" int8
+  "contact_id" int8
   "schema_version_id" int8
   "status_id" int8 [not null]
   "status_since" timestamptz [not null, default: `CURRENT_TIMESTAMP`, note: 'RF-EST-03, RF-EST-04: desnormalizado para que la alerta de "lleva demasiado tiempo asi" no recorra logs']
@@ -446,16 +474,15 @@ Table "projects" {
   "closed_at" timestamptz
   "archived_at" timestamptz
   "deleted_at" timestamptz
-  "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se hereda de la solicitud al convertir.']
 
   Indexes {
+    entity_id [type: btree, name: "idx_projects_entity_id"]
     (priority, created_at) [type: btree, name: "idx_projects_open"]
     (status_id, status_since) [type: btree, name: "idx_projects_status_id"]
   }
   Note: '''RF-PRY-02. Las areas participantes se derivan de project_stages; no hay etapa actual, ver DATAMODEL 2.1.
 CHECK projects_date_range: (due_on IS NULL) OR (starts_on IS NULL) OR (due_on >= starts_on)
-CHECK projects_key_format: (key)::text ~ \'^[A-Z0-9][A-Z0-9_-]*$\'::text
-DEFAULT key: (\'PRY-\'::text || to_char(nextval(\'projects_key_seq\'::regclass), \'FM000000\'::text))'''
+CHECK projects_key_format: (key)::text ~ \'^[A-Z0-9][A-Z0-9_-]*$\'::text'''
 }
 
 Table "requests" {
@@ -463,6 +490,8 @@ Table "requests" {
   "folio" varchar(50) [unique, not null, note: 'RF-SOL-03: unico y consultable. Lo genera la secuencia, no la orquestacion.']
   "schema_version_id" int8 [not null]
   "project_id" int8
+  "entity_id" int8
+  "contact_id" int8
   "area_id" int8
   "title" varchar(300) [not null]
   "data" jsonb [not null, default: `{}`, note: 'RF-SOL-06: la captura completa, con la forma que dicte schema_versions.fields']
@@ -476,25 +505,17 @@ Table "requests" {
   "created_by" int8
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "deleted_at" timestamptz
-  "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se corrige al convertir, con autocompletado sobre las ya usadas.']
-  "source_index" int4 [note: 'Renglón del que salió, para volver a verlo en la hoja. Decorativo: el índice se mueve si alguien ordena.']
-  "source_data" jsonb [note: 'RF-SOL-06: el renglón completo indexado por encabezado, incluidas las columnas que el mapeo ignora.']
-  "source_hash" varchar(64) [note: 'RF-MIG-02: sha256 de las celdas que el mapeo declara, normalizadas. Único por libro; es lo que impide importar dos veces la misma fila.']
-  "possible_duplicate_of" int8 [note: 'La solicitud que esta probablemente corrige: mismo título y solicitante en el mismo libro, con la huella cambiada. Lo resuelve una persona.']
 
   Indexes {
-    (sheet_id, source_hash) [type: btree, unique, name: "uq_requests_sheet_hash"]
     assignee_id [type: btree, name: "idx_requests_assignee_id"]
-    possible_duplicate_of [type: btree, name: "idx_requests_duplicate_of"]
+    entity_id [type: btree, name: "idx_requests_entity_id"]
     (area_id, status_id, priority, created_at) [type: btree, name: "idx_requests_inbox"]
     project_id [type: btree, name: "idx_requests_project_id"]
   }
   Note: '''RF-SOL-03. Existe desde que entra, tenga o no proyecto: project_id NULL es una solicitud sin convertir.
 CHECK requests_sheet_origin: ((source)::text = \'sheet\'::text) OR (sheet_id IS NULL)
-CHECK requests_hash_origin: (source_hash IS NULL) OR ((source)::text = \'sheet\'::text)
 CHECK requests_source_valid: (source)::text = ANY ((ARRAY[\'form\'::character varying, \'email\'::character varying, \'sheet\'::character varying, \'manual\'::character varying])::text[])
 CHECK requests_data_is_object: jsonb_typeof(data) = \'object\'::text
-CHECK requests_data_is_object_or_null: (source_data IS NULL) OR (jsonb_typeof(source_data) = \'object\'::text)
 DEFAULT folio: (\'SOL-\'::text || to_char(nextval(\'requests_folio_seq\'::regclass), \'FM000000\'::text))'''
 }
 
@@ -512,8 +533,6 @@ Table "project_stages" {
   "started_at" timestamptz
   "ended_at" timestamptz
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "inputs" jsonb [not null, default: `[]`, note: 'RF-FLW-06: claves de project_field_values que esta etapa necesita para trabajar. Informativas: no bloquean.']
-  "outputs" jsonb [not null, default: `[]`, note: 'RF-FLW-06: claves que esta etapa entrega. El visto bueno se niega si alguna no tiene valor.']
 
   Indexes {
     (project_id, area_id, seq, attempt) [type: btree, unique, name: "uq_project_stages_attempt"]
@@ -525,24 +544,23 @@ Table "project_stages" {
 CHECK project_stages_blocked_reason_present: ((status)::text <> \'waiting_external\'::text) OR (blocked_reason IS NOT NULL)
 CHECK project_stages_time_range: (ended_at IS NULL) OR (started_at IS NULL) OR (ended_at >= started_at)
 CHECK project_stages_status_valid: (status)::text = ANY ((ARRAY[\'pending\'::character varying, \'active\'::character varying, \'waiting_external\'::character varying, \'done\'::character varying, \'cancelled\'::character varying])::text[])
-CHECK project_stages_attempt_positive: attempt >= 1
-CHECK project_stages_inputs_is_array: jsonb_typeof(inputs) = \'array\'::text
-CHECK project_stages_outputs_is_array: jsonb_typeof(outputs) = \'array\'::text'''
+CHECK project_stages_attempt_positive: attempt >= 1'''
 }
 
 Table "approvals" {
   "id" int8 [pk, not null, increment]
   "project_stage_id" int8 [not null]
   "decision" varchar(20) [not null]
-  "approver_user_id" int8 [not null, note: 'RF-FLW-03: quien dio el visto bueno. Siempre interno.']
+  "approver_user_id" int8
+  "approver_contact_id" int8 [note: 'RF-FLW-05: el lado externo del visto bueno de doble parte. Una fila por lado.']
   "comment" text
   "decided_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "evidence_file_id" int8 [note: 'DATAMODEL 2.11: la conformidad del solicitante como evidencia, no como firma. Nulable hasta que ARC tenga carga de archivos.']
 
   Indexes {
     project_stage_id [type: btree, name: "idx_approvals_project_stage_id"]
   }
   Note: '''RF-FLW-03. Objeto de negocio, no traza: RF-EST-05 pregunta por los que faltan.
+CHECK approvals_one_approver: num_nonnulls(approver_user_id, approver_contact_id) = 1
 CHECK approvals_decision_valid: (decision)::text = ANY ((ARRAY[\'approved\'::character varying, \'rejected\'::character varying])::text[])'''
 }
 
@@ -604,39 +622,6 @@ Table "data_types" {
   Note: 'DEFAULT created_at: now()'
 }
 
-Table "sheet_imports" {
-  "id" int8 [pk, not null, increment]
-  "sheet_id" int8 [not null]
-  "run_by" int8
-  "started_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "finished_at" timestamptz
-  "rows_read" int4 [not null, default: 0]
-  "rows_created" int4 [not null, default: 0]
-  "rows_skipped" int4 [not null, default: 0]
-  "rows_failed" int4 [not null, default: 0]
-  "rows_flagged" int4 [not null, default: 0]
-  "errors" jsonb [not null, default: `[]`, note: 'Arreglo de { index, message }: el renglón de la hoja y por qué no se pudo importar.']
-
-  Indexes {
-    (sheet_id, started_at) [type: btree, name: "idx_sheet_imports_sheet_id"]
-  }
-  Note: '''RF-MIG-02: una corrida de importación con sus conteos y los renglones que no entraron. Sobrevive a la respuesta HTTP porque la pregunta "por qué no entró esta fila" se hace después.
-CHECK sheet_imports_errors_is_array: jsonb_typeof(errors) = \'array\'::text'''
-}
-
-Table "sheet_row_marks" {
-  "id" int8 [pk, not null, increment]
-  "sheet_id" int8 [not null]
-  "source_hash" varchar(64) [not null, note: 'La huella de la fila, calculada con el mapeo vigente al marcarla. Si hashColumns cambia, las marcas dejan de corresponder.']
-  "marked_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "marked_by" int8 [note: 'Quién decidió no importar esas filas. Nulo si lo hizo un proceso sin sesión.']
-
-  Indexes {
-    (sheet_id, source_hash) [type: btree, unique, name: "uq_sheet_row_marks"]
-  }
-  Note: 'RF-MIG-02: filas de un libro marcadas como ya vistas sin haberlas importado. Sirve para poner en cero un rastreador que ya traía historia: la importación las salta igual que si existiera la solicitud.'
-}
-
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -655,9 +640,9 @@ Ref "access_tokens_file_id_fkey":"files"."id" < "access_tokens"."file_id" [delet
 
 Ref "access_tokens_folder_id_fkey":"folders"."id" < "access_tokens"."folder_id" [delete: cascade]
 
-Ref "approvals_approver_user_id_fkey":"users"."id" < "approvals"."approver_user_id"
+Ref "approvals_approver_contact_id_fkey":"entity_contacts"."id" < "approvals"."approver_contact_id"
 
-Ref "approvals_evidence_file_id_fkey":"files"."id" < "approvals"."evidence_file_id"
+Ref "approvals_approver_user_id_fkey":"users"."id" < "approvals"."approver_user_id"
 
 Ref "approvals_project_stage_id_fkey":"project_stages"."id" < "approvals"."project_stage_id" [delete: cascade]
 
@@ -676,6 +661,8 @@ Ref "fk_collection_events_event_id_events_id":"events"."id" < "collection_events
 Ref "contract_type_entitlements_absence_type_id_fkey":"absence_types"."id" < "contract_type_entitlements"."absence_type_id"
 
 Ref "contract_type_entitlements_contract_type_id_fkey":"contract_types"."id" < "contract_type_entitlements"."contract_type_id"
+
+Ref "entity_contacts_entity_id_fkey":"entities"."id" < "entity_contacts"."entity_id"
 
 Ref "fk_event_exceptions_event_id_events_id":"events"."id" < "event_exceptions"."event_id"
 
@@ -729,7 +716,11 @@ Ref "project_stages_event_id_fkey":"events"."id" < "project_stages"."event_id"
 
 Ref "project_stages_project_id_fkey":"projects"."id" < "project_stages"."project_id"
 
+Ref "projects_contact_id_fkey":"entity_contacts"."id" < "projects"."contact_id"
+
 Ref "projects_created_by_fkey":"users"."id" < "projects"."created_by"
+
+Ref "projects_entity_id_fkey":"entities"."id" < "projects"."entity_id"
 
 Ref "projects_event_collection_id_fkey":"event_collections"."id" < "projects"."event_collection_id"
 
@@ -743,11 +734,13 @@ Ref "requests_area_id_fkey":"areas"."id" < "requests"."area_id"
 
 Ref "requests_assignee_id_fkey":"users"."id" < "requests"."assignee_id"
 
+Ref "requests_contact_id_fkey":"entity_contacts"."id" < "requests"."contact_id"
+
 Ref "requests_created_by_fkey":"users"."id" < "requests"."created_by"
 
-Ref "requests_folder_id_fkey":"folders"."id" < "requests"."folder_id"
+Ref "requests_entity_id_fkey":"entities"."id" < "requests"."entity_id"
 
-Ref "requests_possible_duplicate_of_fkey":"requests"."id" < "requests"."possible_duplicate_of"
+Ref "requests_folder_id_fkey":"folders"."id" < "requests"."folder_id"
 
 Ref "requests_project_id_fkey":"projects"."id" < "requests"."project_id"
 
@@ -764,14 +757,6 @@ Ref "role_permissions_role_id_fkey":"roles"."id" < "role_permissions"."role_id" 
 Ref "schema_versions_published_by_fkey":"users"."id" < "schema_versions"."published_by"
 
 Ref "schema_versions_schema_id_fkey":"schemas"."id" < "schema_versions"."schema_id"
-
-Ref "sheet_imports_run_by_fkey":"users"."id" < "sheet_imports"."run_by"
-
-Ref "sheet_imports_sheet_id_fkey":"sheets"."id" < "sheet_imports"."sheet_id"
-
-Ref "sheet_row_marks_marked_by_fkey":"users"."id" < "sheet_row_marks"."marked_by"
-
-Ref "sheet_row_marks_sheet_id_fkey":"sheets"."id" < "sheet_row_marks"."sheet_id" [delete: cascade]
 
 Ref "sheets_microsoft_account_id_fkey":"microsoft_accounts"."id" < "sheets"."microsoft_account_id"
 
