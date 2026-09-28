@@ -77,6 +77,17 @@ router.post("/:id/import", requirePermission("request.write"), async (req, res) 
   res.json(await spreadsheets.import(sheetId(req), { dryRun: dryRun === true }, req.user));
 });
 
+// Marcar las filas actuales como ya vistas, sin crear nada. No pide `request.write` justamente
+// porque no crea solicitudes: es una decisión sobre el libro.
+router.post("/:id/baseline", async (req, res) => {
+  const { dryRun } = req.body ?? {};
+  res.json(await spreadsheets.markRowsAsSeen(sheetId(req), { dryRun: dryRun === true }, req.user));
+});
+
+router.delete("/:id/baseline", async (req, res) => {
+  res.json(await spreadsheets.clearMarks(sheetId(req)));
+});
+
 router.delete("/:id", async (req, res) => {
   res.json({ sheet: await spreadsheets.remove(sheetId(req)) });
 });

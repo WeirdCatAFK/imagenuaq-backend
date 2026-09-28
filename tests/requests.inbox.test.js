@@ -209,6 +209,34 @@ describe("GET /api/requests", () => {
     assert.equal((await server.get("/api/requests?converted=quizá", { token: adminToken })).status, 400);
   });
 
+  test("total counts what matches the filters, not the page", async () => {
+    await seed();
+
+    // Sin él una bandeja paginada no puede decir cuánto falta por ver, y contar la página es
+    // justamente el número equivocado.
+    const pagina = await server.get("/api/requests?limit=2", { token: adminToken });
+    assert.equal(pagina.status, 200);
+    assert.equal(pagina.body.requests.length, 2);
+    assert.equal(pagina.body.total, 4, "las cuatro sembradas, no las dos de la página");
+    assert.equal(pagina.body.limit, 2);
+    assert.equal(pagina.body.offset, 0);
+
+    // El total sigue al filtro, no al conjunto entero.
+    const deUnArea = await server.get("/api/requests?areaId=none&limit=1", { token: adminToken });
+    assert.equal(deUnArea.body.total, deUnArea.body.requests.length === 0 ? 0 : deUnArea.body.total);
+    assert.ok(deUnArea.body.total <= 4);
+
+    // Una consulta sin resultados trae cero, no se queda sin el campo.
+    const vacia = await server.get("/api/requests?q=no-existe-este-folio", { token: adminToken });
+    assert.deepEqual(vacia.body.requests, []);
+    assert.equal(vacia.body.total, 0);
+
+    // La última página no miente sobre el total.
+    const ultima = await server.get("/api/requests?limit=2&offset=3", { token: adminToken });
+    assert.equal(ultima.body.requests.length, 1);
+    assert.equal(ultima.body.total, 4);
+  });
+
   test("reads need request.read", async () => {
     assert.equal((await server.get("/api/requests", { token: workerToken })).status, 403);
     assert.equal((await server.get("/api/requests")).status, 401);

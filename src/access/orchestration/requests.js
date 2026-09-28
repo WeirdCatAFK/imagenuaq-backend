@@ -101,6 +101,10 @@ class Requests {
   /**
    * The inbox (RF-SOL-04): ordered, filterable, and by default only what has not been converted,
    * because that is what an area still has to act on.
+   *
+   * @returns {Promise<{requests: object[], total: number, limit: number, offset: number}>} `total`
+   *   counts every request matching the filters, not the page, so a client can page through and
+   *   say how much is left.
    */
   async list(filters = {}) {
     const limit = filters.limit === undefined ? 50 : requireInt(filters.limit, "limit");
@@ -124,7 +128,10 @@ class Requests {
       offset,
     });
 
-    return rows.map(shapeListed);
+    // `total` es de la consulta, no de la página: sin él la bandeja no puede decir cuánto falta
+    // por ver. Con cero filas no hay de dónde leerlo y el total es cero.
+    const total = rows.length === 0 ? 0 : Number(rows[0].total);
+    return { requests: rows.map(shapeListed), total, limit, offset };
   }
 
   /**

@@ -15,7 +15,8 @@ router.use(requirePermission("request.read"));
 
 // The inbox (RF-SOL-04, RF-SOL-05): by default what has not been converted yet.
 router.get("/", async (req, res) => {
-  res.json({ requests: await requests.list(req.query) });
+  // La respuesta ya trae { requests, total, limit, offset }.
+  res.json(await requests.list(req.query));
 });
 
 router.get("/:id", async (req, res) => {

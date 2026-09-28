@@ -109,6 +109,9 @@ export async function resetCases(keepEmails = []) {
   await sql('delete from projects');
   // Import runs, then the books, then the accounts: each references the next, and none is seeded.
   await sql('delete from sheet_imports');
+  // Las marcas van con su libro por CASCADE, pero se borran aquí igual: el orden de esta función
+  // es explícito a propósito, y depender del cascade esconde de qué depende qué.
+  await sql('delete from sheet_row_marks');
   await sql('delete from sheets');
   await sql('delete from microsoft_accounts');
   await sql('delete from microsoft_app');

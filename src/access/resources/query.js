@@ -1103,6 +1103,10 @@ class Query {
         r.id, r.folio, r.title, r.requester, r.area_id, r.status_id, r.status_since,
         r.assignee_id, r.priority, r.source, r.sheet_id, r.project_id,
         r.possible_duplicate_of, r.created_at,
+        -- Cuántas hay en total con estos filtros, antes del limit: una bandeja tiene que poder
+        -- decir cuánto falta por ver, y repetir el WHERE en un count aparte es la forma de que
+        -- las dos consultas dejen de coincidir.
+        count(*) over () as total,
         st.code as status_code, st.label as status_label,
         a.name as area_name,
         u.full_name as assignee_name,
@@ -1216,12 +1220,52 @@ class Query {
 
   /** Every hash already taken from a book, so an import can skip what it has seen. */
   async listSourceHashes(sheetId) {
+    // Las dos formas de conocer una fila: tener su solicitud, o haberla marcado como ya vista sin
+    // importarla (`sheet_row_marks`). La importación las trata igual --- se saltan ---, que es
+    // justamente lo que hace utilizable un rastreador que ya traía historia.
     const rows = await this.#rows(
       `select source_hash from requests
-      where sheet_id = $1 and source_hash is not null and deleted_at is null`,
+        where sheet_id = $1 and source_hash is not null and deleted_at is null
+      union
+      select source_hash from sheet_row_marks where sheet_id = $1`,
       [sheetId],
     );
     return new Set(rows.map((row) => row.source_hash));
+  }
+
+  /**
+   * Marks rows as already seen without creating anything. Returns how many marks are new: a hash
+   * already marked, or already carried by a request, is left alone.
+   */
+  async markSheetRows({ sheetId, hashes, markedBy = null }) {
+    if (hashes.length === 0) return 0;
+
+    const rows = await this.#rows(
+      `insert into sheet_row_marks (sheet_id, source_hash, marked_by)
+      select $1, h, $3 from unnest($2::text[]) as h
+      on conflict (sheet_id, source_hash) do nothing
+      returning id`,
+      [sheetId, hashes, markedBy],
+    );
+    return rows.length;
+  }
+
+  /** Undoes the marking for a book. Returns how many marks went. */
+  async clearSheetMarks(sheetId) {
+    const rows = await this.#rows(
+      'delete from sheet_row_marks where sheet_id = $1 returning id',
+      [sheetId],
+    );
+    return rows.length;
+  }
+
+  /** How many rows of a book are marked as seen without a request behind them. */
+  async countSheetMarks(sheetId) {
+    const [row] = await this.#rows(
+      'select count(*)::int as n from sheet_row_marks where sheet_id = $1',
+      [sheetId],
+    );
+    return row?.n ?? 0;
   }
 
   //--- PROJECTS (RF-PRY-02) ---
@@ -2434,7 +2478,10 @@ class Query {
            a.email        as account_email,
            a.display_name as account_display_name,
            a.revoked_at   as account_revoked_at,
-           u.full_name    as registered_by_name
+           u.full_name    as registered_by_name,
+           -- Cuántas filas se marcaron como ya vistas sin importarlas: una pantalla que ofrece
+           -- deshacerlo tiene que poder decir cuántas son.
+           (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows
       from sheets s
       join microsoft_accounts a on a.id = s.microsoft_account_id
       left join users u on u.id = s.registered_by`;

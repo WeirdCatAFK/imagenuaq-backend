@@ -893,6 +893,12 @@ export function buildOpenApiDocument() {
             columnMap: { type: 'object', description: 'Excel header -> field key. Empty until mapped.' },
             mapped: { type: 'boolean', description: 'schemaVersionId is not null.' },
             lastImportedAt: { type: ['string', 'null'], format: 'date-time' },
+            markedRows: {
+              type: 'integer',
+              readOnly: true,
+              description:
+                'Rows marked as already seen without being imported (see POST /baseline).',
+            },
             accountId: { type: 'integer', description: 'The microsoft account that reads it.' },
             accountEmail: { type: ['string', 'null'] },
             accountDisplayName: { type: ['string', 'null'] },
@@ -3159,7 +3165,31 @@ export function buildOpenApiDocument() {
             { name: 'offset', in: 'query', required: false, schema: { type: 'integer', minimum: 0, default: 0 } },
           ],
           responses: {
-            200: wrapped('The requests.', 'requests', 'RequestListItem', true),
+            200: {
+              description: 'The page of requests, and how many match the filters in total.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      requests: {
+                        type: 'array',
+                        items: { $ref: '#/components/schemas/RequestListItem' },
+                      },
+                      total: {
+                        type: 'integer',
+                        description:
+                          'Every request matching the filters, not just this page: an inbox has ' +
+                          'to be able to say how much is left to look at.',
+                      },
+                      limit: { type: 'integer' },
+                      offset: { type: 'integer' },
+                    },
+                    required: ['requests', 'total', 'limit', 'offset'],
+                  },
+                },
+              },
+            },
             400: errorResponse('A bad filter.', 'limit must be between 1 and 200.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
@@ -3717,6 +3747,96 @@ export function buildOpenApiDocument() {
               'Map the book to a format before importing it.',
             ),
             502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/baseline': {
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'Mark the rows the book has now as already seen',
+          description:
+            'Needs spreadsheet.write, and creates nothing. This is how a tracker that already ' +
+            'carries months of history becomes usable: a line is drawn under what was handled ' +
+            'before the system existed, and from then on only rows somebody adds get imported. ' +
+            'Needs the mapping, because a row is identified by the hash of the columns ' +
+            '`hashColumns` names — but it does **not** read or validate the values, so a row ' +
+            'missing a required field can be marked, which is the normal case. Marks already ' +
+            'known rows are left alone.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    dryRun: {
+                      type: 'boolean',
+                      default: false,
+                      description: 'Count what would be marked and write nothing.',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'What was marked.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      rowsRead: { type: 'integer' },
+                      rowsMarked: { type: 'integer', description: 'Rows that were not known before.' },
+                      rowsAlreadyKnown: {
+                        type: 'integer',
+                        description: 'Already imported, or already marked.',
+                      },
+                      truncated: { type: 'boolean' },
+                      dryRun: { type: 'boolean' },
+                    },
+                    required: ['rowsRead', 'rowsMarked', 'rowsAlreadyKnown'],
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book, or the worksheet is gone.', 'Spreadsheet not found.'),
+            409: errorResponse(
+              'Not mapped, the format is gone, or the sheet no longer matches the map.',
+              'Map the book to a format before marking its rows.',
+            ),
+            502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+        delete: {
+          tags: ['spreadsheets'],
+          summary: 'Undo the marking',
+          description:
+            'The marked rows become unknown again and the next import brings them in. Exists ' +
+            'because marking is one click with a large consequence: a decision with no way back ' +
+            'would leave rows outside the system for good. Requests already imported are not ' +
+            'touched — their own hash still keeps them from coming in twice.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: {
+              description: 'How many marks went.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: { rowsCleared: { type: 'integer' } },
+                    required: ['rowsCleared'],
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
           },
         },
       },

@@ -384,6 +384,107 @@ describe("importing a book's rows", () => {
     assert.equal(request.data.fecha_entrega, "2026-01-08");
   });
 
+  describe("marcar filas como ya vistas", () => {
+    // El caso real: un rastreador que ya lleva meses. Marcar pone la raya, y de ahí en adelante
+    // sólo entra lo que alguien agregue.
+    test("marcar las filas de hoy hace que la importación no cree nada", async () => {
+      const marcado = await spreadsheets.markRows(sheet, read());
+      assert.equal(marcado.rowsRead, 3);
+      assert.equal(marcado.rowsMarked, 3);
+      assert.equal(marcado.rowsAlreadyKnown, 0);
+
+      const corrida = await spreadsheets.importRows(sheet, read());
+      assert.equal(corrida.rowsCreated, 0, "ninguna solicitud");
+      assert.equal(corrida.rowsSkipped, 3, "las tres se reconocen");
+      assert.equal((await requests()).length, 0);
+    });
+
+    test("una fila agregada después sí entra", async () => {
+      await spreadsheets.markRows(sheet, read());
+
+      const conUnaNueva = [
+        ...ROWS,
+        row({
+          id: 300,
+          email: "nueva@uaq.mx",
+          entity: "Facultad de Enfermería",
+          kind: "Hoja membretada",
+          status: "",
+        }),
+      ];
+
+      const corrida = await spreadsheets.importRows(sheet, read(conUnaNueva));
+      assert.equal(corrida.rowsCreated, 1, "sólo la nueva");
+      assert.equal(corrida.rowsSkipped, 3);
+
+      const [una] = await requests();
+      assert.equal(una.requester, "Facultad de Enfermería");
+    });
+
+    test("marcar dos veces no cuenta doble, y lo ya importado ya se conocía", async () => {
+      await spreadsheets.importRows(sheet, read([ROWS[0]]));
+
+      const marcado = await spreadsheets.markRows(sheet, read());
+      assert.equal(marcado.rowsMarked, 2, "la importada ya se conocía por su solicitud");
+      assert.equal(marcado.rowsAlreadyKnown, 1);
+
+      const otra = await spreadsheets.markRows(sheet, read());
+      assert.equal(otra.rowsMarked, 0);
+      assert.equal(otra.rowsAlreadyKnown, 3);
+    });
+
+    test("un ensayo cuenta y no marca nada", async () => {
+      const ensayo = await spreadsheets.markRows(sheet, read(), { dryRun: true });
+      assert.equal(ensayo.rowsMarked, 3);
+      assert.equal(ensayo.dryRun, true);
+
+      // Nada se guardó: la importación sigue trayendo las tres.
+      const corrida = await spreadsheets.importRows(sheet, read());
+      assert.equal(corrida.rowsCreated, 3);
+    });
+
+    test("deshacer las marcas devuelve las filas", async () => {
+      await spreadsheets.markRows(sheet, read());
+      assert.equal((await query.getSheet(sheet.id)).marked_rows, 3);
+
+      const limpiado = await spreadsheets.clearMarks(sheet.id);
+      assert.equal(limpiado.rowsCleared, 3);
+      assert.equal((await query.getSheet(sheet.id)).marked_rows, 0);
+
+      const corrida = await spreadsheets.importRows(sheet, read());
+      assert.equal(corrida.rowsCreated, 3, "vuelven a ser desconocidas");
+    });
+
+    test("deshacer no toca lo ya importado", async () => {
+      await spreadsheets.importRows(sheet, read());
+      await spreadsheets.markRows(sheet, read());
+      await spreadsheets.clearMarks(sheet.id);
+
+      // Las solicitudes siguen ahí y su propia huella las sigue protegiendo.
+      assert.equal((await requests()).length, 3);
+      const otra = await spreadsheets.importRows(sheet, read());
+      assert.equal(otra.rowsCreated, 0);
+      assert.equal(otra.rowsSkipped, 3);
+    });
+
+    test("un libro sin mapeo no se puede marcar", async () => {
+      await spreadsheets.clearMapping(sheet.id);
+      // Releído: la variable de arriba todavía trae la versión que acabamos de quitar.
+      const sinMapeo = await query.getSheet(sheet.id);
+
+      await assert.rejects(
+        () => spreadsheets.markRows(sinMapeo, read()),
+        /Map the book to a format before marking its rows/,
+      );
+    });
+
+    test("queda en la bitácora quién decidió no importarlas", async () => {
+      await spreadsheets.markRows(sheet, read());
+      const logs = (await allLogs()).filter((entry) => entry.action === "sheet_rows_marked");
+      assert.equal(logs.length, 1);
+    });
+  });
+
   test("a dry run counts and writes nothing", async () => {
     const run = await spreadsheets.importRows(sheet, read(), { dryRun: true });
 

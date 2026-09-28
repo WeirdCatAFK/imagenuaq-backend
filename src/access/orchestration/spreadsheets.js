@@ -38,7 +38,7 @@ import {
 import microsoft, { translateGraph } from "./microsoft.js";
 import statuses from "./statuses.js";
 import { fieldList } from "./schemas.js";
-import { validateColumnMap, applyMapping } from "../../utils/columnMap.js";
+import { validateColumnMap, applyMapping, rowHash } from "../../utils/columnMap.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -339,6 +339,121 @@ class Spreadsheets {
   }
 
   /**
+   * Marks every row the book has right now as already seen, without creating anything.
+   *
+   * This is how a tracker that already carries months of history becomes usable: the rows that
+   * were handled long before the system existed are drawn a line under, and from then on only
+   * what somebody adds gets imported. Importing them instead would mint two dozen requests nobody
+   * will work, and leaving them alone means every future run re-reads them and re-reports the ones
+   * missing a required field.
+   *
+   * Needs the mapping, because a row's identity is the hash of the columns `hashColumns` names.
+   *
+   * @param {number} sheetId
+   * @param {{dryRun?: boolean}} [options] `dryRun` counts and writes nothing.
+   * @returns {Promise<{rowsRead: number, rowsMarked: number, rowsAlreadyKnown: number,
+   *   truncated: boolean, dryRun: boolean}>}
+   * @throws {ApiError} 404, 409 when the book has no mapping, 502 from Graph.
+   */
+  async markRowsAsSeen(sheetId, { dryRun = false } = {}, actor) {
+    const id = requireId(sheetId, "sheetId");
+    const sheet = await query.getSheet(id);
+    if (!sheet) throw ApiError.notFound("Spreadsheet not found.");
+    if (sheet.schema_version_id === null) {
+      throw ApiError.conflict("Map the book to a format before marking its rows.");
+    }
+
+    const token = await microsoft.accessTokenFor(sheet.microsoft_account_id, actor);
+    let read;
+    try {
+      read = await readAllRows(token, sheet.drive_id, sheet.item_id, sheet.table_name);
+    } catch (err) {
+      throw translateGraph(err);
+    }
+    if (!read) throw ApiError.notFound("That table or worksheet no longer exists in the workbook.");
+
+    return this.markRows(sheet, read, { dryRun });
+  }
+
+  /**
+   * The marking itself, given rows somebody already read. Separated from `markRowsAsSeen()` for
+   * the same reason `importRows()` is separated from `import()`: what is worth testing is which
+   * rows stop being new, not that Microsoft answered.
+   *
+   * @param {object} sheet A `sheets` row.
+   * @param {{headers: unknown[], rows: unknown[][], truncated?: boolean}} read
+   * @param {{dryRun?: boolean}} [options]
+   * @throws {ApiError} 409 when the book has no mapping or the sheet stopped matching it.
+   */
+  async markRows(sheet, read, { dryRun = false } = {}) {
+    if (sheet.schema_version_id === null) {
+      throw ApiError.conflict("Map the book to a format before marking its rows.");
+    }
+
+    const version = await query.getSchemaVersion(sheet.schema_version_id);
+    if (!version) throw ApiError.conflict("The format this book points at is gone.");
+
+    const { map, errors } = validateColumnMap(sheet.column_map, fieldList(version.fields), read.headers);
+    if (errors.length > 0) {
+      throw ApiError.conflict(`The sheet no longer matches its mapping: ${errors.join(" ")}`);
+    }
+
+    // Sólo la huella: marcar no lee ni valida los valores, porque no va a guardar ninguno. Una
+    // fila a la que le falta un campo obligatorio se puede marcar, y de hecho es el caso normal.
+    const seen = await query.listSourceHashes(sheet.id);
+    const hashes = read.rows.map((row) => rowHash(map, read.headers, row));
+    const nuevas = [...new Set(hashes.filter((hash) => !seen.has(hash)))];
+
+    const resultado = {
+      rowsRead: read.rows.length,
+      rowsMarked: nuevas.length,
+      rowsAlreadyKnown: read.rows.length - nuevas.length,
+      truncated: read.truncated === true,
+      dryRun,
+    };
+
+    if (dryRun) return resultado;
+
+    resultado.rowsMarked = await query.markSheetRows({
+      sheetId: sheet.id,
+      hashes: nuevas,
+      markedBy: currentActor()?.id ?? null,
+    });
+
+    await events.emit({
+      action: "sheet_rows_marked",
+      target: { table: "sheets", id: sheet.id },
+      after: { ...resultado, sheetId: sheet.id },
+    });
+
+    return resultado;
+  }
+
+  /**
+   * Undoes the marking: the rows become unknown again and the next import brings them in.
+   *
+   * Exists because marking is one click with a large consequence, and a decision with no way back
+   * would leave rows outside the system for good.
+   *
+   * @returns {Promise<{rowsCleared: number}>}
+   * @throws {ApiError} 404.
+   */
+  async clearMarks(sheetId) {
+    const id = requireId(sheetId, "sheetId");
+    if (!(await query.getSheet(id))) throw ApiError.notFound("Spreadsheet not found.");
+
+    const rowsCleared = await query.clearSheetMarks(id);
+
+    await events.emit({
+      action: "record_updated",
+      target: { table: "sheets", id },
+      after: { sheetId: id, rowsCleared },
+    });
+
+    return { rowsCleared };
+  }
+
+  /**
    * The import itself, given rows somebody already read.
    *
    * Separated from `import()` so it can be tested with fixture rows and no network: the part
@@ -573,6 +688,9 @@ function shapeSheet(row) {
     columnMap: row.column_map,
     mapped: row.schema_version_id !== null,
     lastImportedAt: row.last_imported_at,
+    // Filas marcadas como ya vistas sin importarlas: la pantalla ofrece deshacerlo, así que
+    // tiene que poder decir cuántas son.
+    markedRows: row.marked_rows ?? 0,
     accountId: row.microsoft_account_id,
     accountEmail: row.account_email ?? null,
     accountDisplayName: row.account_display_name ?? null,

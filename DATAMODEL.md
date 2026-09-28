@@ -608,6 +608,48 @@ dentro.
 junto con `POST /:id/mapping/preview`, que transforma las primeras filas sin guardar el mapeo
 siquiera. La pregunta «¿esta columna es el tiraje?» es sobre los datos, no sobre la regla.
 
+**El área no va a ser un campo del libro, y eso ya está decidido** (2026-09-28). Se consideró un
+`target_area_id` en `sheets`, o un `areaId` dentro del `column_map`, para que lo importado no
+llegara sin área. Se descartó: lo que un libro debería señalar es la **plantilla de flujo** con la
+que nacen sus proyectos, y de ahí el área sale sola —de la etapa de entrada, que es lo que §6 y el
+incremento de flujos declarativos ya plantean (`Requests.create` toma el área de la etapa `is_entry`
+de menor `seq`)—. Poner el área en el libro sería guardar dos veces la misma decisión y dejar que
+se contradigan. Mientras los flujos no existan, lo importado sigue llegando sin área y se reparte
+desde la bandeja; el filtro `areaId=none` es lo que hace que eso se vea en lugar de perderse.
+
+**Una celda vacía en un campo obligatorio se resuelve en el mapeo, no rechazando el renglón.** La
+regla admite `default`, que se usa justo cuando la celda viene vacía, y el asistente lo ofrece como
+«Si viene vacía». Hizo falta descubrirlo importando de verdad: la primera corrida del rastreador
+real metió 14 filas y rechazó 10, todas por la misma columna vacía en un campo obligatorio, y sin
+ese control la única salida era quitarle el «obligatorio» al campo —cambiándoselo a todos los
+formatos que lo usan— o vivir sin esas filas. Los motivos quedan en `sheet_imports.errors`, así que
+la pregunta se contesta después y no sólo en el momento.
+
+**Se puede poner la raya: marcar lo que ya estaba sin importarlo** (`sheet-row-marks`). Un
+rastreador que ya lleva meses llega con dos docenas de renglones atendidos y cerrados desde antes
+de que el sistema existiera. Importarlos crea dos docenas de solicitudes que nadie va a trabajar;
+dejarlos significa que cada corrida futura los vuelve a leer, a intentar y —cuando les falta un campo
+obligatorio— a reportar como error. `POST /api/spreadsheets/:id/baseline` calcula la huella de cada
+fila de hoy y la guarda en `sheet_row_marks` **sin crear nada**, y `listSourceHashes()` une los dos
+conjuntos, así que la importación las salta igual que si existiera la solicitud.
+
+Tres cosas de esa tabla son decisiones:
+
+- **Tabla y no columna en `sheets`.** Son muchas huellas por libro, una por renglón, y
+  `UNIQUE (sheet_id, source_hash)` es la misma forma que ya tiene el antiduplicado, así que nada
+  más de la importación cambia.
+- **Marcar no lee ni valida los valores**, porque no va a guardar ninguno: una fila a la que le
+  falta un campo obligatorio se puede marcar, y ése es justamente el caso normal. Sí necesita el
+  mapeo, porque la huella se calcula sobre `hashColumns`.
+- **Se guarda quién y cuándo, y se puede deshacer** (`DELETE .../baseline`). Marcar es un clic con
+  consecuencia —esas filas dejan de entrar— y una decisión sin vuelta dejaría renglones fuera del
+  sistema para siempre. Deshacer no toca lo ya importado: esas solicitudes siguen protegidas por su
+  propia huella.
+
+El límite es el mismo que el del antiduplicado: la huella depende de `hashColumns`, así que cambiar
+esas columnas desalinea las marcas igual que desalinea las solicitudes ya importadas. Una razón más
+para preferir una columna de identificador sobre el contenido.
+
 **El costo, dicho:** la importación corre dentro de una petición HTTP y la lectura se corta a
 10 000 filas. Para los rastreadores que existen —decenas o cientos de filas— alcanza; miles
 pedirían un trabajo en segundo plano, que no está.
@@ -1637,6 +1679,19 @@ capturan a mano los folios que generan el SIN y el sistema financiero (`RF-MIG-0
 
 `microsoft_app`, `microsoft_accounts` y `sheets` están descritos en §2.9 y §2.10. Lo que agregó
 `sheet-imports` es la constancia de cada corrida (§2.16).
+
+#### `sheet_row_marks`
+
+Filas marcadas como ya vistas sin haberlas importado: la raya que hace utilizable un rastreador con
+historia (§2.16).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `sheet_id` | bigint | no | | Libro → `sheets.id`, en cascada |
+| `source_hash` | varchar(64) | no | | La huella que calcularía la importación. Única por libro |
+| `marked_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se puso la raya |
+| `marked_by` | bigint | sí | | Quién decidió no importarlas → `users.id` |
 
 #### `sheet_imports`
 
