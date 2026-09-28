@@ -300,10 +300,15 @@ describe('/api/roles', () => {
       );
     });
 
-    // Section 8 of catalog-bootstrap seeds the two grants that are definitions rather than
+    // Section 8 of catalog-bootstrap seeds the grants that are definitions rather than
     // configuration. They are load-bearing: an `admin` with no permissions is the bootstrap
     // deadlock that migration was written to avoid, and a `finance` without finance.read is
     // a role name with no meaning under RF-USR-08.
+    //
+    // The admin case is the one that catches a migration adding a permission and forgetting to
+    // grant it -- which `stage-io-and-finance` did with `finance.request`, fixed forward by
+    // `admin-holds-finance-request`. Compare against the catalogue rather than a number, so the
+    // next permission does not need this file edited.
     test('admin arrives holding every permission', async () => {
       const catalogue = await server.get('/api/roles/permissions', { token: adminToken });
       const held = await server.get(`/api/roles/${await roleId('admin')}/permissions`, {
@@ -313,15 +318,18 @@ describe('/api/roles', () => {
       assert.equal(held.body.permissions.length, catalogue.body.permissions.length);
     });
 
-    test('finance arrives holding finance.read and nothing else', async () => {
+    // `finance` holds exactly three codes, and the set is the role's definition: finance.read
+    // from catalog-bootstrap, then project.read and finance.request from stage-io-and-finance --
+    // the board it needs to see, plus asking for an invoice. Deliberately NOT project.write,
+    // which would also reach stages, sign-offs and closing (DATAMODEL.md §2.15).
+    test('finance arrives holding the board and the ask, and no write', async () => {
       const held = await server.get(`/api/roles/${await roleId('finance')}/permissions`, {
         token: adminToken,
       });
 
-      assert.deepEqual(
-        held.body.permissions.map((permission) => permission.code),
-        ['finance.read'],
-      );
+      const codes = held.body.permissions.map((permission) => permission.code).sort();
+      assert.deepEqual(codes, ['finance.read', 'finance.request', 'project.read']);
+      assert.ok(!codes.includes('project.write'), 'finance can ask, not edit');
     });
 
     // Policy, not definition -- left to coordination on purpose (RF-USR-05).

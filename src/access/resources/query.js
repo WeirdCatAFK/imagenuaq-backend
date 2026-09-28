@@ -1116,7 +1116,11 @@ class Query {
       left join users u on u.id = r.assignee_id
       left join projects p on p.id = r.project_id
       where r.deleted_at is null
-        and ($1::bigint is null or r.area_id = $1::bigint)
+        -- -1 is "no area at all": an imported row arrives unrouted and somebody triages it, so
+        -- the inbox has to be able to ask for exactly those.
+        and ($1::bigint is null
+             or ($1::bigint = -1 and r.area_id is null)
+             or r.area_id = $1::bigint)
         and ($2::bigint is null or r.status_id = $2::bigint)
         and ($3::bigint is null or r.assignee_id = $3::bigint)
         and ($4::text is null or lower(r.requester) = lower($4))
@@ -1698,6 +1702,86 @@ class Query {
     const [row] = await this.#rows(
       `delete from project_field_values where project_id = $1 and key = $2 returning *`,
       [projectId, key],
+    );
+    return row ?? null;
+  }
+
+  //--- SHEET MAPPING AND IMPORTS (RF-MIG-02) ---
+
+  /** Points a registered book at a format version and stores how its columns feed it. */
+  async setSheetMapping(sheetId, { schemaVersionId, columnMap }) {
+    const [row] = await this.#rows(
+      `update sheets
+        set schema_version_id = $2, column_map = $3::jsonb
+      where id = $1 and deleted_at is null
+      returning *`,
+      [sheetId, schemaVersionId, JSON.stringify(columnMap)],
+    );
+    return row ?? null;
+  }
+
+  /** Back to registered-but-unmapped, which is what an empty map and a null version mean. */
+  async clearSheetMapping(sheetId) {
+    const [row] = await this.#rows(
+      `update sheets
+        set schema_version_id = null, column_map = '{}'::jsonb
+      where id = $1 and deleted_at is null
+      returning *`,
+      [sheetId],
+    );
+    return row ?? null;
+  }
+
+  async createSheetImport({ sheetId, runBy = null }) {
+    const [row] = await this.#rows(
+      `insert into sheet_imports (sheet_id, run_by)
+      values ($1, $2::bigint)
+      returning *`,
+      [sheetId, runBy],
+    );
+    return row;
+  }
+
+  /** Closes the run with its counts. `errors` is [{ index, message }]. */
+  async finishSheetImport(importId, {
+    rowsRead = 0, rowsCreated = 0, rowsSkipped = 0, rowsFailed = 0, rowsFlagged = 0, errors = [],
+  }) {
+    const [row] = await this.#rows(
+      `update sheet_imports set
+        finished_at  = current_timestamp,
+        rows_read    = $2,
+        rows_created = $3,
+        rows_skipped = $4,
+        rows_failed  = $5,
+        rows_flagged = $6,
+        errors       = $7::jsonb
+      where id = $1
+      returning *`,
+      [importId, rowsRead, rowsCreated, rowsSkipped, rowsFailed, rowsFlagged, JSON.stringify(errors)],
+    );
+    return row ?? null;
+  }
+
+  async listSheetImports(sheetId, limit = 20) {
+    return this.#rows(
+      `select i.*, u.full_name as run_by_name
+      from sheet_imports i
+      left join users u on u.id = i.run_by
+      where i.sheet_id = $1
+      order by i.started_at desc, i.id desc
+      limit $2`,
+      [sheetId, limit],
+    );
+  }
+
+  /** How far the last import got, for the next one to say "since when" (RF-MIG-02). */
+  async markSheetImported(sheetId) {
+    const [row] = await this.#rows(
+      `update sheets
+        set last_imported_at = current_timestamp
+      where id = $1
+      returning *`,
+      [sheetId],
     );
     return row ?? null;
   }

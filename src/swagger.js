@@ -1443,6 +1443,148 @@ export function buildOpenApiDocument() {
           },
           required: ['value'],
         },
+        ColumnRule: {
+          type: 'object',
+          description:
+            'How one target is fed. Columns are named by their header text, so the map survives ' +
+            'a reordered sheet and refuses a renamed column by name.',
+          properties: {
+            op: { type: 'string', enum: ['column', 'constant', 'concat', 'split'] },
+            column: { type: 'string', description: 'For `column` and `split`.', example: 'ESTATUS' },
+            columns: { type: 'array', items: { type: 'string' }, description: 'For `concat`.' },
+            value: { description: 'For `constant`.' },
+            separator: { type: 'string', description: 'For `concat` (the joiner) and `split`.' },
+            index: { type: 'integer', minimum: 0, description: 'For `split`: which piece.' },
+            from: {
+              type: 'string',
+              enum: ['value', 'text'],
+              default: 'value',
+              description:
+                'A real date arrives as an Excel serial in `value` and as what Excel shows in ' +
+                '`text`. Tables carry no text, so `text` falls back to the value there.',
+            },
+            default: { description: 'Used when the cell is empty.' },
+            format: {
+              type: 'string',
+              enum: ['DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD'],
+              description: 'For a date field whose column holds a written date.',
+            },
+            truthy: { type: 'array', items: { type: 'string' }, description: 'For a boolean field.' },
+            falsy: { type: 'array', items: { type: 'string' } },
+            map: {
+              type: 'object',
+              description:
+                'Only on `status`: the sheet\'s own words to a status code, e.g. ' +
+                '`{"VoBo": "esperando_vb"}`. Matched case-insensitively.',
+            },
+          },
+          required: ['op'],
+        },
+        ColumnMap: {
+          type: 'object',
+          description:
+            'How a row becomes a request (RF-MIG-02), edited by coordination without a deploy. ' +
+            'The target\'s data type decides the coercion; a rule may only say what the sheet ' +
+            'knows, like which order a date is written in.',
+          properties: {
+            version: { type: 'integer', default: 1 },
+            title: { $ref: '#/components/schemas/ColumnRule' },
+            requester: { $ref: '#/components/schemas/ColumnRule' },
+            priority: { $ref: '#/components/schemas/ColumnRule' },
+            status: {
+              allOf: [{ $ref: '#/components/schemas/ColumnRule' }],
+              description:
+                'Translates the sheet\'s status into a catalogue code, so importing an existing ' +
+                'tracker lands with its real state instead of 24 rows pretending to be new. Its ' +
+                '`default` is a status CODE, not a cell value.',
+            },
+            hashColumns: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'The row\'s identity. A Forms `Id` column is better than content: correcting a ' +
+                'typo then does not look like a new row -- and the edit is invisible, because ' +
+                'the state lives here from the import onwards. Omitted, every mapped cell is ' +
+                'hashed, and an edit reads as a new row flagged as a probable duplicate.',
+              example: ['Id'],
+            },
+            fields: {
+              type: 'object',
+              description: 'Keyed by field code of the target version.',
+              additionalProperties: { $ref: '#/components/schemas/ColumnRule' },
+            },
+          },
+          required: ['title'],
+        },
+        SetMappingRequest: {
+          type: 'object',
+          properties: {
+            schemaVersionId: { type: 'integer' },
+            columnMap: { $ref: '#/components/schemas/ColumnMap' },
+            headers: {
+              type: 'array',
+              items: {},
+              description:
+                'The sheet\'s header row, when the caller has it. Every column the map names is ' +
+                'then checked against it, which turns a renamed column into a refusal here ' +
+                'rather than a surprise on row 200 of an import.',
+            },
+          },
+          required: ['schemaVersionId', 'columnMap'],
+        },
+        MappingPreview: {
+          type: 'object',
+          properties: {
+            sheet: { $ref: '#/components/schemas/Sheet' },
+            schemaVersionId: { type: 'integer' },
+            kind: { type: 'string', enum: ['table', 'worksheet'] },
+            headers: { type: 'array', items: {} },
+            rows: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  index: { type: 'integer' },
+                  ok: { type: 'boolean', description: 'False when this row would not import.' },
+                  alreadyImported: { type: 'boolean', description: 'Its hash is already known.' },
+                  title: { type: ['string', 'null'] },
+                  requester: { type: ['string', 'null'] },
+                  statusCode: { type: ['string', 'null'] },
+                  data: { type: 'object' },
+                  errors: { type: 'array', items: { type: 'object' } },
+                  warnings: { type: 'array', items: { type: 'object' } },
+                },
+              },
+            },
+          },
+          required: ['headers', 'rows'],
+        },
+        SheetImport: {
+          type: 'object',
+          description: 'One import run. It outlives the response so "why did that row not come in" stays answerable.',
+          properties: {
+            id: { type: 'integer' },
+            sheetId: { type: 'integer' },
+            runBy: { type: ['integer', 'null'] },
+            runByName: { type: ['string', 'null'] },
+            startedAt: { type: 'string', format: 'date-time' },
+            finishedAt: { type: ['string', 'null'], format: 'date-time' },
+            rowsRead: { type: 'integer', description: 'Rows under the header, before deciding anything.' },
+            rowsCreated: { type: 'integer' },
+            rowsSkipped: { type: 'integer', description: 'Already imported: the hash is known.' },
+            rowsFailed: { type: 'integer' },
+            rowsFlagged: { type: 'integer', description: 'Imported, but look like a correction of an earlier row.' },
+            errors: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { index: { type: 'integer' }, message: { type: 'string' } },
+              },
+            },
+            truncated: { type: 'boolean', readOnly: true, description: 'The sheet is longer than one run reads.' },
+            dryRun: { type: 'boolean', readOnly: true },
+          },
+        },
         Requester: {
           type: 'object',
           properties: {
@@ -2989,7 +3131,15 @@ export function buildOpenApiDocument() {
             'email, Excel, Teams and WhatsApp to find their work. RF-SOL-05 is the filters.',
           parameters: [
             { name: 'q', in: 'query', required: false, schema: { type: 'string' }, description: 'Title fragment, or folio prefix.' },
-            { name: 'areaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
+            {
+              name: 'areaId',
+              in: 'query',
+              required: false,
+              schema: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', enum: ['none'] }] },
+              description:
+                '`none` asks for the requests with no area at all -- what an import leaves ' +
+                'behind, since imported rows are routed by hand from here.',
+            },
             { name: 'statusId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
             { name: 'assigneeId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
             { name: 'schemaId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
@@ -3447,6 +3597,139 @@ export function buildOpenApiDocument() {
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such project, or no value under that key.', 'That project has no value under that key.'),
+          },
+        },
+      },
+
+      '/api/spreadsheets/{id}/mapping': {
+        put: {
+          tags: ['spreadsheets'],
+          summary: 'Map the book onto a format',
+          description:
+            'Needs spreadsheet.write. RF-MIG-02: coordination says which format the rows become ' +
+            'and which column feeds each field, without touching code. Saving checks the map ' +
+            'against that version\'s fields and, when `headers` is sent, against the sheet ' +
+            'itself.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: jsonBody('SetMappingRequest'),
+          responses: {
+            200: wrapped('The book, now mapped.', 'sheet', 'Sheet'),
+            400: errorResponse(
+              'Every problem with the map, in one message.',
+              'field "tiraje" names the column "Cantidad", which the sheet does not have.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book or version.', 'Spreadsheet not found.'),
+          },
+        },
+        delete: {
+          tags: ['spreadsheets'],
+          summary: 'Unmap the book',
+          description:
+            'Back to registered-but-unmapped. What was already imported keeps its own capture, ' +
+            'so this does not rewrite history.',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: wrapped('The book, unmapped.', 'sheet', 'Sheet'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/mapping/preview': {
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'The first rows as the map would read them',
+          description:
+            'Needs spreadsheet.read, and writes nothing. Send an unsaved `columnMap` to try one ' +
+            'before committing: the questions a mapping answers are about the data, so the only ' +
+            'honest way to judge it is to see the rows transformed. Reads the book live.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    columnMap: { $ref: '#/components/schemas/ColumnMap' },
+                    schemaVersionId: { type: 'integer', description: 'Omitted: the one the book is mapped to.' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: {
+              description: 'The headers and the sample rows, transformed.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/MappingPreview' } } },
+            },
+            400: errorResponse('A map that will not validate.', '"title" is required: a request needs one.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book, or the worksheet is gone.', 'Spreadsheet not found.'),
+            409: errorResponse(
+              'Nothing mapped and no version offered, or the account needs reconnecting.',
+              'That book has no format yet: send schemaVersionId to try one.',
+            ),
+            502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/import': {
+        post: {
+          tags: ['spreadsheets'],
+          summary: 'Turn the book\'s rows into requests',
+          description:
+            'Needs spreadsheet.write **and** request.write. Reads every row and creates a ' +
+            'request for each one not already imported -- identity is the hash of the columns ' +
+            '`hashColumns` names, so a second run creates nothing. Rows are independent: one ' +
+            'that cannot be read is reported and the run continues. Imported rows arrive with ' +
+            '**no area** and are routed by hand from the inbox. Nothing is written back to the ' +
+            'sheet.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: false,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    dryRun: {
+                      type: 'boolean',
+                      default: false,
+                      description: 'Count what would happen and write nothing.',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The run.', 'import', 'SheetImport'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book, or the worksheet is gone.', 'Spreadsheet not found.'),
+            409: errorResponse(
+              'Not mapped, the format is gone, the sheet no longer matches the map, or the account needs reconnecting.',
+              'Map the book to a format before importing it.',
+            ),
+            502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/imports': {
+        get: {
+          tags: ['spreadsheets'],
+          summary: 'The import runs of a book, newest first',
+          parameters: [pathId('id', 'sheets.id')],
+          responses: {
+            200: wrapped('The runs.', 'imports', 'SheetImport', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
           },
         },
       },

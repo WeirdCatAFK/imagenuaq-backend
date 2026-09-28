@@ -99,17 +99,19 @@ export async function resetCases(keepEmails = []) {
   // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
   // follows inbound foreign keys and takes logs with it.
   await sql('delete from logs');
-  // Books before accounts before users: sheets reference microsoft_accounts, which
-  // reference users, and neither is seeded.
-  await sql('delete from sheets');
-  await sql('delete from microsoft_accounts');
-  await sql('delete from microsoft_app');
-  // The spine rows a test inserted directly, before the formats they point at.
+  // The foreign keys read backwards, and the order is load-bearing: `requests.sheet_id`
+  // references `sheets`, so an imported request has to go before the book it came from -- which
+  // only started mattering when the import began creating such rows.
   await sql('delete from approvals');
   await sql('delete from project_field_values');
   await sql('delete from project_stages');
   await sql('delete from requests');
   await sql('delete from projects');
+  // Import runs, then the books, then the accounts: each references the next, and none is seeded.
+  await sql('delete from sheet_imports');
+  await sql('delete from sheets');
+  await sql('delete from microsoft_accounts');
+  await sql('delete from microsoft_app');
   // Statuses a test added. The global catalogue is seeded by projects-spine and
   // status-manage and must survive, so only area rows and prefixed codes go.
   await sql('delete from statuses where area_id is not null or code like $1', [
@@ -236,6 +238,25 @@ export async function createSchema(code, fields = null, name = null) {
       ],
     },
     publishedBy: null,
+  });
+}
+
+// A registered book, mapped or not, through query.js. `microsoftAccountId` comes from
+// createMicrosoftAccount().
+export async function createSheet({
+  microsoftAccountId,
+  name = 'Seguimiento de prueba',
+  tableName = 'Sheet1',
+  registeredBy = null,
+}) {
+  return query.createSheet({
+    name,
+    driveId: `b!drive-${microsoftAccountId}`,
+    itemId: `01ITEM-${name}`,
+    tableName,
+    webUrl: null,
+    microsoftAccountId,
+    registeredBy,
   });
 }
 

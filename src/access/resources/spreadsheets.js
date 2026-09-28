@@ -20,6 +20,15 @@ import { graphGet } from "../primitives/microsoftGraph.js";
 // tracker, few enough that a table of thousands of rows costs one small Graph call.
 const SAMPLE_ROWS = 5;
 
+// How many table rows one Graph call asks for. A tracker of a few thousand rows is a handful
+// of round trips; asking for everything at once is what gets a 504 from Graph on a big book.
+const PAGE = 500;
+
+// Beyond this the import refuses rather than pulling a corpus into one HTTP request. The
+// interviews describe trackers of hundreds of rows; ten thousand means somebody pointed this
+// at the wrong file, and a job queue is the answer for the day that is real (not this one).
+const MAX_ROWS = 10_000;
+
 /**
  * The drive/item pair behind a share link.
  *
@@ -78,43 +87,143 @@ export async function listTables(accessToken, driveId, itemId) {
  * @param {string} itemId
  * @param {string | null} tableName Null: the first worksheet.
  * @returns {Promise<{ kind: 'table' | 'worksheet', name: string, headers: unknown[],
- *   rows: unknown[][] } | null>} Null when no table or worksheet has that name.
+ *   rows: unknown[][], texts: unknown[][] } | null>} Null when no table or worksheet has that
+ *   name. `texts` is the same rows as Excel displays them, empty for a table, which is what
+ *   `from: "text"` reads -- the preview has to be fed it or it answers a different question than
+ *   the import does.
  */
 export async function readHeaders(accessToken, driveId, itemId, tableName) {
-  const base = workbook(driveId, itemId);
-  const { tables, worksheets } = await listTables(accessToken, driveId, itemId);
+  const target = await resolveTarget(accessToken, driveId, itemId, tableName);
+  if (target === null) return null;
 
-  const table = tableName === null ? null : tables.find((t) => t.name === tableName);
-  if (table) {
-    const tablePath = `${base}/tables/${encodeURIComponent(table.name)}`;
+  const base = workbook(driveId, itemId);
+
+  if (target.kind === "table") {
+    const tablePath = `${base}/tables/${encodeURIComponent(target.name)}`;
     const [range, body] = await Promise.all([
       graphGet(accessToken, `${tablePath}/headerRowRange`),
       graphGet(accessToken, `${tablePath}/rows?$top=${SAMPLE_ROWS}`),
     ]);
     return {
       kind: "table",
-      name: table.name,
+      name: target.name,
       headers: range.values?.[0] ?? [],
       // Each table row is its own object holding a one-row matrix.
       rows: (body.value ?? []).map((row) => row.values?.[0] ?? []),
+      // A table's rows carry no formatted text, so `from: "text"` falls back to the value --
+      // cellAt() does that, and an empty matrix here is how it learns to.
+      texts: [],
     };
   }
 
-  const sheet =
-    tableName === null ? worksheets[0] : worksheets.find((w) => w.name === tableName);
-  if (!sheet) return null;
+  const range = await graphGet(
+    accessToken,
+    `${base}/worksheets/${encodeURIComponent(target.name)}/usedRange?$select=values,text`,
+  );
+  const values = range.values ?? [];
+  const texts = range.text ?? [];
+  return {
+    kind: "worksheet",
+    name: target.name,
+    headers: values[0] ?? [],
+    rows: values.slice(1, 1 + SAMPLE_ROWS),
+    texts: texts.slice(1, 1 + SAMPLE_ROWS),
+  };
+}
+
+/**
+ * Every row under the header, for an import, in both the shapes Excel offers.
+ *
+ * **`values` and `texts` are both returned, and that is the point.** A real date in a cell
+ * arrives in `values` as a serial number -- days since 1899-12-30 -- while the same date typed
+ * as text arrives as a string, and a mapping rule cannot know which a given tracker holds.
+ * `texts` is what Excel displays, so a rule may ask for `from: "text"` when the formatted
+ * string is the truth. `utils/fieldValues.js` handles both, so the default stays `values`.
+ *
+ * A table is paged through `/rows` with `$top`/`$skip`, because `graphGet()`'s `@odata.nextLink`
+ * following does not apply to the workbook row endpoint. A worksheet's used range arrives whole
+ * and is sliced here -- there is no paging to do and asking for one is a second round trip for
+ * nothing.
+ *
+ * @param {string} accessToken
+ * @param {string} driveId
+ * @param {string} itemId
+ * @param {string | null} tableName Null: the first worksheet.
+ * @returns {Promise<{ kind: 'table' | 'worksheet', name: string, headers: unknown[],
+ *   rows: unknown[][], texts: unknown[][], truncated: boolean } | null>} Null when no table or
+ *   worksheet has that name. `texts` is empty for a table: Graph's row endpoint offers no
+ *   formatted text, so a rule asking for `from: "text"` over a table falls back to the value.
+ * @throws {GraphError} whatever Graph refuses.
+ */
+export async function readAllRows(accessToken, driveId, itemId, tableName) {
+  const target = await resolveTarget(accessToken, driveId, itemId, tableName);
+  if (target === null) return null;
+
+  const base = workbook(driveId, itemId);
+
+  if (target.kind === "table") {
+    const tablePath = `${base}/tables/${encodeURIComponent(target.name)}`;
+    const range = await graphGet(accessToken, `${tablePath}/headerRowRange`);
+
+    const rows = [];
+    let skip = 0;
+    let truncated = false;
+    for (;;) {
+      const page = await graphGet(accessToken, `${tablePath}/rows?$top=${PAGE}&$skip=${skip}`);
+      const batch = (page.value ?? []).map((row) => row.values?.[0] ?? []);
+      rows.push(...batch);
+
+      if (batch.length < PAGE) break;
+      if (rows.length >= MAX_ROWS) {
+        truncated = true;
+        break;
+      }
+      skip += PAGE;
+    }
+
+    return {
+      kind: "table",
+      name: target.name,
+      headers: range.values?.[0] ?? [],
+      rows,
+      texts: [],
+      truncated,
+    };
+  }
 
   const range = await graphGet(
     accessToken,
-    `${base}/worksheets/${encodeURIComponent(sheet.name)}/usedRange?$select=values`,
+    `${base}/worksheets/${encodeURIComponent(target.name)}/usedRange?$select=values,text`,
   );
   const values = range.values ?? [];
+  const texts = range.text ?? [];
+
   return {
     kind: "worksheet",
-    name: sheet.name,
+    name: target.name,
     headers: values[0] ?? [],
-    rows: values.slice(1, 1 + SAMPLE_ROWS),
+    rows: values.slice(1, 1 + MAX_ROWS),
+    texts: texts.slice(1, 1 + MAX_ROWS),
+    truncated: values.length - 1 > MAX_ROWS,
   };
+}
+
+/**
+ * Which thing in the book the registration meant: the table of that name, else the worksheet
+ * of that name, else -- with no name -- the first worksheet. One list call, shared by both
+ * readers so they can never disagree about what a registration points at.
+ *
+ * @returns {Promise<{ kind: 'table' | 'worksheet', name: string } | null>}
+ */
+async function resolveTarget(accessToken, driveId, itemId, tableName) {
+  const { tables, worksheets } = await listTables(accessToken, driveId, itemId);
+
+  const table = tableName === null ? null : tables.find((t) => t.name === tableName);
+  if (table) return { kind: "table", name: table.name };
+
+  const sheet =
+    tableName === null ? worksheets[0] : worksheets.find((w) => w.name === tableName);
+  return sheet ? { kind: "worksheet", name: sheet.name } : null;
 }
 
 function workbook(driveId, itemId) {

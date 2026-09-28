@@ -109,7 +109,7 @@ class Requests {
     if (offset < 0) throw ApiError.badRequest("offset must not be negative.");
 
     const rows = await query.listRequests({
-      areaId: optionalId(filters.areaId, "areaId"),
+      areaId: areaFilter(filters.areaId),
       statusId: optionalId(filters.statusId, "statusId"),
       assigneeId: optionalId(filters.assigneeId, "assigneeId"),
       schemaId: optionalId(filters.schemaId, "schemaId"),
@@ -470,6 +470,18 @@ function requireId(value, field) {
     throw ApiError.badRequest(`${field} must be a positive integer.`);
   }
   return id;
+}
+
+/**
+ * The area filter, which also answers "the ones with no area".
+ *
+ * An imported row arrives unrouted (the sheet says which faculty asked, not which area works
+ * it), so the inbox has to be able to ask for exactly those to triage them. `-1` is what the
+ * query reads as "no area at all"; it is not an id anybody can hold.
+ */
+function areaFilter(value) {
+  if (value === "none") return -1;
+  return optionalId(value, "areaId");
 }
 
 function optionalId(value, field) {

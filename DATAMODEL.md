@@ -18,7 +18,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`, **todas con API**: `schemas` (§2.2), `statuses` (`RF-EST-02`), `requests` con su conversión (§2.13), `projects` con etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11) |
-| MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`                                                                                                                                                  | Registro de libros implementado por`microsoft-accounts` y `microsoft-app`; falta el mapeo de columnas (§2.10) |
+| MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`, `sheet_imports`                                                                                                                                  | Completo: registro de libros por`microsoft-accounts` y `microsoft-app`, mapeo de columnas e importación por `sheet-imports` (§2.10, §2.16) |
 | FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
 | FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
@@ -472,6 +472,15 @@ como serial —días desde 1899-12-30, por el bug del año bisiesto 1900 que Exc
 seriales 1 a 60 caen en el rango que ese bug corrompe, así que se rechazan en vez de contestar un
 día equivocado.
 
+**Un año de dos dígitos también se rechaza, por la misma razón y con más filo.** Excel *muestra*
+una fecha real como `1/8/26`, y leer esa celda como texto —lo que hace `from: "text"`— daba
+`1926-08-01` sin error alguno, porque `Date.UTC(26, …)` interpreta 0 a 99 como 1900 + n. Una fecha
+de entrega con cien años de retraso y ninguna queja es peor que una fila rechazada, así que la
+coerción exige cuatro dígitos y el mensaje dice la salida: mapear la columna como fecha de Excel
+en vez de como texto, que es donde el dato está completo. El año se fija además con
+`setUTCFullYear()` y no se le pasa al constructor, porque ese mapeo de 1900 ocurre incluso con
+`"0026"` escrito con sus cuatro dígitos.
+
 **`source = 'sheet'` no se puede pedir por la API.** Solo la importación inserta esas filas,
 porque es la única que tiene la huella y el renglón crudo; el CHECK `requests_hash_origin` lo
 respalda.
@@ -548,6 +557,61 @@ No se le da `project.write` porque ese permiso alcanza para etapas, vistos bueno
 no es lo que finanzas necesita (`RF-USR-05`: leer y escribir son independientes). El código es
 `finance.request` y no `project.request` porque en este dominio «request» ya es la solicitud.
 
+### 2.16 El mapeo de columnas es un documento, y la corrida deja constancia
+
+`sheet-imports` cerró la mitad que faltaba de `RF-MIG-02`: decir a qué formato se parecen las
+filas de un libro y qué columna alimenta cada campo, sin tocar código, y dejar por escrito qué
+pasó en cada importación.
+
+**El mapeo vive en `sheets.column_map` y es mutable, a propósito.** No se versiona. Lo que sí es
+inmutable es la versión del formato a la que apunta (`sheets.schema_version_id`), y lo ya
+importado guarda su propia captura en `requests.data` y `source_data`, así que corregir el mapeo
+no reescribe historia: cambia cómo se leerá la próxima fila. Una tabla de mapeos versionados
+habría pedido saber qué versión leyó cada fila, que es exactamente lo que `source_data` ya
+contesta mejor —guarda el renglón crudo, no la regla—.
+
+**Las columnas se nombran por el texto de su encabezado, no por su posición.** Reordenar la hoja
+—que pasa— no rompe nada; renombrar un encabezado —que también pasa— es un 400 que nombra la
+columna al guardar, y un 409 al importar si la hoja cambió después. Las dos son fallas ruidosas,
+que es lo que se quería: una importación que lee la columna equivocada en silencio es peor que una
+que no corre.
+
+**Las operaciones son cuatro** y se validan en `src/utils/columnMap.js`, pura:
+`column` (una celda), `constant` (el mismo valor para todas las filas), `concat` (unir columnas) y
+`split` (partir una celda por un separador y tomar un pedazo). `from: "text"` lee la celda como
+Excel la muestra en vez de su valor, porque una fecha real llega como serial y a veces lo que
+importa es lo que se ve. Una regla solo puede decir lo que la hoja sabe —en qué orden está escrita
+una fecha, qué palabras son «sí»—; **el tipo del campo destino decide la coerción**, siempre
+(§2.13). Al guardar, cada regla se poda a las llaves que su operación usa: un `constant` que
+todavía recordara la columna que alguien intentó primero se leería como una regla que la usa.
+
+**El estatus se traduce, no se ignora.** `column_map.status` lleva una tabla del vocabulario de la
+hoja al catálogo (`{"VoBo": "esperando_vb"}`, sin distinguir mayúsculas) y un `default` que es un
+**código** de estatus, no un valor de celda. Sin eso, importar un rastreador con 24 filas
+terminadas las metería todas como trabajo nuevo, y la bandeja sería inútil el primer día. Los
+códigos se validan contra `statuses` al guardar el mapeo, no al importar.
+
+**Lo importado llega sin área.** No hay `target_area_id` en el libro: quién atiende una solicitud
+depende de la solicitud, y el libro no lo sabe. Se reparte a mano desde la bandeja, que por eso
+acepta `GET /api/requests?areaId=none`. La consecuencia, dicha: si nadie reparte, nadie las ve en
+su área, y eso es visible —el filtro las cuenta— en lugar de silencioso, que es lo que un área por
+omisión habría producido.
+
+**`sheet_imports` es la constancia de la corrida.** Cuántas filas se leyeron, cuántas entraron,
+cuántas ya estaban, cuántas fallaron y con qué mensaje, cuántas quedaron marcadas como posible
+duplicado. Sobrevive a la respuesta HTTP porque «¿por qué no entró esa fila?» se pregunta al día
+siguiente, no en el momento. Las filas son independientes: una que no se puede leer se anota y la
+siguiente se intenta igual, porque detenerse en la fila 12 de 300 obliga a adivinar qué quedó
+dentro.
+
+**El `dryRun` cuenta y no escribe nada**, y es lo que hace juzgable un mapeo antes de aplicarlo,
+junto con `POST /:id/mapping/preview`, que transforma las primeras filas sin guardar el mapeo
+siquiera. La pregunta «¿esta columna es el tiraje?» es sobre los datos, no sobre la regla.
+
+**El costo, dicho:** la importación corre dentro de una petición HTTP y la lectura se corta a
+10 000 filas. Para los rastreadores que existen —decenas o cientos de filas— alcanza; miles
+pedirían un trabajo en segundo plano, que no está.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -587,7 +651,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
 | RF-EST-06, RF-EST-10            | `notifications`                                                                                                   | ✗ |
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
-| RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13)                          | ◑ registro y antiduplicado sí; mapeo e importación no |
+| RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13) + `sheets.column_map` y `sheet_imports` (§2.16) | ✔ |
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
 | RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         | ◑ |
 | RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   | ✔ |
@@ -960,6 +1024,30 @@ escribía nunca, así que no se pierde dato alguno.
 camino de vuelta es el Down de esta migración: reponer `avatar_file_id`, migrar los bytes a
 `files` y soltar la columna. Ningún `RF-*` pide la foto de perfil; conviene saberlo antes de
 defenderla.
+
+### 5.9 `admin` se quedó atrás de su propio catálogo — cerrado
+
+`catalog-bootstrap` §8 concede a `admin` **todo** el catálogo de permisos, y la razón está en esa
+migración: un administrador que no puede administrar el modelo de autorización es un bloqueo del
+que solo se sale corriendo `scripts/createAdmin.js` a mano.
+
+`stage-io-and-finance` creó `finance.request` y lo concedió a `finance`, a quien le sirve, pero no
+volvió a pasar por `admin`. Desde entonces `admin` traía 15 de 16 permisos.
+
+**Lo encontró la prueba que existe para eso**, `roles.test.js::admin arrives holding every
+permission`, que compara el catálogo completo contra lo que el rol trae en vez de contra un
+número. Apareció en la corrida completa de 2026-09-25, no antes, porque la corrida anterior a esa
+fue anterior a la migración.
+
+`admin-holds-finance-request` lo corrige hacia adelante: la migración culpable ya estaba aplicada
+y publicada, y una migración aplicada no se reescribe.
+
+**Lo que no se hizo, dicho:** un disparador sobre `permissions` que conceda cada alta a `admin`
+sola. Se descartó porque `role_permissions` es lo que lee `requirePermission()` y lo que audita
+`RF-USR-07`; una fila que aparece sin que nadie la escriba deja de ser legible. La red es la
+prueba, que falla nombrando la diferencia, y `createAdmin.js`, que reconcede el catálogo entero en
+cada corrida. La consecuencia práctica: **toda migración que agregue un permiso tiene que
+concederlo a `admin` en la misma migración.**
 
 ## 6. Lo que falta de la columna vertebral, y cómo entra
 
@@ -1544,3 +1632,141 @@ capturan a mano los folios que generan el SIN y el sistema financiero (`RF-MIG-0
 | `produced_by_stage_id` | bigint | sí | | Qué etapa lo generó → `project_stages.id`. Es lo que un JSONB acumulado no puede decir |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 | `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Última corrección |
+
+### 7.6 MIG — importación de los rastreadores de Excel
+
+`microsoft_app`, `microsoft_accounts` y `sheets` están descritos en §2.9 y §2.10. Lo que agregó
+`sheet-imports` es la constancia de cada corrida (§2.16).
+
+#### `sheet_imports`
+
+Qué pasó cada vez que se importó un libro. Existe porque «¿por qué no entró esa fila?» se
+pregunta después, cuando la respuesta HTTP ya se cerró.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `sheet_id` | bigint | no | | Libro importado → `sheets.id`, en cascada |
+| `run_by` | bigint | sí | | Quién la corrió → `users.id`. Nulo si la corrió un proceso sin sesión |
+| `started_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Inicio |
+| `finished_at` | timestamptz | sí | | Fin. Nulo significa que la corrida se cortó a media lectura |
+| `rows_read` | int | no | `0` | Filas debajo del encabezado, antes de decidir nada |
+| `rows_created` | int | no | `0` | Solicitudes nuevas |
+| `rows_skipped` | int | no | `0` | Ya importadas: su huella ya estaba (§2.13) |
+| `rows_failed` | int | no | `0` | No se pudieron leer; ninguna se insertó a medias |
+| `rows_flagged` | int | no | `0` | Entraron, pero parecen corrección de una fila anterior |
+| `errors` | jsonb | no | `'[]'` | `[{index, message}]`, el renglón y por qué. CHECK de arreglo |
+
+## 8. El recorrido de una solicitud, paso por paso
+
+Las secciones anteriores describen **qué es** cada tabla. Ésta describe **qué mueve** una
+solicitud de un estado al siguiente y **quién** puede moverla, porque eso no se lee en ningún
+diccionario de datos: se lee salteando entre seis archivos de `orchestration/`. Lo que sigue es el
+recorrido completo tal como está construido hoy, con lo que todavía mueve una mano marcado como
+tal.
+
+### 8.1 Hay dos vocabularios de estado, y no se tocan
+
+Es la confusión más fácil de tener con este modelo, así que va primero.
+
+| | `statuses` | `project_stages.status` |
+| --- | --- | --- |
+| Qué es | El catálogo visible: «Recibido», «Esperando VB», «Entregado» | La máquina del flujo: `pending`, `active`, `waiting_external`, `done`, `cancelled` |
+| Quién lo define | Coordinación, en caliente (`RF-EST-02`), global o por área | El código. Es un CHECK, no una tabla |
+| Sobre qué vive | `requests.status_id`, `projects.status_id` | Cada renglón de `project_stages` |
+| Quién lo mueve | Una persona, con `PUT /api/{requests,projects}/:id/status` | La máquina de etapas y el visto bueno |
+
+**Nada los conecta, y es a propósito.** Un proyecto puede decir «Recibido» mientras todas sus
+etapas están `done`, porque el estatus visible es el que coordinación quiere mostrar y la máquina
+es el estado real del trabajo. Mezclarlos habría significado una de dos cosas, las dos peores: o
+el catálogo deja de ser configurable —porque el código tendría que saber cuál código significa
+«terminado»—, o la máquina deja de ser confiable, porque cualquiera podría cerrar una etapa
+renombrando un estatus.
+
+**El costo, dicho:** hoy nada avisa cuando los dos se contradicen. La lectura del proyecto lleva
+`activeStageIds` justamente para que una pantalla pueda mostrar las dos cosas juntas y la
+contradicción se vea.
+
+### 8.2 El recorrido
+
+Cada paso dice la ruta, el permiso y qué queda en `logs`. «A mano» significa que la ruta existe y
+nadie la llama en automático.
+
+| # | Paso | Ruta | Permiso | Queda en la bitácora | ¿Automático? |
+| --- | --- | --- | --- | --- | --- |
+| 1a | Nace capturada | `POST /api/requests` | `request.write` | `record_created` | — |
+| 1b | Nace importada de Excel | `POST /api/spreadsheets/:id/import` | `spreadsheet.write` **y** `request.write` | `sheet_imported` + un `record_created` por fila | sí, por corrida |
+| 2 | Se reparte a un área | `PATCH /api/requests/:id` | `request.write` | `record_updated` | **a mano** |
+| 3 | Se atiende: estatus, responsable, solicitante | `PUT /:id/status`, `PATCH /:id` | `request.write` | `status_changed`, `record_updated` | **a mano** |
+| 4 | Se convierte en proyecto | `POST /api/requests/:id/convert` | `request.write` **y** `project.write` | `request_converted` + `record_created` del proyecto | — |
+| 5 | El proyecto recibe etapas | `POST /api/projects/:id/stages` | `project.write` | `record_created`, `stage_activated` | **a mano** (E lo hará) |
+| 6 | La etapa arranca, se atora o se cancela | `PATCH /api/projects/:id/stages/:stageId` | `project.write` | `record_updated`, `stage_activated` | **a mano** |
+| 7 | La etapa se firma | `POST .../stages/:stageId/approvals` | `project.write` | `record_created` + `stage_completed` (+ `stage_activated` si se rechazó) | — |
+| 8 | Los valores cruzan de una etapa a otra | `PUT /api/projects/:id/field-values/:key` | `project.write` | `record_updated` | **a mano**, y exigido al firmar |
+| 9 | Se cierra y se archiva | `POST /:id/close`, `POST /:id/archive` | `project.write` | `record_updated` | **a mano** |
+
+Lo que cada paso hace por dentro, en una línea:
+
+1. **Nace.** Folio `SOL-000001` de secuencia, estatus global `recibido` salvo que el mapeo del
+   libro traduzca el de la hoja (§2.16), captura validada contra la versión del formato. La
+   capturada trae área si el cuerpo la manda; **la importada no trae ninguna** a propósito: el
+   libro no sabe a quién le toca.
+2. **Se reparte.** Es el único paso que existe solo porque la importación existe. `areaId=none` en
+   la bandeja es donde se encuentran las que nadie repartió.
+3. **Se atiende.** Un estatus de área solo se puede poner si la solicitud es de esa área; los
+   globales siempre. El solicitante se corrige con el autocompletado de `/api/requesters` (§2.11).
+4. **Se convierte.** Llave `PRY-000001` de secuencia u otra dada, y **todo** lo capturado pasa a
+   `project_field_values` bajo su código (§2.13). Se pueden convertir varias solicitudes en un
+   proyecto; si dos traen la misma clave gana la primera y las demás regresan en `conflicts`.
+   Desde aquí la solicitud ya no se edita ni se borra, salvo el solicitante.
+5. **Las etapas.** La de menor `seq` nace `active` y las demás `pending`. Cada una declara
+   `inputs` y `outputs`, que son claves de `project_field_values` (§2.14).
+6. **La máquina.** `pending → active` arranca y sella `started_at`; `active ↔ waiting_external`
+   la para sobre un tercero y exige el motivo que pide `RF-FLW-07`; `→ cancelled` la tira.
+   **`done` no se puede poner a mano**: una etapa la cierra una firma.
+7. **La firma.** Cualquiera con `project.write` (§2.12). `approved` cierra la etapa, y antes
+   verifica que todo lo que declaró en `outputs` tenga valor —ahí es donde `RF-FLW-06` deja de ser
+   una intención—; `rejected` la cierra igual y abre la misma etapa en `attempt + 1`, `active`, en
+   la misma sentencia (§2.6). **No abre la etapa siguiente**: cuál sigue es asunto del flujo, y el
+   flujo todavía no existe.
+8. **Los valores.** `produced_by_stage_id` nulo significa «vino de la solicitud».
+9. **El cierre.** Se rechaza mientras quede una etapa `active` o `waiting_external`. Archivar es
+   un acto aparte con su propia columna, porque cerrar y dejar de ver no son lo mismo.
+
+### 8.3 Lo que todavía mueve una mano, y por qué
+
+Cuatro cosas. Ninguna es un olvido, pero tampoco todas son decisiones firmes:
+
+- **El estatus visible.** Por §8.1, y ésa sí es una decisión.
+- **La etapa siguiente.** Falta E. Es el hueco que más se nota, porque está exactamente donde las
+  entrevistas pusieron el dolor: perseguir vistos buenos.
+- **El reparto de área.** Decisión de F: el libro no sabe a quién le toca, y un área por omisión
+  habría escondido el problema en vez de mostrarlo.
+- **El estatus de una solicitud ya convertida.** Éste **no** es una decisión, es un pendiente:
+  §8.4.
+
+### 8.4 Costuras que el recorrido deja ver, y lo que costaría cerrarlas
+
+Escribir el recorrido completo sirvió para esto. Cinco cosas, de la más barata a la más cara:
+
+1. **Una solicitud convertida se queda en «Recibido» para siempre.** `convert()` la liga al
+   proyecto y no toca su `status_id`; sale de la bandeja solo porque el filtro trae
+   `converted=false` por omisión. O sea que el renglón miente sobre sí mismo, y «¿qué pasó con mi
+   solicitud?» se contesta por el proyecto y no por ella. **Costaría** un estatus terminal
+   `convertida` sembrado como ya está `rechazada`, y una línea en `convert()`.
+2. **El área de la solicitud y las áreas de las etapas no se relacionan.** Una solicitud tiene un
+   área; el trabajo vive en etapas que tienen la suya. Nadie ha dicho si el área de la solicitud
+   *se convierte* en la de la primera etapa o solo registra quién la repartió. **Costaría**
+   decidirlo: una línea en `convert()` si la respuesta es la primera, y una frase aquí si es la
+   segunda. Hoy la respuesta de hecho es la segunda, sin haberla dicho.
+3. **`priority` es un entero sin vocabulario.** `RF-FLW-08` dice priorizar por urgencia y nunca por
+   orden de llegada, y la bandeja ordena por ese número, pero nadie dijo qué significa `1`. Dos
+   personas lo van a usar distinto la primera semana. **Costaría** un catálogo chico o, más barato,
+   tres valores nombrados en la interfaz y dichos aquí.
+4. **Nada avisa cuando el estatus visible y la máquina se contradicen.** Por §8.1 no se van a
+   unir, pero sí se puede ver: el proyecto ya publica `activeStageIds`. **Costaría** que la
+   pantalla los muestre juntos; no es una tabla, es una vista.
+5. **El flujo declarativo (E).** Es la única de las cinco que es trabajo de verdad: tablas de
+   `workflows`, validación del grafo, instanciación al convertir y avance al firmar, con ramas
+   concurrentes para `RF-FLW-09`. El recorrido de §8.2 es la especificación contra la que hay que
+   revisarlo: si E no puede describir los pasos 5, 6 y 7 tal como están, es E lo que está mal.

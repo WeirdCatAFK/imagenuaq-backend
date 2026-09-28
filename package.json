@@ -22,6 +22,7 @@
     "postmigrate:redo": "npm run dbml",
     "migrate:status": "npm run migrate -- up --dry-run",
     "admin:create": "node --env-file-if-exists=.env scripts/createAdmin.js",
+    "sheets:probe": "node --env-file-if-exists=.env scripts/probeSheet.js",
     "pretest": "node --env-file-if-exists=.env scripts/testDb.js",
     "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --test --test-concurrency=1 \"tests/**/*.test.js\""
   },

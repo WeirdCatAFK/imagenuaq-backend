@@ -103,6 +103,21 @@ describe("coerce()", () => {
       assert.equal(value("datetime", "1/5/2026 14:30"), "2026-05-01T14:30:00.000Z");
     });
 
+    test("a two-digit year is refused, not quietly turned into 1926", () => {
+      // Excel displays a real date as "1/8/26", and `Date.UTC(26, ...)` means 1926 -- so guessing
+      // would import a delivery date a century off with no error to show for it. The message says
+      // what to do instead, because the fix is a mapping decision (read the serial, not the text).
+      assert.match(error("date", "1/8/26"), /four digits/);
+      assert.match(error("date", "01/08/26"), /four digits/);
+      assert.match(error("datetime", "1/8/26 10:15"), /four digits/);
+      assert.match(error("date", "1/8/26"), /Excel date instead of as text/);
+
+      // Four digits is what it asks for, and an explicit early year is honoured rather than
+      // second-guessed: it is what the cell says.
+      assert.equal(value("date", "1/8/2026"), "2026-08-01");
+      assert.equal(value("date", "1/8/0026"), "0026-08-01");
+    });
+
     test("an impossible day is refused rather than rolled over", () => {
       assert.match(error("date", "31/02/2026"), /valid date/);
       assert.match(error("date", "40/01/2026"), /valid date/);

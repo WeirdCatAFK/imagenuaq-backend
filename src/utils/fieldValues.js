@@ -261,21 +261,38 @@ function date(raw, options, withTime) {
   if (time) parts[2] = parts[2].slice(0, time.index);
   if (parts.length < 3) return bad(`is not a date written as ${token}`);
 
-  const year = Number(parts[order.year]);
+  // A two-digit year is refused rather than guessed. `Date.UTC(26, ...)` silently means 1926, so
+  // a cell displaying "1/8/26" would import as a delivery date a hundred years ago and no error
+  // would say so -- the same reason the Excel serials 1 to 60 are refused above. Which century
+  // somebody meant is not ours to invent.
+  const writtenYear = (parts[order.year] ?? "").trim();
+  if (!/^\d{4}$/.test(writtenYear)) {
+    return bad(
+      `has the year written as "${writtenYear}": it needs four digits, ` +
+        'or map the column as an Excel date instead of as text',
+    );
+  }
+
+  const year = Number(writtenYear);
   const month = Number(parts[order.month]);
   const day = Number(parts[order.day]);
   if (![year, month, day].every(Number.isInteger)) return bad(`is not a date written as ${token}`);
   if (month < 1 || month > 12 || day < 1 || day > 31) return bad("is not a valid date");
 
+  // The year is set afterwards, not passed to Date.UTC: that constructor reads 0 to 99 as
+  // 1900 + n, so even a four-digit "0026" would come back as 1926. setUTCFullYear() takes the
+  // year literally, which is the only way the value that comes out is the value that went in.
   const at = new Date(Date.UTC(
-    year,
+    2000,
     month - 1,
     day,
     time ? Number(time[1]) : 0,
     time ? Number(time[2]) : 0,
     time && time[3] ? Number(time[3]) : 0,
   ));
-  // Rejects 31/02: the constructor rolls over and the day no longer matches.
+  at.setUTCFullYear(year);
+  // Rejects 31/02, and 29/02 of a year that has no 29th: the constructor rolls over and the day
+  // no longer matches. 2000 is a leap year, so the check has to run after the year is set.
   if (at.getUTCMonth() !== month - 1 || at.getUTCDate() !== day) return bad("is not a valid date");
 
   return ok(withTime ? at.toISOString() : at.toISOString().slice(0, 10));
