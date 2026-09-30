@@ -17,6 +17,7 @@ import dataTypesRouter from './routes/dataTypes.js';
 import statusesRouter from './routes/statuses.js';
 import requestersRouter from './routes/requesters.js';
 import projectsRouter from './routes/projects.js';
+import workflowsRouter from './routes/workflows.js';
 import requestsRouter from './routes/requests.js';
 import contractTypesRouter from './routes/contractTypes.js';
 import docsRouter from './routes/docs.js';
@@ -42,6 +43,7 @@ export const ROUTERS = {
   requesters: requestersRouter,
   requests: requestsRouter,
   projects: projectsRouter,
+  workflows: workflowsRouter,
   // Quoted because the key IS the URL segment: /api/contract-types, not /api/contractTypes.
   'contract-types': contractTypesRouter,
   // Swagger UI and the raw document, at /api/docs and /api/docs/openapi.json. It belongs

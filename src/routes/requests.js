@@ -42,6 +42,16 @@ router.delete("/:id", async (req, res) => {
   res.json({ request: await requests.remove(requestId(req)) });
 });
 
+// DATAMODEL §2.5: routing by flow. `{workflowId}` copies a template, `{phases}` is designed here.
+router.put("/:id/flow", async (req, res) => {
+  const { workflowId, phases } = req.body ?? {};
+  res.json({ request: await requests.setFlow(requestId(req), { workflowId, phases }) });
+});
+
+router.delete("/:id/flow", async (req, res) => {
+  res.json({ request: await requests.clearFlow(requestId(req)) });
+});
+
 // RF-PRY-01: one or several requests become a project, keeping the link.
 router.post(
   "/:id/convert",

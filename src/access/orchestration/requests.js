@@ -14,9 +14,15 @@
 // `data` is the whole capture, coerced by `utils/fieldValues.js` against the format's fields, so
 // a value typed here and the same value read out of Excel land identically. Unknown keys are
 // kept: RF-SOL-06 says nothing the requester sent is dropped.
+//
+// **A request is routed by giving it a flow** (`request-flows`, DATAMODEL.md §2.5): a copy of a
+// template or one designed for it, owned by the request until it converts. Every area in the
+// flow's first phase finds it in its inbox, and converting hands the same phases to the
+// project. `area_id` stays for what was routed by hand before flows existed.
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import projects from "./projects.js";
+import { validatePhases } from "./workflows.js";
 import { fieldList } from "./schemas.js";
 import { validateData } from "../../utils/fieldValues.js";
 import events from "../../utils/events.js";
@@ -214,7 +220,12 @@ class Requests {
     if (!row) throw ApiError.badRequest("That status does not exist.");
     if (row.is_active === false) throw ApiError.badRequest("That status is inactive.");
     if (row.area_id !== null && String(row.area_id) !== String(before.area_id)) {
-      throw ApiError.badRequest("That status belongs to another area.");
+      // An area that has the request in its inbox through the flow may use its own statuses.
+      const [flow] = await query.getRequestFlowAreas([id]);
+      const inbox = (flow?.first_phase_area_ids ?? []).map(String);
+      if (!inbox.includes(String(row.area_id))) {
+        throw ApiError.badRequest("That status belongs to another area.");
+      }
     }
 
     const after = await query.setRequestStatus(id, status);
@@ -227,6 +238,87 @@ class Requests {
     });
 
     return this.getById(id);
+  }
+
+  /**
+   * Gives a request its flow, replacing any it had: a copy of a template's latest version
+   * (`workflowId`), or one designed for it (`phases`, the template shape). The request then
+   * sits in the inbox of every area in the first phase.
+   *
+   * @param {number} requestId
+   * @param {{ workflowId?: number, phases?: object[] }} input Exactly one of the two.
+   * @throws {ApiError} 400 on a bad payload, 404 on an unknown request or template, 409 when
+   *   the request is converted or the template inactive.
+   */
+  async setFlow(requestId, { workflowId, phases } = {}) {
+    const id = requireId(requestId, "requestId");
+    const fromTemplate = workflowId !== undefined && workflowId !== null;
+    const designed = phases !== undefined && phases !== null;
+    if (fromTemplate === designed) {
+      throw ApiError.badRequest("Send either workflowId, to copy a template, or phases.");
+    }
+
+    const before = await query.getRequest(id);
+    if (!before) throw ApiError.notFound("Request not found.");
+    if (before.project_id !== null) {
+      throw ApiError.conflict("That request is already a project; its flow belongs to it now.");
+    }
+
+    let input;
+    if (fromTemplate) {
+      const workflow = await query.getWorkflow(requireId(workflowId, "workflowId"));
+      if (!workflow || workflow.workflow_version_id === null) {
+        throw ApiError.notFound("Workflow not found.");
+      }
+      if (workflow.is_active === false) {
+        throw ApiError.conflict("That workflow is inactive; pick another or reactivate it.");
+      }
+      input = { sourceVersionId: workflow.workflow_version_id };
+    } else {
+      input = { phases: await validatePhases(phases) };
+    }
+
+    const result = await query.setRequestFlow(id, input);
+    if (result.found === 0) {
+      throw ApiError.conflict("That request was converted or removed meanwhile; read it again.");
+    }
+
+    const after = await query.getRequest(id);
+    await events.emit({
+      action: "record_updated",
+      target: { table: "requests", id },
+      before,
+      after,
+    });
+
+    return shapeRequest(after);
+  }
+
+  /**
+   * Takes a request's flow away; it goes back to being unrouted unless it has an area.
+   *
+   * @throws {ApiError} 404, 409 once converted.
+   */
+  async clearFlow(requestId) {
+    const id = requireId(requestId, "requestId");
+
+    const before = await query.getRequest(id);
+    if (!before) throw ApiError.notFound("Request not found.");
+    if (before.project_id !== null) {
+      throw ApiError.conflict("That request is already a project; its flow belongs to it now.");
+    }
+
+    await query.clearRequestFlow(id);
+
+    const after = await query.getRequest(id);
+    await events.emit({
+      action: "record_updated",
+      target: { table: "requests", id },
+      before,
+      after,
+    });
+
+    return shapeRequest(after);
   }
 
   /** @throws {ApiError} 404, 409 once converted. */
@@ -262,11 +354,18 @@ class Requests {
    * On a multi-request conversion the first request wins a repeated key and the rest come back
    * in `conflicts` rather than being silently dropped.
    *
+   * **The flow travels too** (§2.5): the project takes the flow of the first request that has
+   * one -- the same phases, now owned by the project, each stage with its first attempt -- and
+   * any other request's flow is dropped and named in `discardedFlows`. `stages` builds the
+   * stages by hand instead, and sending them for a request that has a flow is refused: it
+   * would be two answers to the same question.
+   *
    * @param {number} requestId
    * @param {object} [input] `key`, `title`, `requester`, `stages`, `requestIds` and the project
    *   flags; anything omitted is taken from the request.
-   * @returns {Promise<{project: object, conflicts: object[]}>}
-   * @throws {ApiError} 404, 409 when it is already converted.
+   * @returns {Promise<{project: object, conflicts: object[], discardedFlows: string[]}>}
+   * @throws {ApiError} 400 on stages for a request with a flow, 404, 409 when it is already
+   *   converted.
    */
   async convert(requestId, input = {}) {
     const id = requireId(requestId, "requestId");
@@ -291,6 +390,29 @@ class Requests {
 
     const { fieldValues, conflicts } = mergeCaptures(all);
 
+    const flows = new Map(
+      (await query.getRequestFlowAreas(all.map((row) => row.id)))
+        .map((flow) => [String(flow.request_id), flow]),
+    );
+    const owner = all.find((row) => flows.has(String(row.id))) ?? null;
+    const others = all.filter((row) => row !== owner && flows.has(String(row.id)));
+
+    const stages = input.stages ?? [];
+    if (owner !== null && Array.isArray(stages) && stages.length > 0) {
+      throw ApiError.badRequest(
+        `${owner.folio} already has a flow; convert with it, or remove it to build the stages by hand.`,
+      );
+    }
+
+    const requestFlow = owner === null
+      ? null
+      : {
+          requestId: owner.id,
+          workflowVersionId: owner.workflow_version_id,
+          areaIds: flows.get(String(owner.id)).area_ids ?? [],
+          discardRequestIds: others.map((row) => row.id),
+        };
+
     const project = await projects.create({
       key: input.key,
       title: cleanText(input.title) ?? request.title,
@@ -303,9 +425,10 @@ class Requests {
       carriedOver: input.carriedOver ?? false,
       startsOn: input.startsOn ?? null,
       dueOn: input.dueOn ?? null,
-      stages: input.stages ?? [],
+      stages,
       fieldValues,
       requestIds: all.map((row) => row.id),
+      requestFlow,
     });
 
     for (const row of all) {
@@ -317,7 +440,7 @@ class Requests {
       });
     }
 
-    return { project, conflicts };
+    return { project, conflicts, discardedFlows: others.map((row) => row.folio) };
   }
 
   // --- Internals ---
@@ -525,6 +648,18 @@ function shapeRequest(row) {
       : null,
     areaId: row.area_id,
     areaName: row.area_name ?? null,
+    // The flow it is routed by, or null. `workflowId` and `version` name the template it was
+    // copied from; both are null for a flow designed for this request.
+    flow:
+      Array.isArray(row.flow_phases) && row.flow_phases.length > 0
+        ? {
+            workflowVersionId: row.workflow_version_id ?? null,
+            workflowId: row.flow_workflow_id ?? null,
+            workflowName: row.flow_workflow_name ?? null,
+            version: row.flow_version ?? null,
+            phases: row.flow_phases,
+          }
+        : null,
     statusId: row.status_id,
     statusCode: row.status_code,
     statusLabel: row.status_label,
@@ -561,6 +696,9 @@ function shapeListed(row) {
     requester: row.requester,
     areaId: row.area_id,
     areaName: row.area_name ?? null,
+    hasFlow: row.has_flow ?? false,
+    // The inboxes it sits in through its flow: the areas of the first phase.
+    firstPhaseAreas: row.first_phase_areas ?? [],
     statusId: row.status_id,
     statusCode: row.status_code,
     statusLabel: row.status_label,

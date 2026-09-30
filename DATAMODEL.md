@@ -1,6 +1,6 @@
 # Datamodel
 
-El diccionario de datos —las 38 tablas y la vista, columna por columna— está en §7. Lo de
+El diccionario de datos —las 45 tablas y la vista, columna por columna— está en §7. Lo de
 antes es el porqué: §1 la forma general, §2 las decisiones caras de revertir, §3 la
 trazabilidad contra los requerimientos, §5 los huecos ya cerrados y §6 lo que falta.
 
@@ -19,7 +19,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`, **todas con API**: `schemas` (§2.2), `statuses` (`RF-EST-02`), `requests` con su conversión (§2.13), `projects` con etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11) |
 | MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`, `sheet_imports`                                                                                                                                  | Completo: registro de libros por`microsoft-accounts` y `microsoft-app`, mapeo de columnas e importación por `sheet-imports` (§2.10, §2.16) |
-| FLW                               | `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Parcial: las etapas se instancian a mano; falta el editor por nodos (§6)            |
+| FLW                               | `workflows`, `workflow_versions`, `flow_phases`, `flow_stages`, `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Plantillas de flujo por fases con API (`/api/workflows`, §2.1, §2.17); el visto bueno avanza de fase (§2.12). Falta que un proyecto parta de una plantilla (§6) |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
 | FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
 
@@ -41,49 +41,57 @@ Cinco módulos que se leen como una sola cadena, y de los que cuelgan todos los 
 ```
 schemas → schema_versions ─┬─ sheets                     (RF-MIG-01: el Excel sigue vivo)
                            │
-           requests ─────┴──→ projects ─┬─ project_stages ──→ approvals
-          │   (data JSONB)                ├─ project_field_values
+           requests ─────┴──→ projects ─┬─ flow_phases → flow_stages ←── project_stages ──→ approvals
+          │   (data JSONB)                ├─ project_field_values            (definición)      (ejecución)
                                           └─ tasks / notes / time_entries   (sin modelar)
 
 statuses  (catálogo por área; projects.status_id, requests.status_id)
 
-workflows → workflow_versions → workflow_stages ⇄ workflow_transitions   (grafo, §6)
+workflows → workflow_versions → flow_phases → flow_stages   (plantillas, §2.1, §2.17)
 ```
 
 Una solicitud entra por un formato (`schema_versions`), recibe folio y cae en la bandeja
 del área (`RF-SOL-03`, `RF-SOL-04`). Una o varias solicitudes se convierten en proyecto
-(`RF-PRY-01`). El proyecto pasa por etapas: cada una es una fila en `project_stages`, y
-cada visto bueno una fila en `approvals` (`RF-FLW-03`, `RF-PRY-03`). Las tareas colgarán
-del proyecto y, opcionalmente, de la etapa.
+(`RF-PRY-01`). El proyecto pasa por fases de etapas: cada etapa es una definición en
+`flow_stages`, cada intento de hacerla una fila en `project_stages`, y cada visto bueno una
+fila en `approvals` (`RF-FLW-03`, `RF-PRY-03`). Las tareas colgarán del proyecto y,
+opcionalmente, de la etapa.
 
-Todo lo anterior existe salvo la última línea del diagrama: las etapas se crean hoy a
-mano, porque `workflows` y sus versiones son la mitad de FLW que no se migró (§6). Nada de
-lo que ya está cambia cuando entren — `project_stages` gana `workflow_stage_id` y el resto
-queda igual.
+Las mismas `flow_phases` y `flow_stages` guardan las plantillas de flujo, colgadas de una
+versión en vez de un proyecto (§2.17). Las etapas de un proyecto se crean hoy a mano; que
+un proyecto parta de una plantilla es el incremento siguiente (§6), y copia sus
+definiciones sin mover nada de lo que ya está.
 
 ## 2. Decisiones de diseño
 
 Las que cambian la forma del esquema y son caras de revertir después.
 
-### 2.1 El flujo es un grafo, no una lista ordenada
+### 2.1 El flujo es una secuencia de fases, no un grafo
 
 `RF-FLW-09` permite que un mismo proyecto derive en trabajo **simultáneo** para más de un
-área, y `RF-FLW-02` pide armarlo en una interfaz por nodos. Una columna `orden int` sobre
-las etapas no puede expresar una bifurcación ni una reunión de ramas.
+área, y `RF-FLW-02` pide armarlo en una interfaz visual. Una columna `orden int` sobre las
+etapas no puede expresar trabajo en paralelo.
 
-Por eso `workflow_stages` son nodos y `workflow_transitions` son aristas. El editor guarda
-la posición de cada nodo (`position_x`, `position_y`) para que el diagrama sobreviva al
-guardado.
+La primera propuesta fue un grafo: `workflow_stages` como nodos, `workflow_transitions` como
+aristas y la posición de cada nodo en pantalla. **Se reemplazó por fases** (`flow-templates`)
+porque el diseñador que se construyó arma el flujo por columnas: una fase es un conjunto de
+etapas que trabajan a la vez, y la siguiente fase empieza cuando la anterior terminó. Eso
+expresa la bifurcación (varias etapas en una fase) y la reunión (la fase siguiente espera a
+todas), que es lo que las entrevistas describen, con un orden entero por fase y sin
+posiciones que guardar.
 
-**Consecuencia:** `projects` **no** lleva `current_stage_id`. Con ramas paralelas no hay
+**El límite, dicho para que no se descubra:** una bifurcación o una reunión solo ocurre en el
+borde de una fase. Dos cadenas independientes que avanzan a ritmos distintos —diseño →
+imprenta al lado de video → edición, cada una por su cuenta— no se pueden expresar. Si
+aparecen, las aristas se agregan sobre `flow_stages` sin rehacer las tablas.
+
+**Consecuencia:** `projects` **no** lleva `current_stage_id`. Con etapas en paralelo no hay
 una etapa actual sino varias; la etapa actual es el conjunto de filas de `project_stages`
 con `status = 'active'`. Poner esa columna es el error que obliga a rehacer el módulo
 cuando aparece el primer proyecto que va a diseño e imprenta a la vez.
 
-**Implementado así.** `projects-spine` creó `project_stages` sin `workflow_stage_id` —los
-nodos aún no existen— y sin puntero alguno en `projects`. La tabla lleva `seq`, que es
-orden de presentación y nada más: `project_stages.seq` no decide qué sigue, y el comentario
-de la columna lo dice para que no se relea como el contador que esta sección rechaza.
+**Implementado así.** `flow_phases.seq` es el orden de las fases y es lo único que decide qué
+sigue; `flow_stages.seq` es el orden de presentación dentro de una fase y no decide nada.
 
 ### 2.2 Formatos y flujos se versionan; las versiones publicadas son inmutables
 
@@ -92,8 +100,8 @@ desarrollo. Si esas definiciones se editan en su lugar, dos cosas se rompen: una
 vieja deja de poder mostrarse con los campos con los que se capturó, y un proyecto en
 vuelo cambia de flujo a media ejecución.
 
-Por eso `schemas → schema_versions` y `workflows → workflow_versions → workflow_stages`.
-Editar publica una versión nueva; `requests.schema_version_id` y
+Por eso `schemas → schema_versions` y `workflows → workflow_versions → flow_phases →
+flow_stages`. Editar publica una versión nueva; `requests.schema_version_id` y
 `projects.schema_version_id` apuntan a la versión con la que nacieron y nunca se mueven.
 
 Las tablas se llaman `schemas` y `schema_versions`, no `forms` y `form_versions`: el mismo
@@ -105,7 +113,11 @@ ninguna de las dos acepciones aparece en las consultas de la otra.
 **La inmutabilidad es un trigger, no una convención.** `schema_versions_immutable` rechaza
 todo `UPDATE` sobre la tabla. Dejarla en la orquestación es dejarla al cuidado del próximo
 que escriba un `UPDATE`, y para cuando se note, la historia que protege ya se reescribió.
-Es el mismo criterio que `folders_no_cycle`.
+Es el mismo criterio que `folders_no_cycle`. Las plantillas de flujo llevan tres:
+`workflow_versions_immutable` rechaza editar una versión, y `flow_phases_immutable` y
+`flow_stages_immutable` rechazan editar las fases y etapas de una versión o agregarle algo
+después de publicada. Publicar escribe versión, fases y etapas en una sola sentencia, así
+que pasa.
 
 ### 2.3 El payload de la solicitud es JSONB; los campos que se buscan son columnas
 
@@ -203,7 +215,7 @@ que aquí es una búsqueda por igualdad.
 solicitudes (el formato 02, papel institucional, cae primero a diseño gráfico).
 
 En vez de una tabla de áreas destino en paralelo, `schema_versions.workflow_version_id`
-apunta al flujo, y las etapas marcadas `is_entry` definen a qué áreas cae. Un solo lugar
+apunta al flujo, y las etapas de su primera fase definen a qué áreas cae. Un solo lugar
 decide el enrutamiento, que es también lo que `RF-FLW-04` automatiza al dar el visto bueno.
 Es la misma lección de la migración `schema-proofing`: la jefatura de área estaba en tres
 lugares y ninguno los mantenía de acuerdo.
@@ -212,8 +224,14 @@ lugares y ninguno los mantenía de acuerdo.
 `workflow_version_id` nulo más un área de destino explícita, no reintroducir la tabla
 paralela.
 
-**Pendiente, con un puente.** `schema_versions` todavía no apunta a ningún flujo, porque
-los flujos no existen. Mientras tanto el enrutamiento lo lleva `requests.area_id`: la
+**Implementado por la solicitud, no por el formato** (`request-flows`). El reparto quedó en la
+solicitud: se le aplica una plantilla —se copia— o se le diseña un flujo, y cae en la bandeja
+de cada área de su primera fase. La bandeja de un área es lo que se le asignó a mano más lo que
+la tiene en la primera fase de su flujo; «sin repartir» es sin área y sin flujo. Al convertir, el
+proyecto se lleva ese mismo flujo (§2.17). Lo que sigue pendiente es la mitad del formato: que
+`schema_versions` sugiera una plantilla por omisión.
+
+**El puente sigue en pie.** Antes de los flujos, el enrutamiento lo lleva `requests.area_id`: la
 bandeja en la que la solicitud cayó, escrita al crearla. Es exactamente el "área de destino
 explícita" del párrafo anterior, así que cuando entre FLW la columna no estorba —pasa a ser
 el valor derivado de la etapa de entrada, y el único cambio es quién la escribe.
@@ -221,14 +239,14 @@ el valor derivado de la etapa de entrada, y el único cambio es quién la escrib
 ### 2.6 Las etapas se pueden repetir
 
 Un visto bueno rechazado devuelve el trabajo a diseño. Por eso `project_stages` no es
-única por `(project_id, workflow_stage_id)` sino por `(project_id, workflow_stage_id, attempt)`. Sin el contador, el reproceso o sobrescribe la historia o falla al insertar —
-y `RF-PRY-03` pide justamente esa historia.
+única por la etapa sino por `(flow_stage_id, attempt)`: cada intento es una fila que apunta
+a la misma definición. Sin el contador, el reproceso o sobrescribe la historia o falla al
+insertar — y `RF-PRY-03` pide justamente esa historia.
 
-Sin nodos todavía, la clave implementada es `(project_id, area_id, seq, attempt)`: `seq`
-ocupa el lugar del nodo para distinguir dos etapas de la misma área —propuesta y luego
-ajustes— sin abusar de `attempt`, que significa otra cosa. Cuando entren los nodos, el
-índice se mueve a `workflow_stage_id` y `seq` queda como lo que ya es, orden de
-presentación.
+Hasta `flow-templates` la clave fue `(project_id, area_id, seq, attempt)`, con `seq` ocupando
+el lugar de la definición; eso impedía dos etapas de la misma área en una fase —propuesta y
+visto bueno interno, ambas de diseño— y obligaba a copiar la definición en cada intento.
+Con la definición separada (§2.17) las dos cosas desaparecen.
 
 ### 2.7 El historial de estatus se registra en `logs`, no en una tabla propia
 
@@ -414,12 +432,16 @@ una etapa se cierra registrando un visto bueno, que es lo que `RF-FLW-03` quiere
 escrito. Una etapa ya `done` o `cancelled` no cambia de estatus; se repite (§2.6).
 
 **El rechazo abre el siguiente intento en la misma sentencia.** `advanceStage()` cierra la fila
-y abre las que siguen en un solo statement, con `attempt = max + 1` por (proyecto, área, seq),
-que es lo que cuenta el índice único: dos llamadas simultáneas chocan contra el índice y no
-entre ellas. Hoy la única fila que abre es la repetición de la etapa rechazada; cuando entren
-las transiciones declarativas (§6), el recorrido del grafo llama a la misma función con los
-destinos. Aprobar **no** abre la etapa siguiente: cuál sigue es asunto del flujo, y el flujo
-todavía no existe, así que la siguiente la inicia quien lleva el proyecto.
+y abre lo que sigue en un solo statement. Un rechazo abre la misma definición con
+`attempt = max + 1`, que es lo que cuenta el índice único: dos llamadas simultáneas chocan
+contra el índice y no entre ellas.
+
+**Aprobar la última etapa abierta de una fase abre la siguiente** (`RF-FLW-04`, desde
+`flow-templates`). Si al cerrar la etapa no queda nada `pending`, `active` ni
+`waiting_external` en su fase, las etapas `pending` de la siguiente fase que tenga alguna pasan
+a `active` en la misma sentencia, y cada una se anuncia con `stage_activated`. Una etapa
+cancelada no retiene la fase; una pendiente sí, porque todavía no se hizo. Un rechazo nunca
+avanza.
 
 **Firmar solo pide `project.write`.** Se consideró exigir pertenencia al área de la etapa
 —`area_members` más `area_hierarchy`— y se descartó: `RF-FLW-03` pide que la decisión quede
@@ -515,9 +537,11 @@ que el valor es.
 
 ### 2.14 La etapa declara lo que recibe y lo que entrega
 
-`stage-io-and-finance` le dio a `project_stages` dos arreglos: `inputs`, las claves de
+`stage-io-and-finance` le dio a la etapa dos arreglos: `inputs`, las claves de
 `project_field_values` que quien atiende la etapa necesita para trabajar, y `outputs`, las que la
-etapa entrega.
+etapa entrega. Desde `flow-templates` viven en la definición, `flow_stages.input_keys` y
+`output_keys`, junto a dos notas libres (`input_note`, `output_note`) que describen para una
+persona lo que entra y lo que sale.
 
 **Esto convierte `RF-FLW-06` en una garantía y no en una intención.** Antes una etapa producía
 valores y la siguiente los encontraba si alguien se acordó de capturarlos;
@@ -528,11 +552,14 @@ orden: diseño no pudo cerrar sin capturarlo.
 Solo se exigen las salidas, y solo al aprobar. Las entradas son informativas: un dato que no
 llegó es el motivo por el que una etapa se queda esperando (`RF-FLW-07`), no un error de captura.
 Rechazar tampoco exige nada —el trabajo se está devolviendo, no se entregó—, y el intento que se
-abre hereda la misma declaración, porque es la misma etapa.
+abre comparte la misma declaración, porque es la misma definición.
+
+**Editar la declaración alcanza a todos los intentos**, incluidos los ya cerrados: es una sola
+definición. Un visto bueno no guarda copia de las salidas que exigió; si esa historia hace falta
+algún día, se agrega a `approvals`, no se vuelve a copiar la definición por intento.
 
 Son `jsonb` y no una tabla puente por lo mismo que los campos de un formato: se leen de una etapa
-a la vez y nada busca entre etapas distintas. Cuando entren los flujos declarativos (§6),
-`workflow_stages` llevará la declaración y `project_stages` seguirá llevando la copia instanciada.
+a la vez y nada busca entre etapas distintas.
 
 ### 2.15 Factura y cotización son tipos de campo, no tablas
 
@@ -612,9 +639,9 @@ siquiera. La pregunta «¿esta columna es el tiraje?» es sobre los datos, no so
 `target_area_id` en `sheets`, o un `areaId` dentro del `column_map`, para que lo importado no
 llegara sin área. Se descartó: lo que un libro debería señalar es la **plantilla de flujo** con la
 que nacen sus proyectos, y de ahí el área sale sola —de la etapa de entrada, que es lo que §6 y el
-incremento de flujos declarativos ya plantean (`Requests.create` toma el área de la etapa `is_entry`
-de menor `seq`)—. Poner el área en el libro sería guardar dos veces la misma decisión y dejar que
-se contradigan. Mientras los flujos no existan, lo importado sigue llegando sin área y se reparte
+incremento de flujos declarativos ya plantean (`Requests.create` toma el área de las etapas de la
+primera fase)—. Poner el área en el libro sería guardar dos veces la misma decisión y dejar que
+se contradigan. Mientras un libro no pueda señalar una plantilla, lo importado sigue llegando sin área y se reparte
 desde la bandeja; el filtro `areaId=none` es lo que hace que eso se vea en lugar de perderse.
 
 **Una celda vacía en un campo obligatorio se resuelve en el mapeo, no rechazando el renglón.** La
@@ -654,6 +681,52 @@ para preferir una columna de identificador sobre el contenido.
 10 000 filas. Para los rastreadores que existen —decenas o cientos de filas— alcanza; miles
 pedirían un trabajo en segundo plano, que no está.
 
+### 2.17 La definición de la etapa se separa de su ejecución
+
+`flow-templates` partió `project_stages` en dos. Hasta entonces una fila llevaba a la vez **qué es
+la etapa** —área, título, orden, lo que recibe y lo que entrega— y **cómo va** —estatus, intento,
+fechas, bloqueo—, y un rechazo copiaba lo primero en la fila del intento siguiente. Una plantilla
+de flujo necesita lo primero sin lo segundo, y la alternativa obvia, una `workflow_stages` para
+plantillas con las mismas columnas que `project_stages`, era la duplicación que ya costó la
+jefatura de área en tres lugares (`schema-proofing`).
+
+```
+flow_phases   (workflow_version_id XOR project_id, seq, name)
+  └─ flow_stages   (area_id, title, seq, input_keys, output_keys, notas, estimated_days,
+                    default_assignee_id)                                    ← definición
+       └─ project_stages   (attempt, status, assigned_to, fechas, bloqueo)  ← ejecución
+            └─ approvals
+```
+
+**Una fase pertenece a exactamente un dueño**: una versión de plantilla, una solicitud o un
+proyecto (`flow_phases_one_owner`; el tercero lo agregó `request-flows`), con un índice único
+parcial por cada uno. Aplicar una plantilla a una solicitud copia sus fases y etapas: la
+solicitud puede ajustar su copia sin tocar la plantilla, y la plantilla puede publicar otra
+versión sin mover lo que ya está en curso. **Convertir mueve las filas, no las copia**: las
+mismas fases cambian de dueño de la solicitud al proyecto, y cada etapa recibe su primer intento
+en `project_stages` —la primera fase activa—, así que lo que se revisó al repartir es literalmente
+lo que se ejecuta. `workflow_version_id` en `requests` y `projects` dice de qué versión salió el
+flujo. Un disparador impide que `project_stages` apunte a una etapa de plantilla: una plantilla no
+se ejecuta.
+
+**`project_stages.project_id` se fue.** El proyecto ya está en la fase de la definición;
+guardarlo también en la ejecución era tenerlo dos veces, sin nada que mantuviera las copias de
+acuerdo. Todo lo que lo leía tenía que unir con la definición de todos modos para saber el área o
+el título. `query.js` hace esa unión en un solo lugar y entrega la etapa con los nombres de antes,
+así que la orquestación casi no cambió.
+
+**La persona sugerida es de la plantilla y de la solicitud; el responsable es del intento.**
+`flow_stages.default_assignee_id` se llena en plantillas y en solicitudes, y al publicar o guardar
+tiene que ser miembro activo del área de la etapa —es el único momento en que se puede revisar con
+honestidad: la gente cambia de área—. Al clonar se vuelve a revisar y, si la persona ya no
+califica, la copia sale sin ella en vez de fallar. Al convertir pasa a `project_stages.assigned_to`
+si sigue en el área, y se borra de la definición del proyecto. `project_stages.assigned_to` sigue siendo el reparto del responsable de área
+(`RF-TSK-01`), por intento.
+
+**Un área que usa alguna versión de plantilla ya no se puede borrar**: las versiones son
+inmutables, así que la referencia no se va. `areas.js` traduce el bloqueo a un 409, igual que con
+las personas asignadas.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -662,7 +735,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF                              | Cubierto por                                                                                                        | Estado |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------ |
 | RF-SOL-01                       | `schemas`, `schema_versions.fields` por secciones, clonado, vocabulario de claves (§2.2, §2.3, §2.13b)        | ✔ |
-| RF-SOL-02                       | `requests.area_id` como puente; después`schema_versions` → flujo (§2.5)                                     | ◑ |
+| RF-SOL-02                       | El flujo de la solicitud: cae en la bandeja de cada área de su primera fase; `requests.area_id` para lo repartido a mano (§2.5) | ◑ falta que el formato sugiera una plantilla |
 | RF-SOL-03                       | `requests.folio`, de la secuencia`requests_folio_seq` (§2.8); API en `/api/requests`                           | ✔ |
 | RF-SOL-04, RF-SOL-05            | Columnas promovidas de`requests` + `idx_requests_inbox` (§2.3); `GET /api/requests` con sus filtros            | ✔ |
 | RF-SOL-06                       | `requests.data`, `requests.folder_id`, y`source_data` con el renglón crudo del libro (§2.13)                  | ✔ |
@@ -673,18 +746,18 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-PRY-03                       | `project_stages` + `approvals` + `logs`                                                                       | ✔ |
 | RF-PRY-04                       | `time_entries`                                                                                                    | ✗ |
 | RF-PRY-05                       | `notes.kind`                                                                                                      | ✗ |
-| RF-PRY-06                       | `workflows` reutilizables; sin estructura nueva por eventualidad                                                  | ✗ |
+| RF-PRY-06                       | `workflows` + `workflow_versions`, copiadas a la solicitud y movidas al proyecto (§2.1, §2.5, §2.17) | ✔ |
 | RF-PRY-07                       | `projects.has_cost`                                                                                               | ✔ |
 | RF-PRY-08                       | `projects.carried_over`; `period_id` espera a`periods` (CAL/FIN)                                            | ◑ |
 | RF-PRY-09                       | `project_materials.origin`                                                                                        | ✗ |
-| RF-FLW-01, RF-FLW-02            | `workflow_stages` + `workflow_transitions` (§2.1, §6)                                                        | ◑ etapas a mano por`/api/projects/:id/stages`; falta el editor |
+| RF-FLW-01, RF-FLW-02            | `flow_phases` + `flow_stages`, de plantilla, de solicitud o de proyecto (§2.1, §2.17)                     | ◑ plantillas y flujo de la solicitud en el diseñador; el de un proyecto en curso se edita etapa por etapa |
 | RF-FLW-03                       | `approvals`; el rechazo abre`attempt + 1` (§2.6, §2.12)                                                      | ✔ |
-| RF-FLW-04                       | `workflow_transitions` + `notifications`                                                                        | ✗ |
+| RF-FLW-04                       | `advanceStage()`: aprobar la última etapa abierta de una fase abre la siguiente (§2.12) + `notifications` | ◑ el avance existe; faltan las notificaciones |
 | RF-FLW-05                       | Descartado como firma: el visto bueno es interno y la conformidad del solicitante se captura como evidencia (§2.11) | ✗ por decisión |
-| RF-FLW-06                       | `project_field_values` (§2.4) +`project_stages.inputs`/`outputs`, exigidas al firmar (§2.14)                   | ✔ |
+| RF-FLW-06                       | `project_field_values` (§2.4) + `flow_stages.input_keys`/`output_keys`, exigidas al firmar (§2.14)            | ✔ |
 | RF-FLW-07                       | `project_stages.status = 'waiting_external'` + `blocked_reason` (CHECK)                                        | ✔ |
 | RF-FLW-08                       | `projects.priority`, `requests.priority`; sin orden por fecha de llegada                                        | ✔ |
-| RF-FLW-09                       | Sin etapa actual: el conjunto de`project_stages` activas (§2.1)                                                 | ✔ |
+| RF-FLW-09                       | Etapas en paralelo dentro de una fase; sin etapa actual: el conjunto de `project_stages` activas (§2.1) | ✔ |
 | RF-TSK-01 … RF-TSK-05          | `tasks`; hoy solo`project_stages.assigned_to`, una persona por etapa                                          | ◑ |
 | RF-TSK-06, RF-TSK-07            | Consulta sobre`events` + `area_members`; sin tabla nueva                                                        | ✔ |
 | RF-EST-01                       | `projects.status_id` → `statuses`                                                                              | ✔ |
@@ -1093,21 +1166,24 @@ concederlo a `admin` en la misma migración.**
 
 ## 6. Lo que falta de la columna vertebral, y cómo entra
 
-`projects-spine` dejó FLW a medias y TSK sin empezar. No es un descuido: es el recorte que
-permitió migrar algo usable sin comprometer el editor por nodos, que es la pieza más cara
-de `RF-FLW-02`. Lo que sigue es el camino de vuelta, escrito ahora para que no se invente
-después.
+`projects-spine` dejó FLW a medias y TSK sin empezar. `flow-templates` cerró la mitad
+declarativa de FLW: plantillas por fases, versionadas, y la etapa separada en definición y
+ejecución (§2.1, §2.17). Lo que sigue es el camino que falta, escrito ahora para que no se
+invente después.
 
-**FLW declarativo.** `workflows → workflow_versions → workflow_stages ⇄ workflow_transitions`,
-con `position_x`/`position_y` en el nodo para que el diagrama sobreviva al guardado (§2.1),
-`is_entry` para el enrutamiento (§2.5) y `requires_entity_approval` para el visto bueno de
-doble parte (`RF-FLW-05`). Sobre lo ya migrado, tres cambios y ninguno más:
+**Un proyecto parte de una plantilla** — hecho por `request-flows`, a través de la solicitud: se
+le aplica una plantilla o se le diseña un flujo al repartirla, y al convertir el proyecto se lleva
+esas mismas filas (§2.5, §2.17). `requests.workflow_version_id` y `projects.workflow_version_id`
+dicen de qué versión salió. Lo que falta:
 
-- `project_stages` gana `workflow_stage_id`, y el índice único pasa de
-  `(project_id, area_id, seq, attempt)` a `(project_id, workflow_stage_id, attempt)` (§2.6).
-- `schema_versions` gana `workflow_version_id`, y `requests.area_id` deja de escribirse a
-  mano para derivarse de la etapa de entrada (§2.5).
-- `projects` gana `workflow_version_id`, la versión con la que nació (§2.2).
+- **Editar el flujo de un proyecto ya en curso** en el diseñador. Hoy se hace etapa por etapa con
+  `/api/projects/:id/stages`; reemplazarlo entero choca con los intentos que ya existen.
+- `schema_versions` gana `workflow_version_id`, para que un formato sugiera una plantilla por
+  omisión al capturar (§2.5).
+
+**Lo que se descartó del plan original:** `workflow_transitions` y las posiciones de nodo
+(§2.1 dice por qué), `is_entry` (la primera fase ya lo dice) y `requires_entity_approval`
+(`RF-FLW-05` se descartó como firma, §2.11).
 
 **TSK.** `tasks`, `project_members`, `time_entries` y `notes`, todas colgando de `projects`
 y opcionalmente de `project_stages`. Son tablas nuevas que agregan; ninguna altera lo que
@@ -1125,7 +1201,7 @@ tablas distintas (§2.8) y una `schema_versions` publicada no se edita (§2.2).
 
 ## 7. Diccionario de datos
 
-Las 38 tablas y la vista, tal como están en la base hoy. Es la referencia de "qué guarda
+Las 45 tablas y la vista, tal como están en la base hoy. Es la referencia de "qué guarda
 esta columna"; el porqué está en §2 y el estado de cada módulo en §1.
 
 Convenciones de las tablas de abajo:
@@ -1581,7 +1657,8 @@ exactamente lo que consulta la bandeja del área.
 | `schema_version_id` | bigint | no | | Formato con el que se capturó → `schema_versions.id` |
 | `project_id` | bigint | sí | | Proyecto al que se convirtió → `projects.id`. `NULL` = sin convertir. Varias solicitudes pueden apuntar al mismo (`RF-PRY-01`) |
 | `requester` | varchar(300) | sí | | Quién solicita, como cadena (§2.11). Se corrige al convertir, con autocompletado sobre las ya usadas |
-| `area_id` | bigint | sí | | Bandeja en la que cayó → `areas.id`. Puente hasta que el flujo enrute (§2.5) |
+| `area_id` | bigint | sí | | Bandeja asignada a mano → `areas.id`. Lo que tiene flujo cae además en las áreas de su primera fase (§2.5) |
+| `workflow_version_id` | bigint | sí | | Versión de plantilla de la que se copió su flujo → `workflow_versions.id`. Nulo si se diseñó desde cero o no tiene flujo |
 | `title` | varchar(300) | no | | Nombre corto de lo solicitado |
 | `data` | jsonb | no | `{}` | **La captura completa** (`RF-SOL-06`), con la forma que dicte `schema_versions.fields`. Lo que `RF-SOL-05` busca sube a columnas reales en vez de quedarse aquí |
 | `status_id` | bigint | no | | → `statuses.id` |
@@ -1608,6 +1685,7 @@ guardan, y no hay etapa actual: eso es el conjunto de `project_stages` activas (
 | `description` | text | sí | | Detalle |
 | `requester` | varchar(300) | sí | | Quién lo pidió, como cadena (§2.11). Se hereda de la solicitud al convertir |
 | `schema_version_id` | bigint | sí | | Formato del que nació → `schema_versions.id` |
+| `workflow_version_id` | bigint | sí | | Versión de plantilla de la que salió su flujo → `workflow_versions.id`. Nulo si se armó a mano |
 | `status_id` | bigint | no | | Estatus visible → `statuses.id` (`RF-EST-01`) |
 | `status_since` | timestamptz | no | `CURRENT_TIMESTAMP` | Desde cuándo. Desnormalizado para que la alerta de `RF-EST-03`/`RF-EST-04` no recorra la bitácora |
 | `priority` | int | no | `0` | Prioridad manual por urgencia (`RF-FLW-08`) |
@@ -1623,19 +1701,76 @@ guardan, y no hay etapa actual: eso es el conjunto de `project_stages` activas (
 | `archived_at` | timestamptz | sí | | Archivado: sale del tablero. Distinto de eliminar |
 | `deleted_at` | timestamptz | sí | | Baja lógica |
 
-#### `project_stages`
+#### `workflows`
 
-Cada paso por el que pasa el proyecto (`RF-FLW-01`, `RF-PRY-03`). Varias pueden estar
-activas a la vez, que es `RF-FLW-09`.
+La identidad estable de una plantilla de flujo (`RF-FLW-02`, `RF-PRY-06`). Su contenido vive
+en `workflow_versions`.
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |
 | `id` | bigint | no | identidad | Llave primaria |
-| `project_id` | bigint | no | | → `projects.id` |
-| `area_id` | bigint | no | | Área que la atiende → `areas.id` |
+| `code` | varchar(50) | no | | Código corto. **Único** |
+| `name` | varchar(300) | no | | Nombre visible |
+| `is_active` | boolean | no | `true` | Desactivar es la baja; las versiones siguen legibles |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
+
+#### `workflow_versions`
+
+Una versión publicada de una plantilla. **Inmutable** (§2.2): editar publica otra.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `workflow_id` | bigint | no | | → `workflows.id` |
+| `version` | int | no | | Número de versión, desde 1. Único junto con `workflow_id` |
+| `published_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Publicación |
+| `published_by` | bigint | sí | | Quién la publicó → `users.id`. Es la sesión, nunca un campo del cuerpo |
+
+#### `flow_phases`
+
+Una fase de un flujo: sus etapas trabajan en paralelo y la siguiente fase empieza cuando esta
+termina (§2.1). Pertenece a exactamente uno: una versión de plantilla, una solicitud o un
+proyecto (§2.17).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `workflow_version_id` | bigint | sí | | Versión de plantilla dueña → `workflow_versions.id`, en cascada |
+| `request_id` | bigint | sí | | Solicitud dueña mientras no se convierte → `requests.id`. Al convertir, la fase pasa al proyecto (§2.5) |
+| `project_id` | bigint | sí | | Proyecto dueño → `projects.id` |
+| `seq` | int | no | | Orden de la fase, desde 1. **Es lo que decide qué fase sigue.** Único por dueño |
+| `name` | varchar(100) | no | | Nombre visible. Las fases creadas a mano en un proyecto se llaman `Fase <seq>` |
+
+#### `flow_stages`
+
+La definición de una etapa: qué área, qué hace, qué necesita y qué entrega (§2.14, §2.17). Sus
+intentos viven en `project_stages`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `phase_id` | bigint | no | | → `flow_phases.id`, en cascada |
+| `seq` | int | no | `1` | Orden de presentación dentro de la fase. **No decide qué sigue.** Único por fase |
+| `area_id` | bigint | no | | Área que la atiende → `areas.id`. Impide borrar el área |
 | `title` | varchar(300) | no | | Qué se hace en esta etapa |
-| `seq` | int | no | `1` | Orden de presentación dentro del proyecto. **No decide qué sigue** |
-| `attempt` | int | no | `1` | Reintento. Un visto bueno rechazado devuelve el trabajo y la etapa se repite (§2.6). Único junto con `project_id`, `area_id` y `seq` |
+| `default_assignee_id` | bigint | sí | | Solo en plantillas: persona sugerida, miembro activo del área al publicar → `users.id` |
+| `input_keys` | jsonb | no | `[]` | Claves que la etapa necesita para trabajar (`RF-FLW-06`). Informativas |
+| `output_keys` | jsonb | no | `[]` | Claves que la etapa entrega. **El visto bueno se niega** si alguna no tiene valor |
+| `input_note` | text | sí | | Descripción libre de lo que entra |
+| `output_note` | text | sí | | Descripción libre de lo que sale |
+| `estimated_days` | int | sí | | Días hábiles estimados, mayor que 0. Obligatorio en plantillas, opcional en proyectos |
+
+#### `project_stages`
+
+Cada intento de hacer una etapa del proyecto (`RF-FLW-01`, `RF-PRY-03`). La definición está en
+`flow_stages`; aquí solo la ejecución (§2.17). Varias pueden estar activas a la vez, que es
+`RF-FLW-09`.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `flow_stage_id` | bigint | no | | La definición que este intento ejecuta → `flow_stages.id`. Siempre de un proyecto, nunca de una plantilla |
+| `attempt` | int | no | `1` | Reintento. Un visto bueno rechazado devuelve el trabajo y la etapa se repite (§2.6). Único junto con `flow_stage_id` |
 | `status` | varchar(20) | no | `pending` | `pending`, `active`, `waiting_external`, `done`, `cancelled`. Es la máquina del flujo, distinta del estatus visible del proyecto |
 | `blocked_reason` | text | sí | | Motivo del bloqueo. **Obligatorio** cuando `status = 'waiting_external'` (`RF-FLW-07`) |
 | `assigned_to` | bigint | sí | | A quién se le asignó → `users.id`. Es el primer reparto del responsable de área (`RF-TSK-01`), no el desglose en tareas |
@@ -1657,6 +1792,7 @@ doble parte de `RF-FLW-05` son dos filas, una por lado.
 | `decision` | varchar(20) | no | | `approved` o `rejected` |
 | `approver_user_id` | bigint | no | | Quien firmó → `users.id`. Siempre interno (§2.11) |
 | `comment` | text | sí | | Comentario opcional de la decisión |
+| `evidence_file_id` | bigint | sí | | La conformidad del solicitante como evidencia → `files.id` (§2.11) |
 | `decided_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se firmó |
 
 #### `project_field_values`
@@ -1766,24 +1902,29 @@ Lo que cada paso hace por dentro, en una línea:
    libro traduzca el de la hoja (§2.16), captura validada contra la versión del formato. La
    capturada trae área si el cuerpo la manda; **la importada no trae ninguna** a propósito: el
    libro no sabe a quién le toca.
-2. **Se reparte.** Es el único paso que existe solo porque la importación existe. `areaId=none` en
-   la bandeja es donde se encuentran las que nadie repartió.
-3. **Se atiende.** Un estatus de área solo se puede poner si la solicitud es de esa área; los
-   globales siempre. El solicitante se corrige con el autocompletado de `/api/requesters` (§2.11).
+2. **Se le da un flujo.** `PUT /api/requests/:id/flow` copia una plantilla o guarda uno diseñado
+   para ella, y con eso cae en la bandeja de cada área de su primera fase (§2.5). `areaId=none` en
+   la bandeja es donde se encuentran las que no tienen flujo ni área.
+3. **Se atiende.** Un estatus de área solo se puede poner si el área es la de la solicitud o está
+   en la primera fase de su flujo; los globales siempre. El solicitante se corrige con el
+   autocompletado de `/api/requesters` (§2.11).
 4. **Se convierte.** Llave `PRY-000001` de secuencia u otra dada, y **todo** lo capturado pasa a
    `project_field_values` bajo su código (§2.13). Se pueden convertir varias solicitudes en un
    proyecto; si dos traen la misma clave gana la primera y las demás regresan en `conflicts`.
    Desde aquí la solicitud ya no se edita ni se borra, salvo el solicitante.
-5. **Las etapas.** La de menor `seq` nace `active` y las demás `pending`. Cada una declara
-   `inputs` y `outputs`, que son claves de `project_field_values` (§2.14).
+5. **Las etapas.** Salen del flujo de la solicitud: las mismas fases pasan al proyecto y cada etapa
+   recibe su primer intento; las de la primera fase nacen `active` y las demás `pending`. Sin flujo
+   se pueden mandar a mano en `stages`, donde `seq` es la fase. Cada una declara `inputs` y
+   `outputs`, que son claves de `project_field_values` (§2.14), y vive como definición en
+   `flow_stages` más un intento en `project_stages` (§2.17).
 6. **La máquina.** `pending → active` arranca y sella `started_at`; `active ↔ waiting_external`
    la para sobre un tercero y exige el motivo que pide `RF-FLW-07`; `→ cancelled` la tira.
    **`done` no se puede poner a mano**: una etapa la cierra una firma.
 7. **La firma.** Cualquiera con `project.write` (§2.12). `approved` cierra la etapa, y antes
    verifica que todo lo que declaró en `outputs` tenga valor —ahí es donde `RF-FLW-06` deja de ser
    una intención—; `rejected` la cierra igual y abre la misma etapa en `attempt + 1`, `active`, en
-   la misma sentencia (§2.6). **No abre la etapa siguiente**: cuál sigue es asunto del flujo, y el
-   flujo todavía no existe.
+   la misma sentencia (§2.6). **Si con esa firma no queda nada abierto en la fase, la siguiente
+   fase arranca** en la misma sentencia (§2.12).
 8. **Los valores.** `produced_by_stage_id` nulo significa «vino de la solicitud».
 9. **El cierre.** Se rechaza mientras quede una etapa `active` o `waiting_external`. Archivar es
    un acto aparte con su propia columna, porque cerrar y dejar de ver no son lo mismo.
@@ -1793,10 +1934,12 @@ Lo que cada paso hace por dentro, en una línea:
 Cuatro cosas. Ninguna es un olvido, pero tampoco todas son decisiones firmes:
 
 - **El estatus visible.** Por §8.1, y ésa sí es una decisión.
-- **La etapa siguiente.** Falta E. Es el hueco que más se nota, porque está exactamente donde las
-  entrevistas pusieron el dolor: perseguir vistos buenos.
-- **El reparto de área.** Decisión de F: el libro no sabe a quién le toca, y un área por omisión
-  habría escondido el problema en vez de mostrarlo.
+- **El aviso de la etapa siguiente.** Desde `flow-templates` la fase siguiente arranca sola al
+  firmar la última etapa abierta; lo que falta es que alguien se entere, que son las
+  `notifications` de EST (§6).
+- **El flujo de cada solicitud.** Decisión de F: el libro no sabe por qué áreas va a pasar, y un
+  flujo por omisión habría escondido el problema en vez de mostrarlo. Alguien le aplica una
+  plantilla o le diseña uno (§2.5).
 - **El estatus de una solicitud ya convertida.** Éste **no** es una decisión, es un pendiente:
   §8.4.
 
@@ -1821,7 +1964,7 @@ Escribir el recorrido completo sirvió para esto. Cinco cosas, de la más barata
 4. **Nada avisa cuando el estatus visible y la máquina se contradicen.** Por §8.1 no se van a
    unir, pero sí se puede ver: el proyecto ya publica `activeStageIds`. **Costaría** que la
    pantalla los muestre juntos; no es una tabla, es una vista.
-5. **El flujo declarativo (E).** Es la única de las cinco que es trabajo de verdad: tablas de
-   `workflows`, validación del grafo, instanciación al convertir y avance al firmar, con ramas
-   concurrentes para `RF-FLW-09`. El recorrido de §8.2 es la especificación contra la que hay que
-   revisarlo: si E no puede describir los pasos 5, 6 y 7 tal como están, es E lo que está mal.
+5. **El flujo declarativo (E).** Las plantillas por fases y el avance al firmar entraron con
+   `flow-templates` (§2.1, §2.12, §2.17). Falta la instanciación: que un proyecto —o la conversión
+   de una solicitud— parta de una versión de plantilla (§6). El recorrido de §8.2 sigue siendo la
+   especificación contra la que hay que revisarlo.

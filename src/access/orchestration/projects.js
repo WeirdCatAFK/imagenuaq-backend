@@ -1,14 +1,24 @@
 // Tier 3: projects, their stages, the sign-offs that move them and the values they carry
 // (RF-PRY-02, RF-FLW-01, RF-FLW-03, RF-FLW-06).
 //
-// Three rules from DATAMODEL.md hold here and are easy to break:
+// **A stage is a definition plus its executions** (`flow-templates`, DATAMODEL.md §2.17). The
+// definition -- area, title, what it needs and owes -- is a `flow_stages` row inside one of the
+// project's `flow_phases`; each attempt at it is a `project_stages` row. `query.js` joins the
+// two and hands them up under the old column names, so a stage here still reads as one row
+// with `project_id`, `area_id`, `title` and `seq` (the phase). Editing the title, the keys or
+// the notes changes the definition, and so every attempt; status, assignee and dates belong
+// to one attempt.
+//
+// Four rules from DATAMODEL.md hold here and are easy to break:
 //
 //   - **A project has no current stage.** The active stage is the set of `project_stages`
-//     rows with `status = 'active'` (§2.1); `seq` is display order and decides nothing.
+//     rows with `status = 'active'` (§2.1). Stages in one phase run in parallel.
 //   - **`status_id` and `status_since` move together**, in the same UPDATE (§2.7). The
 //     history goes to `logs`, not to a table of its own.
 //   - **A stage repeats by `attempt`** (§2.6): a rejected sign-off closes the row and opens
-//     a fresh one for the same stage, so what happened stays readable.
+//     the same definition again, so what happened stays readable.
+//   - **Approving the last open stage of a phase opens the next phase** (RF-FLW-04, §2.12):
+//     its pending stages become active in the statement that closes this one.
 //
 // **A stage declares what it needs and what it owes.** `inputs` are the field keys whoever
 // works it needs to have at hand; `outputs` are the keys it is expected to produce. Only the
@@ -17,9 +27,9 @@
 // design could not close without capturing it. Inputs are informational, because a value that
 // never arrived is why a stage waits on a third party (RF-FLW-07), not a capture error.
 //
-// Stages are created by hand here. When the declarative workflow lands they are instantiated
-// from `workflow_stages` instead, and `advanceStage()` in query.js is already the statement
-// that walk will reuse -- nothing in this module's shape has to change for it.
+// Stages are created by hand here, each phase as `Fase <seq>` the first time a stage names
+// that seq. Starting a project from a flow template (`orchestration/workflows.js`) is the next
+// increment; it copies the template's definitions into the project's own phases.
 //
 // A sign-off needs `project.write` and nothing more: the permission is the policy. Gating it
 // on membership of the stage's area was considered and declined -- RF-FLW-03 asks for the
@@ -29,6 +39,7 @@ import statuses from "./statuses.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
+import { requireFieldKey, requireKeyList } from "../../utils/fieldKeys.js";
 
 const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
@@ -39,7 +50,8 @@ const KEY_MAX = 50;
 const KEY_FORMAT = /^[A-Z0-9][A-Z0-9_-]*$/;
 const TITLE_MAX = 300;
 const REQUESTER_MAX = 300;
-const FIELD_KEY_MAX = 100;
+const NOTE_MAX = 2000;
+const DAYS_MAX = 365;
 
 /** The status a project starts at when the caller names none (RF-EST-01). */
 const DEFAULT_STATUS = "recibido";
@@ -65,9 +77,13 @@ class Projects {
    * @param {string} [input.key] Omitted: `PRY-000001` from the sequence.
    * @param {string} [input.requester] The requesting party, as a string (§2.11).
    * @param {{key: string, value: unknown}[]} [input.fieldValues]
-   * @param {object[]} [input.stages] `{areaId, title, seq?, assignedTo?}`; the lowest seq
-   *   starts active, the rest pending.
+   * @param {object[]} [input.stages] `{areaId, title, seq?, assignedTo?, inputs?, outputs?,
+   *   inputNote?, outputNote?, estimatedDays?}`; `seq` is the phase, and the lowest phase
+   *   starts active while the rest wait.
    * @param {number[]} [input.requestIds] Requests to link (RF-PRY-01).
+   * @param {object} [input.requestFlow] Set by `requests.convert()` only: `{requestId,
+   *   workflowVersionId, areaIds, discardRequestIds}` -- the request whose flow the project
+   *   takes instead of `stages`, and the other requests whose flows are dropped.
    * @returns {Promise<object>} The project as `getById()` shapes it.
    * @throws {ApiError} 400 on a bad payload or an unknown reference, 409 on a duplicate key
    *   or on a request that is already converted.
@@ -76,7 +92,13 @@ class Projects {
     key, title, description = null, requester = null, schemaVersionId = null, statusId = null,
     priority = 0, hasCost = false, carriedOver = false, startsOn = null, dueOn = null,
     folderId = null, eventCollectionId = null, fieldValues = [], stages = [], requestIds = [],
+    requestFlow = null,
   }) {
+    const normalisedStages = normaliseStages(stages);
+    // An area status has to belong to an area the project works in: its stages, or its flow.
+    const areaSources = requestFlow
+      ? requestFlow.areaIds.map((areaId) => ({ areaId }))
+      : normalisedStages;
     const payload = {
       key: key === undefined || key === null ? null : requireKey(key),
       title: requireText(title, "title", TITLE_MAX),
@@ -90,11 +112,14 @@ class Projects {
       dueOn: optionalDate(dueOn, "dueOn"),
       folderId: optionalId(folderId, "folderId"),
       eventCollectionId: optionalId(eventCollectionId, "eventCollectionId"),
-      statusId: await this.#resolveStatus(statusId, stages),
+      statusId: await this.#resolveStatus(statusId, areaSources),
       fieldValues: normaliseFieldValues(fieldValues),
-      stages: normaliseStages(stages),
+      stages: normalisedStages,
       requestIds: uniqueIds(requestIds, "requestIds"),
       createdBy: currentActor()?.id ?? null,
+      flowRequestId: requestFlow?.requestId ?? null,
+      discardFlowRequestIds: requestFlow?.discardRequestIds ?? [],
+      workflowVersionId: requestFlow?.workflowVersionId ?? null,
     };
 
     let row;
@@ -354,13 +379,15 @@ class Projects {
   }
 
   /**
-   * Adds a stage by hand. `attempt` is computed from the rows already there, so adding the
-   * same area and seq twice reruns it rather than colliding.
+   * Adds a stage by hand at the end of phase `seq`, creating the phase when the project has
+   * none there. The same area twice in one phase is two stages -- a proposal and its internal
+   * review, say; a rerun only ever comes from a rejected sign-off.
    *
    * @throws {ApiError} 400 on a bad payload or unknown area/user, 404.
    */
   async addStage(projectId, {
     areaId, title, seq = 1, status = "pending", assignedTo = null, inputs = [], outputs = [],
+    inputNote = null, outputNote = null, estimatedDays = null,
   }) {
     const id = requireId(projectId, "projectId");
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
@@ -374,26 +401,42 @@ class Projects {
     }
 
     try {
-      const row = await query.createProjectStage({
+      const { stage, definition, phase } = await query.addProjectStage({
         projectId: id,
+        seq: requirePhaseSeq(seq, "seq"),
         areaId: requireId(areaId, "areaId"),
         title: requireText(title, "title", TITLE_MAX),
-        seq: requireInt(seq, "seq"),
         status: state,
         assignedTo: optionalId(assignedTo, "assignedTo"),
         inputs: requireKeyList(inputs, "inputs"),
         outputs: requireKeyList(outputs, "outputs"),
+        inputNote: optionalText(inputNote, "inputNote", NOTE_MAX),
+        outputNote: optionalText(outputNote, "outputNote", NOTE_MAX),
+        estimatedDays: optionalDays(estimatedDays, "estimatedDays"),
       });
 
+      if (phase) {
+        await events.emit({
+          action: "record_created",
+          target: { table: "flow_phases", id: phase.id },
+          after: phase,
+        });
+      }
       await events.emit({
         action: "record_created",
-        target: { table: "project_stages", id: row.id },
-        after: row,
+        target: { table: "flow_stages", id: definition.id },
+        after: definition,
       });
-      if (row.status === "active") await emitStage("stage_activated", row);
+      await events.emit({
+        action: "record_created",
+        target: { table: "project_stages", id: stage.id },
+        after: stage,
+      });
+      if (stage.status === "active") await emitStage("stage_activated", stage);
 
-      // Re-read so the response carries the area's name, as every other stage read does.
-      return shapeStage(await query.getProjectStage(row.id));
+      // Re-read so the response carries the definition and the area's name, as every other
+      // stage read does.
+      return shapeStage(await query.getProjectStage(stage.id));
     } catch (err) {
       throw translate(err);
     }
@@ -404,10 +447,14 @@ class Projects {
    * a third party with the reason RF-FLW-07 asks for, `→ cancelled` drops it. `done` is not
    * reachable here: a stage is completed by a sign-off, which is what RF-FLW-03 records.
    *
+   * `title`, `inputs`, `outputs`, the notes and `estimatedDays` edit the definition, which
+   * every attempt of the stage shares; the rest edits this attempt.
+   *
    * @throws {ApiError} 400 on an illegal transition or a missing reason, 404.
    */
   async updateStage(projectId, stageId, {
-    title, status, blockedReason, assignedTo, inputs, outputs,
+    title, status, blockedReason, assignedTo, inputs, outputs, inputNote, outputNote,
+    estimatedDays,
   }) {
     const { id, before } = await this.#ownStage(projectId, stageId);
 
@@ -431,6 +478,11 @@ class Projects {
       assignedTo: assignedTo === undefined ? null : optionalId(assignedTo, "assignedTo"),
       inputs: inputs === undefined ? null : requireKeyList(inputs, "inputs"),
       outputs: outputs === undefined ? null : requireKeyList(outputs, "outputs"),
+      // Undefined means "not sent", so a note or the days can be cleared with an explicit null.
+      inputNote: inputNote === undefined ? undefined : optionalText(inputNote, "inputNote", NOTE_MAX),
+      outputNote: outputNote === undefined ? undefined : optionalText(outputNote, "outputNote", NOTE_MAX),
+      estimatedDays:
+        estimatedDays === undefined ? undefined : optionalDays(estimatedDays, "estimatedDays"),
       // Leaving the blocked state clears the reason: it described a wait that is over.
       clearBlocked:
         before.status === "waiting_external" && next !== undefined && next !== "waiting_external",
@@ -439,22 +491,32 @@ class Projects {
     if (
       payload.title === null && payload.status === null && payload.blockedReason === null &&
       payload.assignedTo === null && payload.inputs === null && payload.outputs === null &&
-      !payload.clearBlocked
+      payload.inputNote === undefined && payload.outputNote === undefined &&
+      payload.estimatedDays === undefined && !payload.clearBlocked
     ) {
       throw ApiError.badRequest("Nothing to update.");
     }
 
-    let row;
+    let updated;
     try {
-      row = await query.updateProjectStage(id, payload);
+      updated = await query.updateProjectStage(id, payload);
     } catch (err) {
       throw translate(err);
     }
+    const row = updated.stage;
 
+    if (updated.definition) {
+      await events.emit({
+        action: "record_updated",
+        target: { table: "flow_stages", id: updated.definition.id },
+        before: definitionOf(before),
+        after: updated.definition,
+      });
+    }
     await events.emit({
       action: "record_updated",
       target: { table: "project_stages", id },
-      before,
+      before: executionOf(before),
       after: row,
     });
     if (before.status !== "active" && row.status === "active") {
@@ -471,8 +533,8 @@ class Projects {
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
    * work stays visible instead of overwriting what happened (§2.6).
    *
-   * The next stage is not opened here: which stage follows is the flow's business, and the
-   * flow does not exist yet. Until it does, whoever runs the project starts the next stage.
+   * An approval that leaves nothing open in the stage's phase starts the next phase
+   * (RF-FLW-04): its pending stages come back in `opened`, next to the rerun in `reopened`.
    *
    * @param {{decision: 'approved'|'rejected', comment?: string, evidenceFileId?: number}} input
    * @throws {ApiError} 400 on a bad decision or unknown evidence file, 404, 409 when the
@@ -525,21 +587,9 @@ class Projects {
       throw translate(err);
     }
 
-    const rerun =
-      decision === "rejected"
-        ? [{
-            areaId: before.area_id,
-            title: before.title,
-            seq: before.seq,
-            assignedTo: before.assigned_to,
-            inputs: before.inputs ?? [],
-            outputs: before.outputs ?? [],
-          }]
-        : [];
-
     let advanced;
     try {
-      advanced = await query.advanceStage(id, { status: "done", nextStages: rerun });
+      advanced = await query.advanceStage(id, { status: "done", rerun: decision === "rejected" });
     } catch (err) {
       throw translate(err);
     }
@@ -550,7 +600,9 @@ class Projects {
       after: approval,
     });
     await emitStage("stage_completed", advanced.stage);
-    for (const opened of advanced.opened) await emitStage("stage_activated", opened);
+    for (const stage of [...advanced.reopened, ...advanced.opened]) {
+      await emitStage("stage_activated", stage);
+    }
 
     // One read for the whole project's stages rather than one per row, so the response
     // carries the area names the list reads carry.
@@ -562,7 +614,8 @@ class Projects {
     return {
       approval: shapeApproval(approval),
       stage: withArea(advanced.stage),
-      reopened: advanced.opened.map(withArea),
+      reopened: advanced.reopened.map(withArea),
+      opened: advanced.opened.map(withArea),
     };
   }
 
@@ -773,30 +826,6 @@ function requireKey(value) {
   return key;
 }
 
-/** A declaration of inputs or outputs: field keys, unique, in the order given. */
-function requireKeyList(value, field) {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw ApiError.badRequest(`${field} must be an array of field keys.`);
-
-  const out = [];
-  for (const entry of value) {
-    const key = requireFieldKey(entry);
-    if (!out.includes(key)) out.push(key);
-  }
-  return out;
-}
-
-function requireFieldKey(value) {
-  const text = cleanText(value);
-  if (text === null) throw ApiError.badRequest("A field key is required.");
-  if (!/^[a-z][a-z0-9_]{0,99}$/.test(text) || text.length > FIELD_KEY_MAX) {
-    throw ApiError.badRequest(
-      "A field key must be snake_case: a lowercase letter, then letters, digits or _ (100 max).",
-    );
-  }
-  return text;
-}
-
 function requireInt(value, field) {
   const n = Number(value);
   if (!Number.isInteger(n)) throw ApiError.badRequest(`${field} must be an integer.`);
@@ -886,7 +915,10 @@ function normaliseFieldValues(fieldValues) {
   return out;
 }
 
-/** The lowest `seq` starts the project; the rest wait. */
+/**
+ * `seq` is the phase. The lowest phase starts the project and the rest wait; within a phase,
+ * stages keep the order they were sent in (`position`).
+ */
 function normaliseStages(stages) {
   if (!Array.isArray(stages)) throw ApiError.badRequest("stages must be an array.");
   if (stages.length === 0) return [];
@@ -898,15 +930,74 @@ function normaliseStages(stages) {
     return {
       areaId: requireId(stage.areaId, "stages[].areaId"),
       title: requireText(stage.title, "stages[].title", TITLE_MAX),
-      seq: stage.seq === undefined ? index + 1 : requireInt(stage.seq, "stages[].seq"),
+      seq: stage.seq === undefined ? index + 1 : requirePhaseSeq(stage.seq, "stages[].seq"),
       assignedTo: optionalId(stage.assignedTo, "stages[].assignedTo"),
       inputs: requireKeyList(stage.inputs, "stages[].inputs"),
       outputs: requireKeyList(stage.outputs, "stages[].outputs"),
+      inputNote: optionalText(stage.inputNote, "stages[].inputNote", NOTE_MAX),
+      outputNote: optionalText(stage.outputNote, "stages[].outputNote", NOTE_MAX),
+      estimatedDays: optionalDays(stage.estimatedDays, "stages[].estimatedDays"),
     };
   });
 
   const first = Math.min(...parsed.map((stage) => stage.seq));
-  return parsed.map((stage) => ({ ...stage, status: stage.seq === first ? "active" : "pending" }));
+  const taken = new Map();
+  return parsed.map((stage) => {
+    const position = (taken.get(stage.seq) ?? 0) + 1;
+    taken.set(stage.seq, position);
+    return { ...stage, position, status: stage.seq === first ? "active" : "pending" };
+  });
+}
+
+/** A phase number: phases start at 1 (`flow_phases_seq_positive`). */
+function requirePhaseSeq(value, field) {
+  const seq = requireInt(value, field);
+  if (seq < 1) throw ApiError.badRequest(`${field} is a phase number and starts at 1.`);
+  return seq;
+}
+
+/** Working days, optional on a project stage: a positive integer up to a year. */
+function optionalDays(value, field) {
+  if (value === undefined || value === null || value === "") return null;
+  const days = requireInt(value, field);
+  if (days < 1 || days > DAYS_MAX) {
+    throw ApiError.badRequest(`${field} must be a whole number of days from 1 to ${DAYS_MAX}.`);
+  }
+  return days;
+}
+
+/**
+ * A joined stage row split back into its two tables, so the audit trail records each row as
+ * it is stored rather than the join the rest of this module reads.
+ */
+function definitionOf(stage) {
+  return {
+    id: stage.flow_stage_id,
+    phase_id: stage.phase_id,
+    seq: stage.position,
+    area_id: stage.area_id,
+    title: stage.title,
+    input_keys: stage.inputs,
+    output_keys: stage.outputs,
+    input_note: stage.input_note,
+    output_note: stage.output_note,
+    estimated_days: stage.estimated_days,
+  };
+}
+
+function executionOf(stage) {
+  return {
+    id: stage.id,
+    flow_stage_id: stage.flow_stage_id,
+    attempt: stage.attempt,
+    status: stage.status,
+    blocked_reason: stage.blocked_reason,
+    assigned_to: stage.assigned_to,
+    event_id: stage.event_id,
+    started_at: stage.started_at,
+    ended_at: stage.ended_at,
+    created_at: stage.created_at,
+  };
 }
 
 /** RF-FLW-04's hook: the notifier will subscribe to these two rather than to record_updated. */
@@ -944,6 +1035,7 @@ function shapeProject(row) {
     description: row.description,
     requester: row.requester,
     schemaVersionId: row.schema_version_id,
+    workflowVersionId: row.workflow_version_id ?? null,
     statusId: row.status_id,
     statusCode: row.status_code,
     statusLabel: row.status_label,
@@ -1001,10 +1093,14 @@ function shapeStage(row) {
   return {
     id: row.id,
     projectId: row.project_id,
+    flowStageId: row.flow_stage_id,
+    phaseId: row.phase_id,
+    phaseName: row.phase_name ?? null,
+    seq: row.seq,
+    position: row.position,
     areaId: row.area_id,
     areaName: row.area_name ?? null,
     title: row.title,
-    seq: row.seq,
     attempt: row.attempt,
     status: row.status,
     blockedReason: row.blocked_reason,
@@ -1016,6 +1112,9 @@ function shapeStage(row) {
     createdAt: row.created_at,
     inputs: row.inputs ?? [],
     outputs: row.outputs ?? [],
+    inputNote: row.input_note ?? null,
+    outputNote: row.output_note ?? null,
+    estimatedDays: row.estimated_days ?? null,
   };
 }
 
@@ -1051,6 +1150,9 @@ function translate(err) {
     if (err.constraint === "uq_project_stages_attempt") {
       return ApiError.conflict("That stage was already advanced; read it again.");
     }
+    if (err.constraint === "uq_flow_phases_project_seq" || err.constraint === "uq_flow_stages_phase_seq") {
+      return ApiError.conflict("That phase was changed meanwhile; read it again.");
+    }
     return ApiError.conflict("That record already exists.");
   }
   if (err?.code === FOREIGN_KEY_VIOLATION) {
@@ -1062,6 +1164,9 @@ function translate(err) {
     }
     if (err.constraint === "project_stages_blocked_reason_present") {
       return ApiError.badRequest("blockedReason is required when a stage waits on a third party.");
+    }
+    if (err.constraint === "flow_phases_seq_positive") {
+      return ApiError.badRequest("seq is a phase number and starts at 1.");
     }
     return ApiError.badRequest("That value is not allowed here.");
   }

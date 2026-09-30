@@ -105,8 +105,16 @@ export async function resetCases(keepEmails = []) {
   await sql('delete from approvals');
   await sql('delete from project_field_values');
   await sql('delete from project_stages');
+  // Definitions before phases, phases before the requests, projects and versions they belong
+  // to, and the versions after the requests and projects that record which one they came from
+  // (`workflow_version_id`). All of it before users and areas, which a stage names. Nothing
+  // seeds a template, so they go whole.
+  await sql('delete from flow_stages');
+  await sql('delete from flow_phases');
   await sql('delete from requests');
   await sql('delete from projects');
+  await sql('delete from workflow_versions');
+  await sql('delete from workflows');
   // Import runs, then the books, then the accounts: each references the next, and none is seeded.
   await sql('delete from sheet_imports');
   // Las marcas van con su libro por CASCADE, pero se borran aquí igual: el orden de esta función

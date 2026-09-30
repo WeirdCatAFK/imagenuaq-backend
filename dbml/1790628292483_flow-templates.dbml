@@ -447,7 +447,6 @@ Table "projects" {
   "archived_at" timestamptz
   "deleted_at" timestamptz
   "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se hereda de la solicitud al convertir.']
-  "workflow_version_id" int8 [note: 'La version de plantilla de la que salio su flujo (DATAMODEL 2.2); nulo si se armo a mano.']
 
   Indexes {
     (priority, created_at) [type: btree, name: "idx_projects_open"]
@@ -482,7 +481,6 @@ Table "requests" {
   "source_data" jsonb [note: 'RF-SOL-06: el renglón completo indexado por encabezado, incluidas las columnas que el mapeo ignora.']
   "source_hash" varchar(64) [note: 'RF-MIG-02: sha256 de las celdas que el mapeo declara, normalizadas. Único por libro; es lo que impide importar dos veces la misma fila.']
   "possible_duplicate_of" int8 [note: 'La solicitud que esta probablemente corrige: mismo título y solicitante en el mismo libro, con la huella cambiada. Lo resuelve una persona.']
-  "workflow_version_id" int8 [note: 'La version de plantilla de la que se copio su flujo; nulo si se diseno desde cero o no tiene flujo.']
 
   Indexes {
     (sheet_id, source_hash) [type: btree, unique, name: "uq_requests_sheet_hash"]
@@ -660,15 +658,13 @@ Table "flow_phases" {
   "project_id" int8
   "seq" int4 [not null, note: 'Orden de la fase dentro de su flujo. Es lo que decide que fase sigue.']
   "name" varchar(100) [not null]
-  "request_id" int8 [note: 'Solicitud duena mientras no se convierte (DATAMODEL 2.5). Al convertir, la fase pasa al proyecto.']
 
   Indexes {
     (project_id, seq) [type: btree, unique, name: "uq_flow_phases_project_seq"]
-    (request_id, seq) [type: btree, unique, name: "uq_flow_phases_request_seq"]
     (workflow_version_id, seq) [type: btree, unique, name: "uq_flow_phases_version_seq"]
   }
-  Note: '''RF-FLW-02, RF-FLW-09: una fase del flujo. Sus etapas trabajan en paralelo; la siguiente fase empieza cuando esta termina. Pertenece a una version de plantilla, a una solicitud o a un proyecto: exactamente a uno.
-CHECK flow_phases_one_owner: num_nonnulls(workflow_version_id, project_id, request_id) = 1
+  Note: '''RF-FLW-02, RF-FLW-09: una fase del flujo. Sus etapas trabajan en paralelo; la siguiente fase empieza cuando esta termina. Pertenece a una version de plantilla o a un proyecto, nunca a los dos.
+CHECK flow_phases_one_owner: num_nonnulls(workflow_version_id, project_id) = 1
 CHECK flow_phases_seq_positive: seq >= 1'''
 }
 
@@ -756,8 +752,6 @@ Ref "files_folder_id_fkey":"folders"."id" < "files"."folder_id"
 
 Ref "flow_phases_project_id_fkey":"projects"."id" < "flow_phases"."project_id"
 
-Ref "flow_phases_request_id_fkey":"requests"."id" < "flow_phases"."request_id"
-
 Ref "flow_phases_workflow_version_id_fkey":"workflow_versions"."id" < "flow_phases"."workflow_version_id" [delete: cascade]
 
 Ref "flow_stages_area_id_fkey":"areas"."id" < "flow_stages"."area_id"
@@ -808,8 +802,6 @@ Ref "projects_schema_version_id_fkey":"schema_versions"."id" < "projects"."schem
 
 Ref "projects_status_id_fkey":"statuses"."id" < "projects"."status_id"
 
-Ref "projects_workflow_version_id_fkey":"workflow_versions"."id" < "projects"."workflow_version_id"
-
 Ref "requests_area_id_fkey":"areas"."id" < "requests"."area_id"
 
 Ref "requests_assignee_id_fkey":"users"."id" < "requests"."assignee_id"
@@ -827,8 +819,6 @@ Ref "requests_schema_version_id_fkey":"schema_versions"."id" < "requests"."schem
 Ref "requests_sheet_id_fkey":"sheets"."id" < "requests"."sheet_id"
 
 Ref "requests_status_id_fkey":"statuses"."id" < "requests"."status_id"
-
-Ref "requests_workflow_version_id_fkey":"workflow_versions"."id" < "requests"."workflow_version_id"
 
 Ref "role_permissions_permission_id_fkey":"permissions"."id" < "role_permissions"."permission_id" [delete: cascade]
 

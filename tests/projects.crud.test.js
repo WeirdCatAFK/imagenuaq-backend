@@ -118,6 +118,7 @@ describe("/api/projects", () => {
       assert.equal(stages[1].startedAt, null);
       assert.deepEqual(activeStageIds, [stages[0].id]);
       assert.equal(stages[0].attempt, 1);
+      assert.deepEqual(stages.map((s) => s.phaseName), ["Fase 1", "Fase 2"], "seq is the phase");
 
       const logs = await logsFor("project_stages", stages[0].id);
       assert.deepEqual(logs.map((l) => l.action), ["stage_activated"]);

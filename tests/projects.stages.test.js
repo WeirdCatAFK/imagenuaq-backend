@@ -82,14 +82,90 @@ describe("/api/projects/:id/stages", () => {
     assert.deepEqual(logs.map((l) => l.action), ["record_created", "stage_activated"]);
   });
 
-  test("the same area and seq again is the next attempt, not a collision", async () => {
+  test("the same area and seq again is a second stage in that phase, not a rerun", async () => {
     const made = await project();
-    const first = await addStage(made.id, { areaId: area.id, title: "Diseño", seq: 1 });
-    const second = await addStage(made.id, { areaId: area.id, title: "Diseño", seq: 1 });
+    const first = await addStage(made.id, { areaId: area.id, title: "Propuesta", seq: 1 });
+    const second = await addStage(made.id, { areaId: area.id, title: "V.B. interno", seq: 1 });
 
     assert.equal(second.status, 201);
     assert.equal(first.body.stage.attempt, 1);
-    assert.equal(second.body.stage.attempt, 2);
+    assert.equal(second.body.stage.attempt, 1);
+    assert.equal(second.body.stage.phaseId, first.body.stage.phaseId);
+    assert.equal(first.body.stage.phaseName, "Fase 1");
+    assert.notEqual(second.body.stage.flowStageId, first.body.stage.flowStageId);
+    assert.deepEqual([first.body.stage.position, second.body.stage.position], [1, 2]);
+
+    const phases = await logsFor("flow_phases", first.body.stage.phaseId);
+    assert.deepEqual(phases.map((row) => row.action), ["record_created"]);
+    const definitions = await logsFor("flow_stages", second.body.stage.flowStageId);
+    assert.deepEqual(definitions.map((row) => row.action), ["record_created"]);
+  });
+
+  test("a new seq opens its own phase, and phases start at 1", async () => {
+    const made = await project();
+    const first = await addStage(made.id, { areaId: area.id, title: "Diseño", seq: 1 });
+    const later = await addStage(made.id, { areaId: other.id, title: "Impresión", seq: 2 });
+
+    assert.equal(later.status, 201);
+    assert.equal(later.body.stage.phaseName, "Fase 2");
+    assert.notEqual(later.body.stage.phaseId, first.body.stage.phaseId);
+
+    const zero = await addStage(made.id, { areaId: area.id, title: "X", seq: 0 });
+    assert.equal(zero.status, 400);
+    assert.match(zero.body.error.message, /starts at 1/);
+  });
+
+  test("notes and days round-trip, and null clears them", async () => {
+    const made = await project();
+    const res = await addStage(made.id, {
+      areaId: area.id,
+      title: "Diseño",
+      inputNote: "Oficio de la entidad",
+      outputNote: "PDF de propuesta",
+      estimatedDays: 4,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.stage.inputNote, "Oficio de la entidad");
+    assert.equal(res.body.stage.outputNote, "PDF de propuesta");
+    assert.equal(res.body.stage.estimatedDays, 4);
+
+    const cleared = await patchStage(made.id, res.body.stage.id, {
+      inputNote: null,
+      estimatedDays: null,
+    });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.stage.inputNote, null);
+    assert.equal(cleared.body.stage.estimatedDays, null);
+    assert.equal(cleared.body.stage.outputNote, "PDF de propuesta");
+
+    const tooLong = await addStage(made.id, { areaId: area.id, title: "X", estimatedDays: 400 });
+    assert.equal(tooLong.status, 400);
+  });
+
+  test("a retitle reaches every attempt; a reassignment touches only one", async () => {
+    const worker = await createActive({ email: "diseno@uaq.mx", role: "worker" });
+    const made = await project();
+    const res = await addStage(made.id, { areaId: area.id, title: "Diseño", status: "active" });
+    const stage = res.body.stage;
+
+    const rejected = await server.post(`/api/projects/${made.id}/stages/${stage.id}/approvals`, {
+      token: adminToken,
+      body: { decision: "rejected", comment: "Otra vez" },
+    });
+    assert.equal(rejected.status, 201);
+    const rerun = rejected.body.reopened[0];
+    assert.equal(rerun.flowStageId, stage.flowStageId);
+
+    const retitled = await patchStage(made.id, rerun.id, { title: "Diseño corregido" });
+    assert.equal(retitled.status, 200);
+    const reassigned = await patchStage(made.id, rerun.id, { assignedTo: worker.id });
+    assert.equal(reassigned.status, 200);
+
+    const list = await server.get(`/api/projects/${made.id}/stages`, { token: adminToken });
+    assert.deepEqual(
+      list.body.stages.map((s) => [s.attempt, s.title, s.assignedTo]),
+      [[1, "Diseño corregido", null], [2, "Diseño corregido", worker.id]],
+    );
   });
 
   test("refuses to create a stage done or blocked", async () => {
