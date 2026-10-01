@@ -10,3 +10,12 @@ coverage/
 dist/
 .DS_Store
 CLAUDE.md
+
+# MinIO AIStor - datos de ejecución local
+/tests/minio/disk1/
+/tests/minio/disk2/
+/tests/minio/disk3/
+/tests/minio/disk4/
+
+# MinIO AIStor - licencia local
+/minio.license
