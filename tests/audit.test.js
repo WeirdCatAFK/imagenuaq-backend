@@ -1,3 +1,8 @@
+// RF-USR-07: who created, modified or deleted each relevant record. The trail is written by
+// a subscriber to the domain events orchestration emits (src/utils/events.js ->
+// src/access/orchestration/audit.js), so these cases drive the real endpoints over HTTP and
+// then read `logs` directly -- asserting on the rows rather than on the emit calls is what
+// makes them a test of the trail and not of the plumbing.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -16,11 +21,6 @@ import {
   TEST_PREFIX,
 } from './helpers/fixtures.js';
 
-// RF-USR-07: who created, modified or deleted each relevant record. The trail is written by
-// a subscriber to the domain events orchestration emits (src/utils/events.js ->
-// src/access/orchestration/audit.js), so these cases drive the real endpoints over HTTP and
-// then read `logs` directly -- asserting on the rows rather than on the emit calls is what
-// makes them a test of the trail and not of the plumbing.
 describe('the audit trail', () => {
   let server;
   let adminToken;
@@ -38,7 +38,6 @@ describe('the audit trail', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -46,8 +45,6 @@ describe('the audit trail', () => {
   beforeEach(() => resetCases(ACCOUNTS));
 
   describe('attribution', () => {
-    // The point of the AsyncLocalStorage context: nothing was passed an actor, and the row
-    // still knows who did it.
     test('records the signed-in user as the actor', async () => {
       const created = await server.post('/api/areas', {
         token: adminToken,
@@ -61,9 +58,6 @@ describe('the audit trail', () => {
     });
 
     test('a change made outside a request has no actor rather than a wrong one', async () => {
-      // createArea() goes straight through query.js, so no event is emitted at all and no
-      // row appears. The case that matters is that this does NOT inherit the actor of some
-      // other request -- a leaked AsyncLocalStorage store would attribute it to the admin.
       const area = await createArea('Sin Petición');
 
       assert.deepEqual(await logsFor('areas', area.id), []);
@@ -108,8 +102,6 @@ describe('the audit trail', () => {
       assert.equal(row.after_data, null);
     });
 
-    // Re-parenting is targeted at the area that moved, not at area_hierarchy, so that an
-    // area's history reads as one list.
     test('a move records where the area came from and where it went', async () => {
       const parent = await createArea('Coordinación');
       const child = await createArea('Diseño');
@@ -132,8 +124,6 @@ describe('the audit trail', () => {
       assert.deepEqual(rows[1].after_data, { parent_area_id: other.id });
     });
 
-    // An audit trail that records requests rather than changes fills with rows saying
-    // nothing happened.
     test('clearing a parent that was never set records nothing', async () => {
       const area = await createArea('Ya Raíz');
 
@@ -145,8 +135,6 @@ describe('the audit trail', () => {
     });
   });
 
-  // The reason redaction is a pattern and not a list of columns: `users` is the only audited
-  // table with a secret today, and it must not be the last one anybody remembers.
   describe('redaction', () => {
     test('a users row never carries password_hash into the trail', async () => {
       const created = await server.post('/api/users', {
@@ -187,8 +175,6 @@ describe('the audit trail', () => {
 
       const logins = (await allLogs()).filter((row) => row.action === 'user_login');
       assert.ok(logins.length >= 1);
-      // There is no session when this is emitted, so the actor cannot come from the request
-      // context -- it is passed explicitly. A null here means that override was dropped.
       assert.notEqual(logins.at(-1).user_id, null);
     });
 
@@ -204,7 +190,6 @@ describe('the audit trail', () => {
       assert.equal(row.after_data.password, undefined, 'the attempt must not carry it');
     });
 
-    // logs.user_id is nullable for exactly this row: there is nobody to attribute it to.
     test('an attempt on an unknown address is recorded with no actor', async () => {
       await server.post('/api/auth/login', {
         body: { email: 'nadie@uaq.mx', password: PASSWORD },
@@ -229,9 +214,6 @@ describe('the audit trail', () => {
     });
   });
 
-  // permission_granted / permission_revoked are their own action codes rather than generic
-  // verbs over role_permissions, because RF-USR-05 makes "who gave this role that permission"
-  // the question worth being able to ask.
   describe('permission grants', () => {
     let role;
 
@@ -278,8 +260,6 @@ describe('the audit trail', () => {
       assert.equal(grants.length, 1);
     });
 
-    // Replacing a set records the difference, not the request. A single "permissions
-    // replaced" row would leave the reader diffing two lists by eye.
     test('replacing the set records only what actually changed', async () => {
       await server.put(`/api/roles/${role.id}/permissions`, {
         token: adminToken,
@@ -295,8 +275,6 @@ describe('the audit trail', () => {
         row.action.startsWith('permission_'),
       );
 
-      // Two grants from the first call, then one grant and one revoke from the second --
-      // project.read survived the edit and must not appear again.
       assert.deepEqual(
         rows.map((row) => row.action),
         [
@@ -309,8 +287,6 @@ describe('the audit trail', () => {
     });
   });
 
-  // logs.area_id is what makes RF-USR-04 answerable -- a responsable de área consulting the
-  // work of everyone under them, rather than naming each person one at a time.
   describe('the area an action belonged to', () => {
     test('is stamped from the actor primary area, without being asked for', async () => {
       const area = await createArea('Con Miembros');
@@ -321,14 +297,11 @@ describe('the audit trail', () => {
       await sql('update users set primary_area_id = $2 where id = $1', [worker.id, area.id]);
       const workerToken = await tokenFor(server, 'conarea@uaq.mx');
 
-      // Any action by that user: the login it just performed.
       const [login] = (await allLogs()).filter((row) => row.action === 'user_login');
       assert.equal(login.area_id, area.id);
       assert.ok(workerToken);
     });
 
-    // The reason it is not read from the token. A session minted before the move keeps the
-    // old area for up to seven days; the trail must not.
     test('follows a move immediately, even on a token minted before it', async () => {
       const before = await createArea('Antes');
       const after = await createArea('Después');
@@ -337,13 +310,8 @@ describe('the audit trail', () => {
       await sql('update users set primary_area_id = $2 where id = $1', [mover.id, before.id]);
       const staleToken = await tokenFor(server, 'cambia@uaq.mx');
 
-      // Moved after the token was signed. The token still says `before`.
       await sql('update users set primary_area_id = $2 where id = $1', [mover.id, after.id]);
 
-      // The token's own `areaId` claim still says `before` -- it was signed before the move
-      // and claims are immutable. What /me answers no longer comes from it: verifyToken()
-      // rebuilds the subject from the row, so the response already follows the move. The
-      // trail below has to do the same for a different reason, and by a different route.
       const me = await server.get('/api/auth/me', { token: staleToken });
       assert.equal(me.body.user.areaId, after.id, 'the subject is rebuilt from the row');
 
@@ -355,7 +323,6 @@ describe('the audit trail', () => {
     });
 
     test('is null when the actor has no area, not zero or a placeholder', async () => {
-      // The admin fixture was created without one.
       const created = await server.post('/api/areas', {
         token: adminToken,
         body: { name: `${TEST_PREFIX}Sin Área` },
@@ -392,8 +359,6 @@ describe('the audit trail', () => {
       assert.equal(trail[0].action, 'user_login_failed', 'newest first');
       assert.equal(trail[0].area.id, area.id);
       assert.equal(trail[0].area.name, `${TEST_PREFIX}Auditable`);
-      // user_login_failed has no object, and the shaping must say so rather than inventing
-      // a target with two nulls in it.
       assert.equal(trail[0].target, null);
     });
 
@@ -404,9 +369,6 @@ describe('the audit trail', () => {
     });
   });
 
-  // The read side. There is no endpoint for it yet -- the bitácora screen is frontend work
-  // -- so this is exercised directly rather than over HTTP. Without these cases forTarget()
-  // would be code nobody runs, which is the same mistake as a table nobody reads.
   describe('reading one object\'s history', () => {
     test('returns the trail newest first, with the actor resolved to a name', async () => {
       const audit = (await import('../src/access/orchestration/audit.js')).default;
@@ -447,15 +409,11 @@ describe('the audit trail', () => {
         body: { email: 'nadie@uaq.mx', password: PASSWORD },
       });
 
-      // user_login_failed on an unknown address has no target, so it is looked up the only
-      // way it can be. The point is that the LEFT JOIN to users survives a null user_id.
       const [row] = (await allLogs()).filter((r) => r.action === 'user_login_failed');
       assert.equal(row.user_id, null);
     });
   });
 
-  // The dispatcher contains a failing subscriber rather than letting it escape into the
-  // request. An audit bug must not turn a successful change into a 500.
   describe('a broken subscriber does not break the request', () => {
     test('the write succeeds even when the trail cannot be written', async () => {
       const events = (await import('../src/utils/events.js')).default;
@@ -474,7 +432,6 @@ describe('the audit trail', () => {
         });
 
         assert.equal(res.status, 201);
-        // And the audit subscriber, which runs alongside the broken one, still wrote.
         assert.equal((await logsFor('areas', res.body.area.id)).length, 1);
       } finally {
         events.off('exploding');

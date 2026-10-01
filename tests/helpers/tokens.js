@@ -13,8 +13,10 @@ const secret = () => encode(process.env.JWT_SECRET);
 const issuer = () => process.env.API_DOMAIN || 'http://localhost:3000';
 const audience = () => process.env.FRONTEND_DOMAIN || 'http://localhost:5173';
 
-// One builder, so a negative token differs from a valid one in exactly the field under
-// test. A test that changed two things at once would pass for the wrong reason.
+/**
+ * One builder, so a negative token differs from a valid one in exactly the field under
+ * test. A test that changed two things at once would pass for the wrong reason.
+ */
 export function mint({
   subject = '1',
   purpose = 'session',
@@ -32,8 +34,6 @@ export function mint({
     .setIssuedAt()
     .setIssuer(iss)
     .setAudience(aud)
-    // jose accepts a negative span, which is how an already-expired token is made without
-    // making the suite wait for one.
     .setExpirationTime(expiresIn)
     .sign(key);
 }
@@ -49,10 +49,12 @@ export const expired = (options) => mint({ ...options, expiresIn: '-1s' });
 
 export const noPurpose = (options) => mint({ ...options, purpose: null });
 
-// A well-formed session token for a user, identical in every claim to what issueToken()
-// produces. Used by the role-guard tests so they cost one signature instead of a bcrypt
-// comparison each -- the login path that would otherwise mint these is covered in full by
-// auth.login.test.js, so re-walking it per guard test buys nothing but seconds.
+/**
+ * A well-formed session token for a user, identical in every claim to what issueToken()
+ * produces. Used by the role-guard tests so they cost one signature instead of a bcrypt
+ * comparison each -- the login path that would otherwise mint these is covered in full by
+ * auth.login.test.js, so re-walking it per guard test buys nothing but seconds.
+ */
 export const session = (user) =>
   mint({
     subject: String(user.id),
@@ -62,13 +64,7 @@ export const session = (user) =>
       fullName: user.full_name,
       roleId: user.role_id,
       role: user.role_name,
-      // Same claim issueToken() signs. Omitting it would make these tokens the only ones in
-      // the system with no area, and the difference would show up as a puzzling null in
-      // whichever test reached for it first.
       areaId: user.primary_area_id ?? null,
-      // verifyToken() compares this against the row, so a token minted here for a fixture
-      // user has to match it. `?? 0` is the column default, which is what every freshly
-      // created fixture has.
       tokenVersion: user.token_version ?? 0,
     },
   });

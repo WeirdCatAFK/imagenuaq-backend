@@ -10,8 +10,8 @@ import {
   createSchema,
   tokenFor,
   logsFor,
-  roleId,
   sql,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
 describe("/api/projects", () => {
@@ -41,7 +41,6 @@ describe("/api/projects", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -51,13 +50,8 @@ describe("/api/projects", () => {
     area = await createArea("Diseño de prueba");
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   const create = (body, token = adminToken) => server.post("/api/projects", { token, body });
 
@@ -173,7 +167,6 @@ describe("/api/projects", () => {
       const stolen = await create({ title: "Robo", requestIds: ids });
       assert.equal(stolen.status, 409);
 
-      // The refused call leaves nothing behind.
       const [{ n }] = await sql("select count(*)::int as n from projects where deleted_at is null");
       assert.equal(n, 1);
     });
@@ -258,7 +251,6 @@ describe("/api/projects", () => {
       assert.deepEqual((await get("hasCost=false")).map((p) => p.key), ["SIN-COSTO"]);
       assert.deepEqual((await get("q=sin")).map((p) => p.key), ["SIN-COSTO"]);
       assert.deepEqual((await get("q=CON-")).map((p) => p.key), ["CON-COSTO"]);
-      // RF-IMP-08: find the project by the order number a stage produced.
       assert.deepEqual((await get("fieldKey=numero_orden&fieldValue=A-77")).map((p) => p.key), ["CON-COSTO"]);
       assert.deepEqual(await get("fieldKey=numero_orden&fieldValue=B-00"), []);
     });

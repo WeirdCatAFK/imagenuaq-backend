@@ -42,14 +42,19 @@ import { validateColumnMap, applyMapping, rowHash } from "../../utils/columnMap.
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  cleanText,
+  requireId,
+} from "../../utils/validate.js";
 
 /** Where an imported row starts when its map says nothing about status (RF-EST-01). */
 const DEFAULT_STATUS = "recibido";
 
-/** Column widths from projects-spine; checked here so a 22001 becomes a 400 naming the field. */
+/**
+ *  Column widths from projects-spine; checked here so a 22001 becomes a 400 naming the field.
+ */
 const NAME_MAX = 300;
 const ID_MAX = 255;
 const TABLE_MAX = 200;
@@ -187,10 +192,6 @@ class Spreadsheets {
   /**
    * Points the book at a format version and saves how its columns feed it (RF-MIG-02).
    *
-   * The map is checked against that version's fields, and against the sheet's real headers when
-   * the caller passes them -- which is what turns a renamed column into a refusal at save time
-   * instead of a surprise per row at import time. The wizard passes the headers it just read.
-   *
    * @param {number} sheetId
    * @param {{ schemaVersionId: number, columnMap: object, headers?: unknown[] }} input
    * @throws {ApiError} 400 naming every problem with the map, 404.
@@ -224,7 +225,9 @@ class Spreadsheets {
     return this.getById(id);
   }
 
-  /** Back to unmapped. What is already imported keeps its own capture. @throws {ApiError} 404 */
+  /**
+   *  Back to unmapped. What is already imported keeps its own capture. @throws {ApiError} 404
+   */
   async clearMapping(sheetId) {
     const id = requireId(sheetId, "sheetId");
     const sheet = await query.getSheet(id);
@@ -244,10 +247,6 @@ class Spreadsheets {
 
   /**
    * The first rows as the map would read them, without writing anything.
-   *
-   * The wizard calls this with an unsaved map so a person can see the transformation before
-   * committing to it -- which is the only honest way to judge a mapping, since the questions it
-   * answers ("is that column the tiraje?") are about the data and not about the rule.
    *
    * @param {number} sheetId
    * @param {{ columnMap?: object, schemaVersionId?: number }} input Omitted: what is saved.
@@ -341,14 +340,6 @@ class Spreadsheets {
   /**
    * Marks every row the book has right now as already seen, without creating anything.
    *
-   * This is how a tracker that already carries months of history becomes usable: the rows that
-   * were handled long before the system existed are drawn a line under, and from then on only
-   * what somebody adds gets imported. Importing them instead would mint two dozen requests nobody
-   * will work, and leaving them alone means every future run re-reads them and re-reports the ones
-   * missing a required field.
-   *
-   * Needs the mapping, because a row's identity is the hash of the columns `hashColumns` names.
-   *
    * @param {number} sheetId
    * @param {{dryRun?: boolean}} [options] `dryRun` counts and writes nothing.
    * @returns {Promise<{rowsRead: number, rowsMarked: number, rowsAlreadyKnown: number,
@@ -398,8 +389,6 @@ class Spreadsheets {
       throw ApiError.conflict(`The sheet no longer matches its mapping: ${errors.join(" ")}`);
     }
 
-    // Sólo la huella: marcar no lee ni valida los valores, porque no va a guardar ninguno. Una
-    // fila a la que le falta un campo obligatorio se puede marcar, y de hecho es el caso normal.
     const seen = await query.listSourceHashes(sheet.id);
     const hashes = read.rows.map((row) => rowHash(map, read.headers, row));
     const nuevas = [...new Set(hashes.filter((hash) => !seen.has(hash)))];
@@ -432,9 +421,6 @@ class Spreadsheets {
   /**
    * Undoes the marking: the rows become unknown again and the next import brings them in.
    *
-   * Exists because marking is one click with a large consequence, and a decision with no way back
-   * would leave rows outside the system for good.
-   *
    * @returns {Promise<{rowsCleared: number}>}
    * @throws {ApiError} 404.
    */
@@ -456,9 +442,6 @@ class Spreadsheets {
   /**
    * The import itself, given rows somebody already read.
    *
-   * Separated from `import()` so it can be tested with fixture rows and no network: the part
-   * worth testing is what happens to a row, not that Graph answered.
-   *
    * @param {object} sheet A `sheets` row, mapped.
    * @param {{ headers: unknown[], rows: unknown[][], texts?: unknown[][], truncated?: boolean }} read
    * @param {{ dryRun?: boolean }} [options]
@@ -471,7 +454,6 @@ class Spreadsheets {
     const fields = fieldList(version.fields);
     const { map, errors: mapErrors } = validateColumnMap(sheet.column_map, fields, read.headers);
     if (mapErrors.length > 0) {
-      // The map was valid when it was saved, so this means the sheet changed underneath it.
       throw ApiError.conflict(`The book no longer matches its mapping: ${mapErrors.join(" ")}`);
     }
 
@@ -488,11 +470,8 @@ class Spreadsheets {
     const failures = [];
 
     for (const [index, row] of read.rows.entries()) {
-      // The row's own texts, not the whole matrix: cellAt() indexes what it is given by COLUMN,
-      // so handing it the matrix made `from: "text"` return an entire row.
       const out = applyMapping(map, fields, read.headers, row, read.texts?.[index] ?? []);
 
-      // Already in: the row's identity is known. Nothing is updated -- the state lives here now.
       if (seen.has(out.sourceHash)) {
         counters.rowsSkipped += 1;
         continue;
@@ -504,8 +483,6 @@ class Spreadsheets {
         continue;
       }
 
-      // A row that looks like the correction of one already imported: it comes in, flagged, and a
-      // person decides. Only reachable when the map hashes content rather than an id column.
       const twin = await query.findProbableDuplicate({
         sheetId: sheet.id,
         title: out.title,
@@ -525,7 +502,6 @@ class Spreadsheets {
           title: out.title,
           data: out.data,
           requester: out.requester,
-          // No area: an imported row is routed by hand from the inbox.
           areaId: null,
           statusId: out.statusCode === null ? fallback : await this.#statusId(out.statusCode),
           priority: out.priority,
@@ -547,8 +523,6 @@ class Spreadsheets {
           after: request,
         });
       } catch (err) {
-        // A row that collides on the hash was imported by a run happening at the same time;
-        // anything else is this row's problem and the next row is still worth trying.
         counters.rowsFailed += 1;
         failures.push({ index, message: translate(err).message });
       }
@@ -559,9 +533,6 @@ class Spreadsheets {
     }
 
     const finished = await query.finishSheetImport(run.id, { ...counters, errors: failures });
-    // The run row was inserted by this same call a moment ago, so a miss here means somebody
-    // deleted it underneath us. Saying so beats dereferencing null in shapeImport(), which is
-    // what used to happen: a TypeError that named a field instead of the problem.
     if (!finished) {
       throw new Error(`Import run ${run.id} disappeared before it could be closed.`);
     }
@@ -650,29 +621,12 @@ function shapeImport(row) {
   };
 }
 
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
 function isHttpsUrl(value) {
   try {
     return new URL(value).protocol === "https:";
   } catch {
     return false;
   }
-}
-
-function requireId(value, field) {
-  if (typeof value === "boolean" || value === null || value === undefined) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const n = Number(value);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return n;
 }
 
 /** snake_case row in, camelCase JSON out. `mapped` is what the UI shows, not a column. */
@@ -688,8 +642,6 @@ function shapeSheet(row) {
     columnMap: row.column_map,
     mapped: row.schema_version_id !== null,
     lastImportedAt: row.last_imported_at,
-    // Filas marcadas como ya vistas sin importarlas: la pantalla ofrece deshacerlo, así que
-    // tiene que poder decir cuántas son.
     markedRows: row.marked_rows ?? 0,
     accountId: row.microsoft_account_id,
     accountEmail: row.account_email ?? null,

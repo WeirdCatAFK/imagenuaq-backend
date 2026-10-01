@@ -29,9 +29,12 @@
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  cleanText,
+  requireId,
+} from "../../utils/validate.js";
 
 /**
  * The one role requireRole() names by string: routes/roles.js and the write half of
@@ -53,8 +56,6 @@ const PERMISSION_LABEL_MAX = 200;
 const PERMISSION_CODE = /^[a-z0-9]+(\.[a-z0-9]+)+$/;
 
 class Roles {
-  // --- Roles ---
-
   async create({ name, description = null }) {
     const cleanName = cleanText(name);
     if (!cleanName || cleanName.length > ROLE_NAME_MAX) {
@@ -100,10 +101,6 @@ class Roles {
   /**
    * Updates only the keys the caller sent, merged against the current row.
    *
-   * Renaming is allowed and is more dangerous than it looks: requireRole() compares
-   * `roles.name`, and every JWT already issued carries the OLD name for seven days, so a
-   * rename locks out everyone holding a live token until they log in again.
-   *
    * @param {number|string} roleId
    * @param {{ name?: string, description?: string|null }} changes
    * @returns {Promise<object>}
@@ -135,8 +132,6 @@ class Roles {
       });
       if (!role) throw ApiError.notFound("Role not found.");
 
-      // A rename changes what requireRole() compares, so "why did everyone stop being able
-      // to do X" has an answer here and nowhere else.
       await events.emit({
         action: "record_updated",
         target: { table: "roles", id: role.id },
@@ -153,10 +148,6 @@ class Roles {
   /**
    * Deletes a role, refusing while anyone still holds it. The count is in the message
    * because a bare 409 leaves the admin guessing how much reassigning is left.
-   *
-   * There is no automatic reassignment: `users.role_id` is NOT NULL, so the alternative
-   * to refusing is picking a role for those users, which silently grants or revokes access
-   * on their behalf. The foreign key would refuse too; this check exists to say why.
    *
    * @param {number|string} roleId
    * @throws {ApiError} 403 for the admin role, 404 when it does not exist, 409 while it
@@ -190,7 +181,6 @@ class Roles {
 
       return shapeRole(role);
     } catch (err) {
-      // The race the count cannot close: a user assigned this role in between.
       if (err?.code === FOREIGN_KEY_VIOLATION) {
         throw ApiError.conflict(
           "That role is still held by at least one user; reassign them first.",
@@ -200,12 +190,7 @@ class Roles {
     }
   }
 
-  // --- Permissions ---
-
   async createPermission({ code, label, description = null }) {
-    // Trimmed but NOT case-folded. Lower-casing first would let `Project.Read` through the
-    // pattern and then collide with the seeded `project.read`, giving the caller a 409
-    // about a permission they did not think they were creating.
     const cleanCode = cleanText(code);
     const cleanLabel = cleanText(label);
 
@@ -327,8 +312,6 @@ class Roles {
     return shapePermission(permission);
   }
 
-  // --- Grants (RF-USR-05) ---
-
   async getRolePermissions(roleId) {
     const id = requireId(roleId, "roleId");
     if (!(await query.getRoleById(id))) {
@@ -359,9 +342,6 @@ class Roles {
     try {
       const row = await query.grantPermissionToRole(role, permission);
 
-      // `permission_granted` and `permission_revoked` are their own action codes rather
-      // than record_created/deleted on a join table: "who gave finance.read to whom, and
-      // when" is the question RF-USR-05 makes worth asking.
       if (row !== null) {
         await events.emit({
           action: "permission_granted",
@@ -398,9 +378,6 @@ class Roles {
    * sequence values that differ per database, so the same request would grant different
    * permissions on staging and in production.
    *
-   * Resolved to ids here so query.js can replace in one statement: a delete-then-insert
-   * pair leaves the role holding nothing in between.
-   *
    * @param {number|string} roleId
    * @param {string[]} codes
    * @returns {Promise<object>}
@@ -416,12 +393,9 @@ class Roles {
       throw ApiError.badRequest("permissions must be an array of permission codes.");
     }
 
-    // Deduplicated: the same code twice is one grant, and would otherwise make the length
-    // comparison below report a phantom unknown code.
     const wanted = [
       ...new Set(
         codes.map((code) => {
-          // Trimmed only, as in createPermission().
           const clean = cleanText(code);
           if (!clean) {
             throw ApiError.badRequest("permissions must be non-empty strings.");
@@ -431,8 +405,6 @@ class Roles {
       ),
     ];
 
-    // One by one rather than a single IN (...): the caller deserves to be told WHICH code
-    // was wrong, and a count mismatch cannot say. The catalogue is eleven rows.
     const ids = [];
     for (const code of wanted) {
       const permission = await query.getPermissionByCode(code);
@@ -442,8 +414,6 @@ class Roles {
       ids.push(permission.id);
     }
 
-    // Read the current set so the trail records what actually changed. A single
-    // "permissions replaced" row would be cheaper and close to useless.
     const held = await query.getRolePermissions(id);
     const heldIds = new Set(held.map((permission) => permission.id));
     const wantedIds = new Set(ids);
@@ -455,8 +425,6 @@ class Roles {
       throw translate(err);
     }
 
-    // After the write, and only for the differences: emitting before would record grants
-    // that a failed statement never made.
     for (const permissionId of ids) {
       if (heldIds.has(permissionId)) continue;
       await events.emit({
@@ -476,33 +444,6 @@ class Roles {
 
     return result;
   }
-}
-
-/**
- * Trims, and turns an empty string into null. Duplicated from orchestration/areas.js
- * rather than shared: a shared helper is where the first special case would go.
- *
- * @returns {string | null}
- */
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-function toId(value) {
-  if (typeof value === "boolean" || value === null || value === undefined)
-    return null;
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function requireId(value, field) {
-  const id = toId(value);
-  if (id === null) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
 }
 
 function shapeRole(row) {

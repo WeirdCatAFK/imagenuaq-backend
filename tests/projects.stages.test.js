@@ -1,3 +1,5 @@
+// The stage machine (RF-FLW-01, RF-FLW-07). `done` is not reachable from here: a stage is
+// completed by a sign-off, which projects.approvals covers.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -12,8 +14,6 @@ import {
   sql,
 } from "./helpers/fixtures.js";
 
-// The stage machine (RF-FLW-01, RF-FLW-07). `done` is not reachable from here: a stage is
-// completed by a sign-off, which projects.approvals covers.
 describe("/api/projects/:id/stages", () => {
   let server;
   let adminToken;
@@ -30,7 +30,6 @@ describe("/api/projects/:id/stages", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -282,7 +281,6 @@ describe("/api/projects/:id/stages", () => {
       ],
     });
 
-    // Same seq, so both start: the current stage is a set, not a pointer.
     assert.equal(made.activeStageIds.length, 2);
     assert.deepEqual(made.stages.map((s) => s.status), ["active", "active"]);
   });

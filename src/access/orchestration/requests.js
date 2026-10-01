@@ -24,13 +24,22 @@ import statuses from "./statuses.js";
 import projects from "./projects.js";
 import { validatePhases } from "./workflows.js";
 import { fieldList } from "./schemas.js";
-import { validateData } from "../../utils/fieldValues.js";
+import { storedText, validateData } from "../../utils/fieldValues.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  cleanText,
+  requireText,
+  optionalText,
+  requireId,
+  optionalId,
+  uniqueIds,
+  requireInt,
+  optionalBoolean,
+} from "../../utils/validate.js";
 
 const TITLE_MAX = 300;
 const REQUESTER_MAX = 300;
@@ -134,10 +143,23 @@ class Requests {
       offset,
     });
 
-    // `total` es de la consulta, no de la página: sin él la bandeja no puede decir cuánto falta
-    // por ver. Con cero filas no hay de dónde leerlo y el total es cero.
     const total = rows.length === 0 ? 0 : Number(rows[0].total);
     return { requests: rows.map(shapeListed), total, limit, offset };
+  }
+
+  /**
+   * Requester names already in use, most used first, for the autocomplete (RF-SOL-07).
+   *
+   * @param {{ q?: string, limit?: string|number }} [filters] `q` is a prefix; `limit` 1-100.
+   * @returns {Promise<Array<{ name: string, uses: number }>>}
+   */
+  async listRequesters({ q, limit } = {}) {
+    const cap = Number(limit);
+    const rows = await query.listRequesters({
+      q: cleanText(q),
+      limit: Number.isInteger(cap) && cap > 0 && cap <= 100 ? cap : 20,
+    });
+    return rows.map((row) => ({ name: row.requester, uses: row.uses }));
   }
 
   /**
@@ -177,7 +199,6 @@ class Requests {
       assigneeId: input.assigneeId === undefined ? null : optionalId(input.assigneeId, "assigneeId"),
       priority: input.priority === undefined ? null : requireInt(input.priority, "priority"),
       data,
-      // `null` clears the duplicate flag: somebody looked and said these are not the same.
       possibleDuplicateOf:
         input.possibleDuplicateOf === undefined || input.possibleDuplicateOf === null
           ? null
@@ -220,7 +241,6 @@ class Requests {
     if (!row) throw ApiError.badRequest("That status does not exist.");
     if (row.is_active === false) throw ApiError.badRequest("That status is inactive.");
     if (row.area_id !== null && String(row.area_id) !== String(before.area_id)) {
-      // An area that has the request in its inbox through the flow may use its own statuses.
       const [flow] = await query.getRequestFlowAreas([id]);
       const inbox = (flow?.first_phase_area_ids ?? []).map(String);
       if (!inbox.includes(String(row.area_id))) {
@@ -346,20 +366,6 @@ class Requests {
   /**
    * Turns a request into a project (RF-PRY-01), optionally answering several at once.
    *
-   * What travels: the requester (correctable here, which is where the autocomplete lands), the
-   * format version, and **every captured value** as a `project_field_values` row keyed by its
-   * field code — no per-field opt-in, because the propagation exists for the later tools to read
-   * (§2.11). `produced_by_stage_id` stays null: it came from the request, not from a stage.
-   *
-   * On a multi-request conversion the first request wins a repeated key and the rest come back
-   * in `conflicts` rather than being silently dropped.
-   *
-   * **The flow travels too** (§2.5): the project takes the flow of the first request that has
-   * one -- the same phases, now owned by the project, each stage with its first attempt -- and
-   * any other request's flow is dropped and named in `discardedFlows`. `stages` builds the
-   * stages by hand instead, and sending them for a request that has a flow is refused: it
-   * would be two answers to the same question.
-   *
    * @param {number} requestId
    * @param {object} [input] `key`, `title`, `requester`, `stages`, `requestIds` and the project
    *   flags; anything omitted is taken from the request.
@@ -443,8 +449,6 @@ class Requests {
     return { project, conflicts, discardedFlows: others.map((row) => row.folio) };
   }
 
-  // --- Internals ---
-
   /** The version to capture under: one named directly, or the format's latest. */
   async #resolveVersion({ schemaId, schemaVersionId }) {
     if (schemaVersionId !== null && schemaVersionId !== undefined) {
@@ -483,8 +487,6 @@ class Requests {
   }
 }
 
-/* HELPERS */
-
 /**
  * Every captured value of every request, as field values for the project. First request wins a
  * repeated key; the losers are reported so a conversion does not quietly pick one.
@@ -503,12 +505,12 @@ function mergeCaptures(requests) {
           key,
           folio: request.folio,
           kept: seen.get(key),
-          discarded: stringify(value),
+          discarded: storedText(value),
         });
         continue;
       }
 
-      const text = stringify(value);
+      const text = storedText(value);
       if (text === null) continue;
       seen.set(key, text);
       fieldValues.push({ key, value: text });
@@ -516,13 +518,6 @@ function mergeCaptures(requests) {
   }
 
   return { fieldValues, conflicts };
-}
-
-function stringify(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string") return value.trim() === "" ? null : value.trim();
-  if (typeof value === "boolean" || typeof value === "number") return String(value);
-  return JSON.stringify(value);
 }
 
 /**
@@ -533,26 +528,6 @@ function stringify(value) {
  */
 function badCapture(errors) {
   return ApiError.badRequest(errors.map((entry) => entry.message).join(" "));
-}
-
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-function requireText(value, field, max) {
-  const text = cleanText(value);
-  if (text === null) throw ApiError.badRequest(`${field} is required.`);
-  if (typeof text !== "string" || text.length > max) {
-    throw ApiError.badRequest(`${field} must be a string of ${max} characters or fewer.`);
-  }
-  return text;
-}
-
-function optionalText(value, field, max) {
-  const text = cleanText(value);
-  return text === null ? null : requireText(text, field, max);
 }
 
 function requireSource(source) {
@@ -578,51 +553,10 @@ function requireAnySource(source) {
   return value;
 }
 
-function requireInt(value, field) {
-  const n = Number(value);
-  if (!Number.isInteger(n)) throw ApiError.badRequest(`${field} must be an integer.`);
-  return n;
-}
-
-function optionalBoolean(value, field) {
-  if (value === undefined || value === null || value === "") return null;
-  if (value === true || value === "true") return true;
-  if (value === false || value === "false") return false;
-  throw ApiError.badRequest(`${field} must be a boolean.`);
-}
-
-function requireId(value, field) {
-  if (value === null || value === undefined || typeof value === "boolean") {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
-}
-
-/**
- * The area filter, which also answers "the ones with no area".
- *
- * An imported row arrives unrouted (the sheet says which faculty asked, not which area works
- * it), so the inbox has to be able to ask for exactly those to triage them. `-1` is what the
- * query reads as "no area at all"; it is not an id anybody can hold.
- */
+/** The area filter, which also answers "the ones with no area". */
 function areaFilter(value) {
   if (value === "none") return -1;
   return optionalId(value, "areaId");
-}
-
-function optionalId(value, field) {
-  if (value === null || value === undefined || value === "") return null;
-  return requireId(value, field);
-}
-
-function uniqueIds(values, field) {
-  if (values === undefined || values === null) return [];
-  if (!Array.isArray(values)) throw ApiError.badRequest(`${field} must be an array.`);
-  return [...new Set(values.map((value) => requireId(value, field)))];
 }
 
 function shapeRequest(row) {
@@ -637,9 +571,6 @@ function shapeRequest(row) {
     schemaCode: row.schema_code,
     schemaName: row.schema_name,
     schemaVersion: row.schema_version,
-    // Rebuilt rather than passed through: jsonb sorts object keys by length then bytes, so the
-    // document comes back as { information, deliverables } and a client reading it in order
-    // would render the sections backwards.
     fields: row.schema_fields
       ? {
           deliverables: row.schema_fields.deliverables ?? [],
@@ -648,8 +579,6 @@ function shapeRequest(row) {
       : null,
     areaId: row.area_id,
     areaName: row.area_name ?? null,
-    // The flow it is routed by, or null. `workflowId` and `version` name the template it was
-    // copied from; both are null for a flow designed for this request.
     flow:
       Array.isArray(row.flow_phases) && row.flow_phases.length > 0
         ? {
@@ -672,7 +601,6 @@ function shapeRequest(row) {
     sheetId: row.sheet_id,
     sheetName: row.sheet_name ?? null,
     sourceIndex: row.source_index,
-    // The raw row as the book held it, unmapped columns included (RF-SOL-06).
     sourceData: row.source_data,
     sourceHash: row.source_hash,
     possibleDuplicateOf: row.possible_duplicate_of,
@@ -697,7 +625,6 @@ function shapeListed(row) {
     areaId: row.area_id,
     areaName: row.area_name ?? null,
     hasFlow: row.has_flow ?? false,
-    // The inboxes it sits in through its flow: the areas of the first phase.
     firstPhaseAreas: row.first_phase_areas ?? [],
     statusId: row.status_id,
     statusCode: row.status_code,

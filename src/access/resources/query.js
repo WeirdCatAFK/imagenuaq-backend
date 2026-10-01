@@ -15,9 +15,11 @@
 // connection up to orchestration, which is what this module exists to prevent.
 import { getStore } from "../primitives/database.js";
 
-// A project stage as everything above this tier reads it: the execution row joined to its
-// definition, with the definition's columns under the names project_stages carried before the
-// flow-templates migration split them. `seq` is the phase; `position` is the order within it.
+/**
+ * A project stage as everything above this tier reads it: the execution row joined to its
+ * definition, with the definition's columns under the names project_stages carried before the
+ * flow-templates migration split them. `seq` is the phase; `position` is the order within it.
+ */
 const STAGE_COLUMNS = `
   ps.*, fp.project_id, fs.area_id, fs.title, fp.seq, fs.seq as position,
   fs.input_keys as inputs, fs.output_keys as outputs, fs.input_note, fs.output_note,
@@ -41,21 +43,14 @@ class Query {
    *
    * @param {Array} ids
    */
-  // An empty JS array serialises as '' and Postgres refuses it as an array literal, so an
-  // empty list becomes NULL: `= any(NULL)` matches nothing and `unnest(NULL)` yields no rows,
-  // which is what every caller means by "none".
   #idArray(ids) {
     return ids.length ? ids : null;
   }
-
-  // --- Health ---
 
   async ping() {
     const [row] = await this.#rows("select 1 as ok");
     return row?.ok === 1;
   }
-
-  // --- Auth ---
 
   /**
    * One live user with the role name joined in: everything a session token needs, in a
@@ -142,8 +137,6 @@ class Query {
     return rows.map((row) => row.code);
   }
 
-  // --- Users ---
-
   /**
    * Creates a user and, when an area is given, their `area_members` row, in one
    * data-modifying CTE. Writes no password hash: the account is reached through the
@@ -160,7 +153,6 @@ class Query {
     birthday = null,
     isAreaLeader = false,
   }) {
-    // The ::bigint casts are required; Postgres cannot infer $5's type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into users (email, full_name, role_id, contract_type_id,
@@ -300,10 +292,6 @@ class Query {
   /**
    * Soft-deletes an account and revokes its outstanding sessions in the same statement.
    *
-   * The bump belongs here rather than in a second call: between two statements there is a
-   * window where the account is gone and its token still works, which is the exact hole
-   * this column was added to close.
-   *
    * @returns {Promise<object | null>} The deleted row, or null if it was already gone.
    */
   async deleteUser(userId) {
@@ -317,7 +305,6 @@ class Query {
     );
     return row ?? null;
   }
-  // --- User Helpers ---
 
   /**
    * Stores a profile picture and its type, or clears both when `data` is null.
@@ -455,7 +442,6 @@ class Query {
     );
     return row?.id ?? null;
   }
-  // --- Audit trail (RF-USR-07) ---
 
   /**
    * The whole action catalogue. Callers cache it; codes are stable, ids are per database.
@@ -543,8 +529,6 @@ class Query {
     return rows;
   }
 
-  // --- Areas ---
-
   /**
    * Creates an area and, when given, its first leader and its parent, in one
    * data-modifying CTE -- the same shape as createUser(). Neither side write can be left
@@ -558,7 +542,6 @@ class Query {
    * @returns {Promise<object>} The area row plus `parent_area_id` as written.
    */
   async createArea({ name, description, userId = null, parentAreaId = null }) {
-    // The ::bigint casts are required; Postgres cannot infer a type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into areas (name, description)
@@ -615,8 +598,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  // --- Area Helpers ---
 
   async getAreaById(areaId) {
     const [row] = await this.#rows(
@@ -745,8 +726,6 @@ class Query {
     return rows;
   }
 
-  // --- Area hierarchy (RF-USR-09, RF-USR-04) ---
-
   /** Upserts the child's parent. `child_area_id` is the whole key: one parent per area. */
   async setAreaParent(childAreaId, parentAreaId) {
     const [row] = await this.#rows(
@@ -834,8 +813,6 @@ class Query {
     );
     return rows;
   }
-
-  // --- Roles & Permissions ---
 
   async createRole({ name, description }) {
     const [row] = await this.#rows(
@@ -965,8 +942,6 @@ class Query {
     return row ?? null;
   }
 
-  // --- Role & Permission helpers ---
-
   /** One role's grants as full rows; getRolePermissionCodes() is the codes-only version. */
   async getRolePermissions(roleId) {
     const rows = await this.#rows(
@@ -1015,8 +990,6 @@ class Query {
    */
   async setRolePermissions(roleId, permissionIds) {
     const rows = await this.#rows(
-      // coalesce is repeated rather than hoisted: `<> all (select ...)` would compare
-      // bigint to bigint[].
       `with revoked as (
          delete from role_permissions
           where role_id = $1
@@ -1037,8 +1010,6 @@ class Query {
     );
     return rows;
   }
-
-  //--- REQUESTS (RF-SOL-03) ---
 
   /**
    * A request. `folio` comes from the sequence, never from the caller (RF-SOL-03). A 23505 on
@@ -1252,9 +1223,6 @@ class Query {
 
   /** Every hash already taken from a book, so an import can skip what it has seen. */
   async listSourceHashes(sheetId) {
-    // Las dos formas de conocer una fila: tener su solicitud, o haberla marcado como ya vista sin
-    // importarla (`sheet_row_marks`). La importación las trata igual --- se saltan ---, que es
-    // justamente lo que hace utilizable un rastreador que ya traía historia.
     const rows = await this.#rows(
       `select source_hash from requests
         where sheet_id = $1 and source_hash is not null and deleted_at is null
@@ -1300,21 +1268,9 @@ class Query {
     return row?.n ?? 0;
   }
 
-  //--- PROJECTS (RF-PRY-02) ---
-
   /**
    * A project, the requests it converts, its first field values and its first stages, in one
    * statement. `key` omitted takes the sequence default.
-   *
-   * The requests update returns its own count so orchestration can tell "linked three" from
-   * "one of them was already converted" without a second read; a partial link is impossible
-   * because it is the same statement.
-   *
-   * `flowRequestId` names a request whose flow the project takes (DATAMODEL §2.5): its phases
-   * change owner to the project, each stage gets its first attempt -- the first phase active --
-   * and the suggested person becomes the assignee if still an active member of the area.
-   * `discardFlowRequestIds` are the other converted requests, whose flows go. Both happen only
-   * when every request linked, so a lost race leaves the flows where they were.
    */
   async createProject({
     key = null, title, description = null, requester = null, schemaVersionId = null,
@@ -1449,8 +1405,6 @@ class Query {
         this.#idArray(stages.map((st) => st.seq)),
         this.#idArray(stages.map((st) => st.position)),
         this.#idArray(stages.map((st) => st.status)),
-        // postgrejs infers a param's type from its values and cannot type an all-null array,
-        // so "nothing" travels as '' and comes back to NULL in the statement.
         this.#idArray(stages.map((st) => (st.assignedTo == null ? '' : String(st.assignedTo)))),
         this.#idArray(stages.map((st) => JSON.stringify(st.inputs ?? []))),
         this.#idArray(stages.map((st) => JSON.stringify(st.outputs ?? []))),
@@ -1664,8 +1618,6 @@ class Query {
     );
   }
 
-  //--- PROJECT STAGES (RF-FLW-01) ---
-
   /**
    * Adds a stage to a project: its phase (created as `Fase <seq>` when the project has none at
    * that seq), its definition at the end of that phase, and its first attempt, in one
@@ -1752,11 +1704,6 @@ class Query {
    * shared by every attempt, so a retitle or a new output reaches the history too; the
    * execution columns belong to this attempt alone.
    *
-   * `started_at` is stamped the first time a stage becomes active and `ended_at` when it
-   * leaves the flow, both here rather than in orchestration so a status change cannot forget
-   * its timestamp. A note or the days are cleared by sending them with a null value, which is
-   * why each travels with a flag saying whether it was sent.
-   *
    * @returns {Promise<{ stage: object, definition: object|null }|null>}
    */
   async updateProjectStage(stageId, {
@@ -1817,15 +1764,6 @@ class Query {
 
   /**
    * Closes a stage and opens what follows it, in one statement.
-   *
-   * A rejection (`rerun`) opens the same definition again at the next attempt; the attempt
-   * is `max + 1` for that definition, which is what the unique index counts, so two callers
-   * racing collide on the index instead of on each other.
-   *
-   * Closing a stage `done` without a rerun advances the flow (RF-FLW-04): when nothing else
-   * in its phase is still pending, active or waiting, the pending stages of the next phase
-   * that has any become active. Everything here reads the statement's snapshot, where the
-   * stage being closed is still open -- hence it is excluded by id rather than by status.
    *
    * @param {number} stageId
    * @param {{ status?: string, rerun?: boolean }} input
@@ -1898,8 +1836,6 @@ class Query {
     };
   }
 
-  //--- APPROVALS (RF-FLW-03) ---
-
   async createApproval({ projectStageId, decision, approverUserId, comment = null, evidenceFileId = null }) {
     const [row] = await this.#rows(
       `insert into approvals (
@@ -1923,9 +1859,9 @@ class Query {
     );
   }
 
-  //--- PROJECT FIELD VALUES (RF-FLW-06, RF-IMP-08) ---
-
-  /** One row per key per project; a correction is an UPDATE that moves the provenance with it. */
+  /**
+   *  One row per key per project; a correction is an UPDATE that moves the provenance with it.
+   */
   async upsertFieldValue(projectId, { key, value, producedByStageId = null }) {
     const [row] = await this.#rows(
       `insert into project_field_values (project_id, key, value, produced_by_stage_id)
@@ -1954,8 +1890,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  //--- SHEET MAPPING AND IMPORTS (RF-MIG-02) ---
 
   /** Points a registered book at a format version and stores how its columns feed it. */
   async setSheetMapping(sheetId, { schemaVersionId, columnMap }) {
@@ -2035,8 +1969,6 @@ class Query {
     return row ?? null;
   }
 
-  //--- REQUESTERS (RF-SOL-07) ---
-
   /**
    * The requester strings already in use, for the autocomplete that keeps a person from
    * inventing a fifth spelling. Distinct across requests and projects, prefix-matched so
@@ -2057,8 +1989,6 @@ class Query {
       [q, limit],
     );
   }
-
-  //--- STATUSES (RF-EST-02) ---
 
   /**
    * The catalogue an area works with: its own rows plus the global ones. Without an area,
@@ -2091,7 +2021,9 @@ class Query {
     return row ?? null;
   }
 
-  /** A code in one catalogue. `areaId` null looks in the global one, matching the two partial indexes. */
+  /**
+   *  A code in one catalogue. `areaId` null looks in the global one, matching the two partial indexes.
+   */
   async findStatusByCode(code, areaId = null) {
     const [row] = await this.#rows(
       `select id, area_id, code, label, sort_order, is_terminal, is_active
@@ -2149,8 +2081,6 @@ class Query {
     return row ?? null;
   }
 
-  //--- DATA TYPES ---
-
   async getDataType(code) {
     const [row] = await this.#rows(
       `select
@@ -2184,8 +2114,6 @@ class Query {
       order by name, id`,
     );
   }
-
-  //--- SCHEMAS ---
 
   /**
    * CREATE
@@ -2270,12 +2198,9 @@ class Query {
       where s.id = $1`,
       [schemaId],
     );
-    //Asegura que la función responda con null en lugar de undefined
-    //Ejemplo: si falla el filtro del JOIN.
     return row ?? null;
   }
 
-  /* READ - Obtiene TODOS los schemas con sus más recientes/últimas versiones*/
   async getSchemas() {
     return this.#rows(
       `select
@@ -2305,9 +2230,6 @@ class Query {
   /**
    * UPDATE
    * Crea una NUEVA versión de un schema existente
-   *
-   * Las versiones publicadas NO son modificadas.
-   * En lugar de eso, el siguiente numero versión es creado con los nuevos campos
    */
 
   async createSchemaVersion(schemaId, { fields, publishedBy = null }) {
@@ -2341,10 +2263,6 @@ class Query {
   /**
    * DELETE
    * Desactiva un schema
-   *
-   * No elimina fisicamente el registro.
-   * Se conserva el schema y sus versiones, pero
-   * is_active pasa a false
    */
 
   async desactivateSchema(schemaId) {
@@ -2423,7 +2341,9 @@ class Query {
     return row ?? null;
   }
 
-  /** The newest version of a schema, or null. Used wherever "the schema" means its current shape. */
+  /**
+   *  The newest version of a schema, or null. Used wherever "the schema" means its current shape.
+   */
   async getLatestSchemaVersion(schemaId) {
     const [row] = await this.#rows(
       `select
@@ -2442,10 +2362,6 @@ class Query {
   /**
    * The field vocabulary: every key ever published, with its most recent definition and where it
    * is used.
-   *
-   * A key is not local to a format -- it is what the value is stored under in `requests.data` and
-   * in `project_field_values`, so `numero_orden` has to mean one thing system-wide. Keys from
-   * retired versions stay in the list: they have captured data under them.
    */
   async listFieldKeys() {
     return this.#rows(
@@ -2492,8 +2408,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  //--- WORKFLOWS (RF-FLW-02, RF-PRY-06) ---
 
   /**
    * The phases and stages of one flow as nested camelCase JSON, ordered. `ownerId` is a SQL
@@ -2765,21 +2679,15 @@ class Query {
     return row ?? null;
   }
 
-  //--- REQUEST FLOWS (DATAMODEL §2.5) ---
-
   /**
    * Replaces a request's whole flow in one statement: its old phases go (their stages
    * cascade) and the new ones come either from `phases` -- a flow designed for it, in the
    * template shape -- or from a copy of the template version `sourceVersionId`, whose id is
    * recorded in `requests.workflow_version_id`. Only an unconverted, live request is touched;
    * `found` says whether it was.
-   *
-   * Deleting and re-inserting the same (request, seq) in one statement does not collide: the
-   * unique check sees the rows this statement deleted as gone.
    */
   async setRequestFlow(requestId, { phases = null, sourceVersionId = null }) {
     const fromTemplate = sourceVersionId !== null;
-    // Each branch names only the parameters it reads: Postgres cannot type one it never sees.
     const version = fromTemplate ? '$2' : '$3';
     const [row] = await this.#rows(
       `with target as (
@@ -2871,8 +2779,6 @@ class Query {
     );
   }
 
-  // --- Microsoft app registration (RF-MIG-01) ---
-
   /** The one row, with who last saved it, or null when the registration lives in .env. */
   async getMicrosoftApp() {
     const [row] = await this.#rows(
@@ -2895,8 +2801,6 @@ class Query {
    */
   async setMicrosoftApp({ tenantId, clientId, clientSecretEnc, updatedBy }) {
     const [row] = await this.#rows(
-      // The stored secret is folded in BEFORE the insert is attempted: NOT NULL is checked
-      // on the proposed row, ahead of ON CONFLICT, so a coalesce in the DO UPDATE never runs.
       `insert into microsoft_app (id, tenant_id, client_id, client_secret_enc, updated_by)
        values (1, $1, $2,
                coalesce($3::bytea, (select client_secret_enc from microsoft_app where id = 1)),
@@ -2921,8 +2825,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  // --- Microsoft accounts (RF-MIG-01) ---
 
   /**
    * Records a delegated grant, or replaces the token when this user reconnects the same
@@ -3020,8 +2922,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  // --- Sheets (RF-MIG-01, RF-MIG-02) ---
 
   /**
    * Registers a workbook. `schema_version_id` and `column_map` are left at their defaults:

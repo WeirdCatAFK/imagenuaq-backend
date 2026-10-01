@@ -1,14 +1,14 @@
+// The guards on both routers of the spreadsheet feature. What must hold: nothing answers
+// without a session, a role without spreadsheet.read is refused every read, and the one
+// public route -- the sign-in callback -- refuses a missing state by redirecting, never by
+// rendering an error to a browser mid-navigation. The routes that talk to Microsoft Graph
+// are exercised only this far, since a case that reached them would need the network.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { startServer } from './helpers/server.js';
 import { reset, createActive, tokenFor } from './helpers/fixtures.js';
 
-// The guards on both routers of the spreadsheet feature. What must hold: nothing answers
-// without a session, a role without spreadsheet.read is refused every read, and the one
-// public route -- the sign-in callback -- refuses a missing state by redirecting, never by
-// rendering an error to a browser mid-navigation. The routes that talk to Microsoft Graph
-// are exercised only this far, since a case that reached them would need the network.
 describe('/api/spreadsheets and /api/microsoft are guarded', () => {
   let server;
   let workerToken;
@@ -50,8 +50,6 @@ describe('/api/spreadsheets and /api/microsoft are guarded', () => {
       assert.equal(res.body.error.message, 'No token provided.');
     });
 
-    // `worker` is seeded with no permissions, so the read guard refuses first and the
-    // write routes never reach their own. The message names the read code either way.
     test(`${method} ${path} as a worker is 403`, async () => {
       const res = await server.request(method, path, { token: workerToken });
 

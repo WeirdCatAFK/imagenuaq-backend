@@ -1,3 +1,10 @@
+// Editing and removing staff accounts, and the revocation that removal now carries.
+//
+// The case this file exists for is the last describe block: before `token_version`, a
+// deleted account kept a working session for up to seven days and the only lever was
+// rotating JWT_SECRET, which signs everybody out. An endpoint that reported success while
+// leaving the account usable would be worse than no endpoint at all, so the proof that it
+// does not is a test and not a comment.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -15,13 +22,6 @@ import {
   PASSWORD,
 } from './helpers/fixtures.js';
 
-// Editing and removing staff accounts, and the revocation that removal now carries.
-//
-// The case this file exists for is the last describe block: before `token_version`, a
-// deleted account kept a working session for up to seven days and the only lever was
-// rotating JWT_SECRET, which signs everybody out. An endpoint that reported success while
-// leaving the account usable would be worse than no endpoint at all, so the proof that it
-// does not is a test and not a comment.
 describe('/api/users writes', () => {
   let server;
   let adminToken;
@@ -42,7 +42,6 @@ describe('/api/users writes', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -123,8 +122,6 @@ describe('/api/users writes', () => {
       assert.equal(res.body.user.primaryAreaId, null);
     });
 
-    // The role is deliberately not editable here: changing what somebody may do belongs
-    // with the role catalogue, not the profile form.
     test('roleId in the body is ignored, not applied', async () => {
       const user = await someone();
       const adminRole = (await findUser(user.id)).role_id;
@@ -238,8 +235,6 @@ describe('/api/users writes', () => {
       assert.equal(again.status, 404);
     });
 
-    // uq_users_email_live is partial on `deleted_at is null`, so removing an account frees
-    // its address. That is the whole reason the delete is soft rather than hard.
     test('the address becomes reusable', async () => {
       const user = await someone();
       await server.delete(`/api/users/${user.id}`, { token: adminToken });
@@ -271,8 +266,6 @@ describe('/api/users writes', () => {
   });
 
   describe('revocation', () => {
-    // The point of token_version, end to end: a session minted before the delete must stop
-    // working the moment the account is removed, not when the token expires seven days on.
     test('a deleted account stops working immediately', async () => {
       await createActive({ email: 'temporal@uaq.mx', role: 'worker' });
       const victim = await server.post('/api/auth/login', {
@@ -291,8 +284,6 @@ describe('/api/users writes', () => {
       assert.equal(after.body.error.message, 'Invalid or expired token.');
     });
 
-    // The other half of the same read: role now comes from the row, so a change lands on
-    // the next request instead of waiting for the token to expire.
     test('a live token reflects a change made after it was minted', async () => {
       await createActive({ email: 'cambiante@uaq.mx', role: 'worker' });
       const token = await tokenFor(server, 'cambiante@uaq.mx');

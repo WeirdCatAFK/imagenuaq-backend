@@ -39,11 +39,22 @@ import statuses from "./statuses.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  CHECK_VIOLATION,
+  cleanText,
+  requireText,
+  optionalText,
+  requireId,
+  optionalId,
+  uniqueIds,
+  requireInt,
+  requireBoolean,
+  optionalBoolean,
+} from "../../utils/validate.js";
+import { storedText } from "../../utils/fieldValues.js";
 import { requireFieldKey, requireKeyList } from "../../utils/fieldKeys.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
-const CHECK_VIOLATION = "23514";
 
 /** Column widths and the CHECK from projects-spine. */
 const KEY_MAX = 50;
@@ -95,7 +106,6 @@ class Projects {
     requestFlow = null,
   }) {
     const normalisedStages = normaliseStages(stages);
-    // An area status has to belong to an area the project works in: its stages, or its flow.
     const areaSources = requestFlow
       ? requestFlow.areaIds.map((areaId) => ({ areaId }))
       : normalisedStages;
@@ -129,8 +139,6 @@ class Projects {
       throw translate(err);
     }
 
-    // The CTE links only unconverted requests, so a short count means somebody else got
-    // there first. The project is already written, so this is reported rather than hidden.
     if (row.linked_count !== payload.requestIds.length) {
       await query.deleteProject(row.id);
       throw ApiError.conflict(
@@ -370,8 +378,6 @@ class Projects {
     return this.getById(id);
   }
 
-  // --- Stages (RF-FLW-01) ---
-
   async listStages(projectId) {
     const id = requireId(projectId, "projectId");
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
@@ -434,8 +440,6 @@ class Projects {
       });
       if (stage.status === "active") await emitStage("stage_activated", stage);
 
-      // Re-read so the response carries the definition and the area's name, as every other
-      // stage read does.
       return shapeStage(await query.getProjectStage(stage.id));
     } catch (err) {
       throw translate(err);
@@ -446,9 +450,6 @@ class Projects {
    * The stage machine. `pending → active` starts work, `active ↔ waiting_external` parks it on
    * a third party with the reason RF-FLW-07 asks for, `→ cancelled` drops it. `done` is not
    * reachable here: a stage is completed by a sign-off, which is what RF-FLW-03 records.
-   *
-   * `title`, `inputs`, `outputs`, the notes and `estimatedDays` edit the definition, which
-   * every attempt of the stage shares; the rest edits this attempt.
    *
    * @throws {ApiError} 400 on an illegal transition or a missing reason, 404.
    */
@@ -478,12 +479,10 @@ class Projects {
       assignedTo: assignedTo === undefined ? null : optionalId(assignedTo, "assignedTo"),
       inputs: inputs === undefined ? null : requireKeyList(inputs, "inputs"),
       outputs: outputs === undefined ? null : requireKeyList(outputs, "outputs"),
-      // Undefined means "not sent", so a note or the days can be cleared with an explicit null.
       inputNote: inputNote === undefined ? undefined : optionalText(inputNote, "inputNote", NOTE_MAX),
       outputNote: outputNote === undefined ? undefined : optionalText(outputNote, "outputNote", NOTE_MAX),
       estimatedDays:
         estimatedDays === undefined ? undefined : optionalDays(estimatedDays, "estimatedDays"),
-      // Leaving the blocked state clears the reason: it described a wait that is over.
       clearBlocked:
         before.status === "waiting_external" && next !== undefined && next !== "waiting_external",
     };
@@ -526,15 +525,10 @@ class Projects {
     return shapeStage(await query.getProjectStage(id));
   }
 
-  // --- Approvals (RF-FLW-03) ---
-
   /**
    * Records a sign-off and moves the stage. `approved` completes it; `rejected` completes it
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
    * work stays visible instead of overwriting what happened (§2.6).
-   *
-   * An approval that leaves nothing open in the stage's phase starts the next phase
-   * (RF-FLW-04): its pending stages come back in `opened`, next to the rerun in `reopened`.
    *
    * @param {{decision: 'approved'|'rejected', comment?: string, evidenceFileId?: number}} input
    * @throws {ApiError} 400 on a bad decision or unknown evidence file, 404, 409 when the
@@ -555,8 +549,6 @@ class Projects {
       throw ApiError.badRequest("An approval needs a session: approver_user_id cannot be null.");
     }
 
-    // The declaration is a promise the stage made, and approving is where it comes due. A
-    // rejection is exempt: work being sent back has not produced anything yet.
     if (decision === "approved") {
       const declared = Array.isArray(before.outputs) ? before.outputs : [];
       if (declared.length > 0) {
@@ -604,8 +596,6 @@ class Projects {
       await emitStage("stage_activated", stage);
     }
 
-    // One read for the whole project's stages rather than one per row, so the response
-    // carries the area names the list reads carry.
     const joined = new Map(
       (await query.listProjectStages(before.project_id)).map((stage) => [String(stage.id), stage]),
     );
@@ -619,14 +609,8 @@ class Projects {
     };
   }
 
-  // --- Finance (RF-FIN, RF-USR-05) ---
-
   /**
    * Finance says a project needs a quote or an invoice, without holding `project.write`.
-   *
-   * It writes one of two reserved keys as an ordinary field value, so the board's filter and
-   * every later reader see it with no special case. The note is what finance wants the project
-   * to know ("falta el desglose por partida"); omitted, the value is just `sí`.
    *
    * @param {number} projectId
    * @param {{ kind: 'quote'|'invoice', needed?: boolean, note?: string }} input
@@ -642,8 +626,6 @@ class Projects {
     }
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
 
-    // Withdrawing the request removes the row rather than writing "no": a value that says no is
-    // indistinguishable from one nobody ever asked about.
     if (needed === false) {
       const removed = await query.deleteFieldValue(id, key);
       if (removed) {
@@ -670,8 +652,6 @@ class Projects {
     return { key, needed: true, note: row.value === "sí" ? null : row.value };
   }
 
-  // --- Field values (RF-FLW-06, RF-IMP-08) ---
-
   async listFieldValues(projectId) {
     const id = requireId(projectId, "projectId");
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
@@ -689,7 +669,7 @@ class Projects {
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
 
     const cleanKey = requireFieldKey(key);
-    const text = stringifyValue(value);
+    const text = storedText(value);
     if (text === null) {
       throw ApiError.badRequest("value is required; delete the row instead of emptying it.");
     }
@@ -738,16 +718,12 @@ class Projects {
     return shapeFieldValue(row);
   }
 
-  // --- Internals ---
-
   /** The status to start at: the caller's, checked, or the global `recibido`. */
   async #resolveStatus(statusId, stages) {
     if (statusId !== null && statusId !== undefined) {
       const id = requireId(statusId, "statusId");
       const status = await query.getStatus(id);
       if (!status) throw ApiError.badRequest("That status does not exist.");
-      // At creation there is no project yet, so an area status is checked against the stages
-      // the same call is asking for.
       if (status.area_id !== null && !stages.some((st) => String(st.areaId) === String(status.area_id))) {
         throw ApiError.badRequest(
           "That status belongs to an area with no stage in this project.",
@@ -789,29 +765,6 @@ class Projects {
   }
 }
 
-/* HELPERS */
-
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-function requireText(value, field, max) {
-  const text = cleanText(value);
-  if (text === null) throw ApiError.badRequest(`${field} is required.`);
-  if (typeof text !== "string" || text.length > max) {
-    throw ApiError.badRequest(`${field} must be a string of ${max} characters or fewer.`);
-  }
-  return text;
-}
-
-function optionalText(value, field, max) {
-  const text = cleanText(value);
-  if (text === null) return null;
-  return requireText(text, field, max);
-}
-
 /** Uppercased before the CHECK sees it: `papel-fcq` is a typo, not a refusal. */
 function requireKey(value) {
   const text = cleanText(value);
@@ -824,40 +777,6 @@ function requireKey(value) {
     );
   }
   return key;
-}
-
-function requireInt(value, field) {
-  const n = Number(value);
-  if (!Number.isInteger(n)) throw ApiError.badRequest(`${field} must be an integer.`);
-  return n;
-}
-
-function requireBoolean(value, field) {
-  if (typeof value !== "boolean") throw ApiError.badRequest(`${field} must be a boolean.`);
-  return value;
-}
-
-function optionalBoolean(value, field) {
-  if (value === undefined || value === null || value === "") return null;
-  if (value === "true" || value === true) return true;
-  if (value === "false" || value === false) return false;
-  throw ApiError.badRequest(`${field} must be a boolean.`);
-}
-
-function requireId(value, field) {
-  if (value === null || value === undefined || typeof value === "boolean") {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
-}
-
-function optionalId(value, field) {
-  if (value === null || value === undefined || value === "") return null;
-  return requireId(value, field);
 }
 
 /** ISO dates only; the CHECK on the pair is the authority on their order. */
@@ -878,24 +797,6 @@ function requireStageStatus(status) {
   return text;
 }
 
-function uniqueIds(values, field) {
-  if (values === undefined || values === null) return [];
-  if (!Array.isArray(values)) throw ApiError.badRequest(`${field} must be an array.`);
-  return [...new Set(values.map((value) => requireId(value, field)))];
-}
-
-/**
- * `project_field_values.value` is `text NOT NULL`, so a value is stringified and an empty one
- * is dropped rather than stored as ''. Every captured value travels (§2.11); the filtering
- * here is about emptiness, not about which fields are allowed to.
- */
-function stringifyValue(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string") return cleanText(value);
-  if (typeof value === "boolean" || typeof value === "number") return String(value);
-  return JSON.stringify(value);
-}
-
 function normaliseFieldValues(fieldValues) {
   if (!Array.isArray(fieldValues)) throw ApiError.badRequest("fieldValues must be an array.");
 
@@ -909,7 +810,7 @@ function normaliseFieldValues(fieldValues) {
     if (seen.has(key)) throw ApiError.badRequest(`Field value "${key}" is repeated.`);
     seen.add(key);
 
-    const value = stringifyValue(entry.value);
+    const value = storedText(entry.value);
     if (value !== null) out.push({ key, value });
   }
   return out;
@@ -1000,7 +901,9 @@ function executionOf(stage) {
   };
 }
 
-/** RF-FLW-04's hook: the notifier will subscribe to these two rather than to record_updated. */
+/**
+ *  RF-FLW-04's hook: the notifier will subscribe to these two rather than to record_updated.
+ */
 async function emitStage(action, stage) {
   if (!stage) return;
   await events.emit({
@@ -1010,15 +913,7 @@ async function emitStage(action, stage) {
   });
 }
 
-/**
- * A `date` column as `YYYY-MM-DD`.
- *
- * postgrejs hands back a JS Date built at **local** midnight, and JSON.stringify turns that
- * into an instant: `2026-04-01` leaves as `2026-04-01T06:00:00.000Z` here, and as
- * `2026-03-31T22:00:00.000Z` for a reader east of UTC -- a delivery date that moves a day
- * depending on who reads it. The local parts are what the column held, so they are what goes
- * back out.
- */
+/** A `date` column as `YYYY-MM-DD`. */
 function asDate(value) {
   if (value === null || value === undefined) return null;
   if (!(value instanceof Date)) return value;
@@ -1054,11 +949,9 @@ function shapeProject(row) {
     closedAt: row.closed_at,
     archivedAt: row.archived_at,
     deletedAt: row.deleted_at ?? null,
-    // Already camelCase: json_build_object shapes them in the query.
     stages: row.stages ?? [],
     fieldValues: row.field_values ?? [],
     requests: row.requests ?? [],
-    // §2.1: the current stage is a query, not a column.
     activeStageIds: (row.stages ?? [])
       .filter((stage) => stage.status === "active")
       .map((stage) => stage.id),

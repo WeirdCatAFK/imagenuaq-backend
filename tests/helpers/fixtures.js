@@ -11,80 +11,67 @@ import query from '../../src/access/resources/query.js';
 import { getStore } from '../../src/access/primitives/database.js';
 import { seal } from '../../src/utils/crypto.js';
 
-// Matches SALT_ROUNDS in orchestration/auth.js. A fixture hashed at a different cost would
-// still verify, so getting this wrong would not fail -- it would just quietly make the
-// suite test a weaker password than the server writes.
+/** Matches SALT_ROUNDS in orchestration/auth.js; a mismatch would still verify, silently. */
 const SALT_ROUNDS = 12;
 
 export const PASSWORD = 'correct horse battery staple';
 
-// bcrypt at cost 12 is ~300ms, and that is the whole point of the cost factor. Paying it
-// once per process and reusing the digest keeps fixture setup off the critical path; the
-// suite still pays it for real on every login, and orchestration/auth.js's own
-// setPassword() is exercised end to end by the activate tests.
+/** Hashed once per process: bcrypt at cost 12 is ~300ms. */
 let cachedHash = null;
 async function passwordHash() {
   cachedHash ??= await bcrypt.hash(PASSWORD, SALT_ROUNDS);
   return cachedHash;
 }
 
-// Raw access, for the handful of reads and writes with no route behind them. Positional
-// parameters in an array, never `:named` in an object -- postgrejs calls .map() on
-// options.params and an object throws at runtime, not at parse time.
+/** Raw SQL for state no route exposes. Parameters are positional (`$1`), in an array. */
 export async function sql(text, params = []) {
   const result = await getStore().query(text, { params, objectRows: true });
   return result.rows ?? [];
 }
 
-// Wipe the rows a test file creates, leaving the catalogs alone.
-//
-// This used to be `truncate users, area_members restart identity cascade`, and CASCADE
-// stopped being harmless the day a SEEDED table gained a foreign key to users:
-// schema-field-shape publishes the starter formats into schema_versions, whose
-// published_by references users, so the cascade emptied every version and left five
-// schemas with nothing in them. Deleting through resetCases() takes the same rows in the
-// same foreign-key order without following the key into tables it should not touch.
-//
-// The identities are restarted for the reason the truncate did it: every file starts from
-// id 1 regardless of what ran before it.
+/** Deletes every row a test file creates and restarts the user ids, leaving the seeded catalogs. */
 export async function reset() {
   await resetCases([]);
   await sql('alter table users alter column id restart with 1');
   await sql('alter table area_members alter column id restart with 1');
 }
 
-// The prefix every area and role a test creates is named with, and the one every test
-// permission code starts with. They exist so the cleanup below can be a predicate rather
-// than a guess: `areas`, `roles` and `permissions` are SEEDED by the catalog-bootstrap and
-// role-permissions migrations, so truncating them would destroy the rows every other file
-// in the suite depends on, and "delete everything above the highest seeded id" breaks the
-// moment a fixture is deleted and re-created.
+/**
+ * Prefixes on everything a test creates in a seeded table (areas, roles, permissions, schemas,
+ * statuses), so resetCases() can delete by predicate and leave the seed alone.
+ */
 export const TEST_PREFIX = 'zz-test:';
 export const TEST_PERMISSION_PREFIX = 'zz.test.';
-// Schema and status codes are snake_case by rule, so their prefixes have to be too.
 export const TEST_SCHEMA_PREFIX = 'zztest_';
 export const TEST_STATUS_PREFIX = 'zztest_';
 
-// Wipe what a case created, keeping the accounts the file logs in with.
-//
-// The alternative -- reset() plus createActive() in beforeEach -- re-hashes a password at
-// bcrypt cost 12 and performs a real login for every account, every case. That is about
-// four seconds per test, and across the areas and roles files it was most of the suite's
-// runtime. The session token stays valid because nothing about the account changes.
-//
-// Order matters and is the foreign keys read backwards: area_hierarchy and area_members
-// reference areas and users, users reference areas, so the referencing rows go first.
-// area_members is emptied wholesale because nothing seeds it -- every row belongs to a
-// test. area_hierarchy is not: coordinacion-root hangs each seeded area under
-// `Coordinación`, and the DEFAULT_AREA cases read the chart expecting that seed intact, so
-// only rows that touch a test area, or that a test wrote between seeded areas, are removed.
-// (A test that re-parents a seeded area away from Coordinación loses that seeded link --
-// the upsert overwrote it -- and none does.)
-//
-// role_permissions is NOT: section 8 of catalog-bootstrap seeds every permission onto
-// `admin` and finance.read onto `finance`, and wiping those would leave the rest of the run
-// testing an authorisation model the migrations never produce. Only grants on test-created
-// roles are removed; a test permission's grants go with it through the cascade.
+/**
+ * Tables nothing seeds, emptied whole. Referencing tables come before the ones they
+ * reference; a new table a test writes to belongs here in that order.
+ */
+const UNSEEDED_TABLES = [
+  'area_members',
+  'logs',
+  'approvals',
+  'project_field_values',
+  'project_stages',
+  'flow_stages',
+  'flow_phases',
+  'requests',
+  'projects',
+  'workflow_versions',
+  'workflows',
+  'sheet_imports',
+  'sheet_row_marks',
+  'sheets',
+  'microsoft_accounts',
+  'microsoft_app',
+];
+
+/**
+ * Deletes what a case created, keeping the accounts in `keepEmails` so their tokens stay
+ * valid. Seeded hierarchy links under Coordinación and seeded grants are kept.
+ */
 export async function resetCases(keepEmails = []) {
   await sql(
     `delete from area_hierarchy h
@@ -93,43 +80,10 @@ export async function resetCases(keepEmails = []) {
         and (c.name like $1 or p.name like $1 or p.name <> 'Coordinación')`,
     [`${TEST_PREFIX}%`],
   );
-  await sql('delete from area_members');
-  // Before the users delete, not after: logs.user_id references users with NO ACTION, so
-  // once the audit trail started writing (RF-USR-07) every case leaves rows here and the
-  // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
-  // follows inbound foreign keys and takes logs with it.
-  await sql('delete from logs');
-  // The foreign keys read backwards, and the order is load-bearing: `requests.sheet_id`
-  // references `sheets`, so an imported request has to go before the book it came from -- which
-  // only started mattering when the import began creating such rows.
-  await sql('delete from approvals');
-  await sql('delete from project_field_values');
-  await sql('delete from project_stages');
-  // Definitions before phases, phases before the requests, projects and versions they belong
-  // to, and the versions after the requests and projects that record which one they came from
-  // (`workflow_version_id`). All of it before users and areas, which a stage names. Nothing
-  // seeds a template, so they go whole.
-  await sql('delete from flow_stages');
-  await sql('delete from flow_phases');
-  await sql('delete from requests');
-  await sql('delete from projects');
-  await sql('delete from workflow_versions');
-  await sql('delete from workflows');
-  // Import runs, then the books, then the accounts: each references the next, and none is seeded.
-  await sql('delete from sheet_imports');
-  // Las marcas van con su libro por CASCADE, pero se borran aquí igual: el orden de esta función
-  // es explícito a propósito, y depender del cascade esconde de qué depende qué.
-  await sql('delete from sheet_row_marks');
-  await sql('delete from sheets');
-  await sql('delete from microsoft_accounts');
-  await sql('delete from microsoft_app');
-  // Statuses a test added. The global catalogue is seeded by projects-spine and
-  // status-manage and must survive, so only area rows and prefixed codes go.
+  for (const table of UNSEEDED_TABLES) await sql(`delete from ${table}`);
   await sql('delete from statuses where area_id is not null or code like $1', [
     `${TEST_STATUS_PREFIX}%`,
   ]);
-  // Formats a test published, after sheets (which point at a version). The starter formats
-  // seeded by schema-field-shape carry real codes and stay.
   await sql(
     `delete from schema_versions
       where schema_id in (select id from schemas where code like $1)`,
@@ -149,32 +103,32 @@ export async function resetCases(keepEmails = []) {
   await sql('delete from roles where name like $1', [`${TEST_PREFIX}%`]);
 }
 
-// An area created straight through query.js, for the cases that need one to exist without
-// exercising POST /api/areas to get it.
+/** An area created through query.js, named with TEST_PREFIX. */
 export async function createArea(name, description = null) {
   return query.createArea({ name: `${TEST_PREFIX}${name}`, description });
 }
 
-// Catalog ids by NAME, never hardcoded. The bootstrap migration ran on a sequence that had
-// already advanced on this machine, so `admin` is id 9 here and would be something else on
-// a database built from scratch. Anything asserting on a literal id is asserting on an
-// accident.
+/**
+ * Catalog ids by NAME, never hardcoded. The bootstrap migration ran on a sequence that had
+ * already advanced on this machine, so `admin` is id 9 here and would be something else on
+ * a database built from scratch. Anything asserting on a literal id is asserting on an
+ * accident.
+ */
 export const roleId = (name) => query.getRoleIdByName(name);
 export const areaId = async (name) => (await query.findArea(name))?.id ?? null;
 export const contractTypeId = async () => (await query.firstContractType()).id;
 
-// Areas are looked up by their REAL name, which for one created by createArea() includes
-// TEST_PREFIX -- pass `area.name`, not the string handed to createArea. Returning null for
-// a name that resolves to nothing would create a user with no area and fail somewhere else
-// entirely, so this refuses instead. Seeded names ('Diseño Web') are found unprefixed.
+/** Resolves an area by its full name (a createArea() area includes TEST_PREFIX), or throws. */
 async function requireAreaId(name) {
   const id = await areaId(name);
   if (id === null) throw new Error(`Fixture area not found: ${name}`);
   return id;
 }
 
-// A user exactly as POST /api/users leaves them: a row with no password, reachable only
-// through an invite.
+/**
+ * A user exactly as POST /api/users leaves them: a row with no password, reachable only
+ * through an invite.
+ */
 export async function createPending({
   email,
   role = 'worker',
@@ -193,7 +147,7 @@ export async function createPending({
   });
 }
 
-// A user who has been through activation and can log in with PASSWORD.
+/** A user who has been through activation and can log in with PASSWORD. */
 export async function createActive(options) {
   const user = await createPending(options);
   await sql('update users set password_hash = $2 where id = $1', [
@@ -203,15 +157,7 @@ export async function createActive(options) {
   return user;
 }
 
-// Users are soft-deleted, and almost every rule about them turns on that column: login
-// refuses them, invites refuse them, and uq_users_email_live frees their address for
-// reuse. DELETE /api/users/:id now does this properly; this stays for the cases that need
-// a deleted row as *setup* rather than as the thing under test, so they do not depend on
-// an endpoint they are not exercising.
-//
-// It bumps token_version for the same reason the endpoint does. Without that a test could
-// soft-delete a user here and still find their token working, which is true of this helper
-// and false of the API -- a difference that would be read as a bug in the wrong place.
+/** Soft-deletes a user as DELETE /api/users/:id does, for cases that need one as setup. */
 export async function softDelete(userId) {
   await sql(
     'update users set deleted_at = now(), token_version = token_version + 1 where id = $1',
@@ -219,9 +165,7 @@ export async function softDelete(userId) {
   );
 }
 
-// A connected Microsoft account, as completeConnect() leaves one, without the round trip
-// to Microsoft. The token is a fake sealed under the test MS_TOKEN_KEY, so a case that
-// reaches open() finds a well-formed value and fails on the network, not on the cipher.
+/** A connected Microsoft account holding a fake sealed refresh token. */
 export async function createMicrosoftAccount(userId, { email = 'cuenta@outlook.com' } = {}) {
   return query.createMicrosoftAccount({
     userId,
@@ -234,8 +178,7 @@ export async function createMicrosoftAccount(userId, { email = 'cuenta@outlook.c
   });
 }
 
-// A published format straight through query.js, prefixed so resetCases() finds it. Fields
-// default to the smallest valid list; pass your own to test a shape.
+/** A published format, prefixed for resetCases(). `fields` defaults to the smallest valid list. */
 export async function createSchema(code, fields = null, name = null) {
   return query.createSchema({
     code: `${TEST_SCHEMA_PREFIX}${code}`,
@@ -252,8 +195,7 @@ export async function createSchema(code, fields = null, name = null) {
   });
 }
 
-// A registered book, mapped or not, through query.js. `microsoftAccountId` comes from
-// createMicrosoftAccount().
+/** A registered workbook for an account from createMicrosoftAccount(). */
 export async function createSheet({
   microsoftAccountId,
   name = 'Seguimiento de prueba',
@@ -276,29 +218,32 @@ export async function findUser(userId) {
   return row ?? null;
 }
 
-// The audit trail a case produced, oldest first. Raw rows joined to the action code, because
-// the shape orchestration/audit.js returns is the API's and a test asserting on it would not
-// notice a row written with the wrong action id.
+const LOG_SELECT = `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
+                           l.before_data, l.after_data
+                      from logs l join actions a on a.id = l.action_id`;
+
+/** The raw audit rows for one record, oldest first. */
 export async function logsFor(targetTable, targetId) {
-  return sql(
-    `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
-            l.before_data, l.after_data
-       from logs l join actions a on a.id = l.action_id
-      where l.target_table = $1 and l.target_id = $2
-      order by l.id`,
-    [targetTable, targetId],
-  );
+  return sql(`${LOG_SELECT} where l.target_table = $1 and l.target_id = $2 order by l.id`, [
+    targetTable,
+    targetId,
+  ]);
 }
 
-// Every log row, for the cases that assert on the objectless actions -- user_login and
-// user_login_failed have no target to look them up by.
+/** Every raw audit row, oldest first, for actions with no target such as user_login. */
 export async function allLogs() {
-  return sql(
-    `select a.code as action, l.user_id, l.area_id, l.target_table, l.target_id,
-            l.before_data, l.after_data
-       from logs l join actions a on a.id = l.action_id
-      order by l.id`,
-  );
+  return sql(`${LOG_SELECT} order by l.id`);
+}
+
+/** Replaces a role's permissions over HTTP, as an admin. */
+export async function grantPermissions(server, adminToken, role, permissions) {
+  const res = await server.put(`/api/roles/${await roleId(role)}/permissions`, {
+    token: adminToken,
+    body: { permissions },
+  });
+  if (res.status !== 200) {
+    throw new Error(`Fixture grant failed for ${role}: ${res.status} ${res.text}`);
+  }
 }
 
 export async function areaMemberships(userId) {
@@ -308,8 +253,7 @@ export async function areaMemberships(userId) {
   );
 }
 
-// Log in over HTTP and hand back the token, so role-guard tests read as what they are
-// testing rather than as a paragraph of setup.
+/** Logs in over HTTP with PASSWORD and returns the session token. */
 export async function tokenFor(server, email) {
   const res = await server.post('/api/auth/login', { body: { email, password: PASSWORD } });
   if (res.status !== 200) {

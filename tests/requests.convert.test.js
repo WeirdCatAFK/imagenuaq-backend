@@ -10,10 +10,9 @@ import {
   createSchema,
   tokenFor,
   logsFor,
-  roleId,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// The one crossing from request to project (RF-PRY-01, RF-FLW-06).
 describe("POST /api/requests/:id/convert", () => {
   let server;
   let adminToken;
@@ -48,7 +47,6 @@ describe("POST /api/requests/:id/convert", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -59,13 +57,8 @@ describe("POST /api/requests/:id/convert", () => {
     schema = await createSchema("papel", FIELDS);
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   async function request(overrides = {}) {
     const res = await server.post("/api/requests", {
@@ -101,14 +94,12 @@ describe("POST /api/requests/:id/convert", () => {
     assert.equal(String(project.schemaVersionId), String(made.schemaVersionId));
     assert.deepEqual(conflicts, []);
 
-    // Every value travels, keyed by its field code, stringified, with no stage behind it.
     assert.deepEqual(
       project.fieldValues.map((v) => [v.key, v.value]),
       [["descripcion", "Hojas"], ["fecha_entrega", "2026-03-15"], ["tiraje", "1000"], ["urgente", "true"]],
     );
     assert.ok(project.fieldValues.every((v) => v.producedByStageId === null));
 
-    // The link, both ways.
     assert.deepEqual(project.requests.map((r) => r.folio), [made.folio]);
     const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
     assert.equal(String(read.body.request.projectId), String(project.id));
@@ -149,7 +140,6 @@ describe("POST /api/requests/:id/convert", () => {
     assert.equal(res.body.project.hasCost, true);
     assert.equal(res.body.project.dueOn, "2026-04-01");
 
-    // The request keeps its own requester: the correction applies to the project.
     const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
     assert.equal(read.body.request.requester, "Facultad de Química");
   });
@@ -223,7 +213,6 @@ describe("POST /api/requests/:id/convert", () => {
     assert.equal(stealing.status, 409);
     assert.match(stealing.body.error.message, new RegExp(made.folio));
 
-    // The refused call created nothing.
     const projects = await server.get("/api/projects?state=all", { token: adminToken });
     assert.equal(projects.body.projects.length, 1);
   });

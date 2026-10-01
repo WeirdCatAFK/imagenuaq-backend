@@ -8,8 +8,6 @@
 // forever, and moving this middleware after authenticate() would leave the public routes
 // -- login, activate -- with no context at all, which is exactly where the user_login and
 // user_login_failed rows come from.
-import { randomUUID } from "node:crypto";
-
 import { runWithContext } from "../utils/context.js";
 
 /**
@@ -18,12 +16,10 @@ import { runWithContext } from "../utils/context.js";
  */
 export const requestContext = (req, _res, next) => {
   const context = {
-    requestId: randomUUID(),
     get actor() {
       return req.user ?? null;
     },
   };
 
-  // next() runs inside the store so the rest of the chain inherits it.
   runWithContext(context, next);
 };

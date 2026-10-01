@@ -13,13 +13,18 @@
 
 const TEST_DB_NAME = 'imagenuaq_test';
 
-// The whole point of this module. A database whose name does not end in `_test` is
-// assumed to be somebody's real data, whatever the environment claims.
+/**
+ * The whole point of this module. A database whose name does not end in `_test` is
+ * assumed to be somebody's real data, whatever the environment claims.
+ */
 const TEST_DB_SUFFIX = '_test';
 
-// Derive the test database URL from the development one, or take TEST_DATABASE_URL as
-// given when the suite has to run somewhere else entirely (CI with its own server, a
-// second container). Either way the suffix check below applies.
+/**
+ * Derive the test database URL from the development one, or take TEST_DATABASE_URL as
+ * given when the suite has to run somewhere else entirely (CI with its own server, a
+ * second container). Either way the suffix check below applies. `localhost` becomes
+ * 127.0.0.1: postgrejs over IPv6 loopback pays ~260 ms per query.
+ */
 export function testDatabaseUrl() {
   const override = process.env.TEST_DATABASE_URL;
   const source = override ?? process.env.DATABASE_URL;
@@ -40,9 +45,8 @@ export function testDatabaseUrl() {
     );
   }
 
-  // Only the derived case renames. An explicit TEST_DATABASE_URL is used as written --
-  // whoever set it meant it -- but still has to clear the suffix check.
   if (!override) url.pathname = `/${TEST_DB_NAME}`;
+  if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
 
   const name = decodeURIComponent(url.pathname.slice(1));
 
@@ -57,9 +61,11 @@ export function testDatabaseUrl() {
   return url.href;
 }
 
-// Point the process at the test database before anything imports a module that reads
-// DATABASE_URL. primitives/database.js reads it inside openStore(), not at import time,
-// so calling this first in a test file's before() hook is early enough.
+/**
+ * Point the process at the test database before anything imports a module that reads
+ * DATABASE_URL. primitives/database.js reads it inside openStore(), not at import time,
+ * so calling this first in a test file's before() hook is early enough.
+ */
 export function useTestDatabase() {
   const url = testDatabaseUrl();
   process.env.DATABASE_URL = url;

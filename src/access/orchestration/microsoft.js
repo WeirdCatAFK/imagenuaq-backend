@@ -49,6 +49,10 @@ import auth from "./auth.js";
 import events from "../../utils/events.js";
 import { seal, open } from "../../utils/crypto.js";
 import { ApiError } from "../../utils/ApiError.js";
+import {
+  cleanText,
+  requireId,
+} from "../../utils/validate.js";
 
 /** Refresh this many seconds before the access token actually expires. */
 const EXPIRY_MARGIN_S = 60;
@@ -158,8 +162,6 @@ class Microsoft {
     return tokens.accessToken;
   }
 
-  // --- The app registration ---
-
   /**
    * The registration in force: the microsoft_app row, else MS_* from .env.
    *
@@ -268,8 +270,6 @@ class Microsoft {
     return this.getApp();
   }
 
-  // --- Accounts ---
-
   /**
    * The live account, checked for ownership. Shared with spreadsheets.js so registering a
    * book through someone else's account is refused the same way reading one is.
@@ -329,34 +329,12 @@ class Microsoft {
   }
 }
 
-function cleanText(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
 function isAdmin(actor) {
   return actor?.role === "admin";
 }
 
 function mayUse(account, actor) {
   return isAdmin(actor) || Number(account.user_id) === Number(actor?.id);
-}
-
-/**
- * Coerces a JSON or route-parameter id to a positive integer. Same rule as areas.js.
- *
- * @throws {ApiError} 400 when it is not one.
- */
-function requireId(value, field) {
-  if (typeof value === "boolean" || value === null || value === undefined) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const n = Number(value);
-  if (!Number.isInteger(n) || n <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return n;
 }
 
 /** snake_case row in, camelCase JSON out -- and never the token, sealed or not. */

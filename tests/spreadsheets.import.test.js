@@ -1,3 +1,10 @@
+// The import, fed rows instead of Graph.
+//
+// `importRows()` is separated from `import()` for exactly this: the part worth testing is what
+// happens to a row -- created, skipped, refused, flagged -- and not that Microsoft answered. The
+// headers and the first row below are the real tracker's, read with `npm run sheets:probe -- 1`,
+// which is why the shapes are awkward: a date arrives as the serial 46030.41, the quantity column
+// is often empty, and the status column holds the area's own vocabulary.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -17,13 +24,6 @@ import {
 import spreadsheets from "../src/access/orchestration/spreadsheets.js";
 import query from "../src/access/resources/query.js";
 
-// The import, fed rows instead of Graph.
-//
-// `importRows()` is separated from `import()` for exactly this: the part worth testing is what
-// happens to a row -- created, skipped, refused, flagged -- and not that Microsoft answered. The
-// headers and the first row below are the real tracker's, read with `npm run sheets:probe -- 1`,
-// which is why the shapes are awkward: a date arrives as the serial 46030.41, the quantity column
-// is often empty, and the status column holds the area's own vocabulary.
 const HEADERS = [
   "Id",
   "Hora de inicio",
@@ -122,7 +122,6 @@ describe("importing a book's rows", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -161,7 +160,6 @@ describe("importing a book's rows", () => {
     assert.ok(rows.every((one) => one.source === "sheet"));
     assert.ok(rows.every((one) => /^SOL-\d{6}$/.test(one.folio)));
 
-    // The status column was translated, not ignored: 24 finished rows do not arrive as new work.
     const byTitle = Object.fromEntries(rows.map((one) => [one.requester, one.status_code]));
     assert.equal(byTitle["Facultad de Psicología y Educación"], "entregado");
     assert.equal(byTitle["SECRETARIA ADMINISTRATIVA DE QUIMICA"], "esperando_vb");
@@ -181,7 +179,6 @@ describe("importing a book's rows", () => {
     });
     assert.ok(!("tiraje" in request.data), "the cell was empty and the field is optional");
 
-    // RF-SOL-06: the columns no rule reads are still there.
     assert.equal(request.source_data["NOTAS ADICIONALES"], "Se solicita el material digital editable.");
     assert.equal(request.source_data.Id, 279);
     assert.match(request.source_hash, /^[0-9a-f]{64}$/);
@@ -194,7 +191,6 @@ describe("importing a book's rows", () => {
     const rows = await requests();
     assert.ok(rows.every((one) => one.area_id === null));
 
-    // Which is why the inbox can ask for exactly those.
     const unrouted = await server.get("/api/requests?areaId=none", { token: adminToken });
     assert.equal(unrouted.status, 200);
     assert.equal(unrouted.body.requests.length, 3);
@@ -238,9 +234,6 @@ describe("importing a book's rows", () => {
   });
 
   test("hashing content instead makes an edit a new row, flagged as a probable correction", async () => {
-    // No Id column to hash, so identity is the content: any edited cell reads as a new row. What
-    // keeps that from being silent is the flag -- same title, same requester, so it comes in
-    // linked to the row it probably corrects and a person decides.
     await spreadsheets.setMapping(sheet.id, {
       schemaVersionId: sheet.schema_version_id,
       columnMap: {
@@ -283,10 +276,6 @@ describe("importing a book's rows", () => {
   });
 
   test("an edit to the requester itself is not recognised, and that is the limit", async () => {
-    // The twin is looked up by title *and* requester, so correcting the name the row is filed
-    // under is invisible: it arrives as ordinary new work. Matching on the title alone would
-    // flag every row of a book where one product repeats, which is most of them. The answer is
-    // to hash an Id column -- `hashColumns: ["Id"]` -- not to guess at names.
     await spreadsheets.setMapping(sheet.id, {
       schemaVersionId: sheet.schema_version_id,
       columnMap: { ...MAP, hashColumns: ["Entidad que solicita"] },
@@ -352,17 +341,12 @@ describe("importing a book's rows", () => {
   });
 
   test("`from: text` reads the cell as Excel shows it, not the whole row", async () => {
-    // The tracker holds a real date as the serial 46030.41; `from: "text"` is for when what
-    // matters is what the cell displays. Graph hands the texts over as a matrix, and the mapping
-    // indexes by column, so passing it the matrix instead of the row yields a stringified row --
-    // which is exactly what used to happen, and what this case exists to keep from coming back.
     await spreadsheets.setMapping(sheet.id, {
       schemaVersionId: sheet.schema_version_id,
       columnMap: {
         ...MAP,
         fields: {
           ...MAP.fields,
-          // A written date, read as displayed: no serial, so the rule says the order.
           fecha_entrega: { op: "column", column: "Hora de inicio", from: "text", format: "DD/MM/YYYY" },
         },
       },
@@ -385,8 +369,6 @@ describe("importing a book's rows", () => {
   });
 
   describe("marcar filas como ya vistas", () => {
-    // El caso real: un rastreador que ya lleva meses. Marcar pone la raya, y de ahí en adelante
-    // sólo entra lo que alguien agregue.
     test("marcar las filas de hoy hace que la importación no cree nada", async () => {
       const marcado = await spreadsheets.markRows(sheet, read());
       assert.equal(marcado.rowsRead, 3);
@@ -438,7 +420,6 @@ describe("importing a book's rows", () => {
       assert.equal(ensayo.rowsMarked, 3);
       assert.equal(ensayo.dryRun, true);
 
-      // Nada se guardó: la importación sigue trayendo las tres.
       const corrida = await spreadsheets.importRows(sheet, read());
       assert.equal(corrida.rowsCreated, 3);
     });
@@ -460,7 +441,6 @@ describe("importing a book's rows", () => {
       await spreadsheets.markRows(sheet, read());
       await spreadsheets.clearMarks(sheet.id);
 
-      // Las solicitudes siguen ahí y su propia huella las sigue protegiendo.
       assert.equal((await requests()).length, 3);
       const otra = await spreadsheets.importRows(sheet, read());
       assert.equal(otra.rowsCreated, 0);
@@ -469,7 +449,6 @@ describe("importing a book's rows", () => {
 
     test("un libro sin mapeo no se puede marcar", async () => {
       await spreadsheets.clearMapping(sheet.id);
-      // Releído: la variable de arriba todavía trae la versión que acabamos de quitar.
       const sinMapeo = await query.getSheet(sheet.id);
 
       await assert.rejects(

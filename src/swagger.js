@@ -37,8 +37,10 @@ const errorSchema = {
   required: ['error'],
 };
 
-// A refusal, as an inline response object. Written as a helper because every path needs
-// three or four of them and the difference between them is one sentence.
+/**
+ * A refusal, as an inline response object. Written as a helper because every path needs
+ * three or four of them and the difference between them is one sentence.
+ */
 const errorResponse = (description, example) => ({
   description,
   content: {
@@ -49,10 +51,12 @@ const errorResponse = (description, example) => ({
   },
 });
 
-// The same trade as errorResponse(), for the three shapes the areas and roles routes repeat
-// two dozen times between them. Written as helpers rather than as more literal objects
-// because the difference between any two of those operations is a sentence, and a document
-// where the boilerplate outweighs the content stops being read.
+/**
+ * The same trade as errorResponse(), for the three shapes the areas and roles routes repeat
+ * two dozen times between them. Written as helpers rather than as more literal objects
+ * because the difference between any two of those operations is a sentence, and a document
+ * where the boilerplate outweighs the content stops being read.
+ */
 const pathId = (name, description) => ({
   name,
   in: 'path',
@@ -75,10 +79,12 @@ const jsonResponse = (description, schema) => ({
   },
 });
 
-// Most responses here are a single named key wrapping the record -- `{ area: {...} }`,
-// `{ roles: [...] }`. The envelope is deliberate: it leaves room to add a sibling field
-// without changing the type of the response body, which is what happened to
-// POST /api/users and its `inviteToken`.
+/**
+ * Most responses here are a single named key wrapping the record -- `{ area: {...} }`,
+ * `{ roles: [...] }`. The envelope is deliberate: it leaves room to add a sibling field
+ * without changing the type of the response body, which is what happened to
+ * POST /api/users and its `inviteToken`.
+ */
 const wrapped = (description, key, schema, isArray = false) => ({
   description,
   content: {
@@ -99,10 +105,12 @@ const wrapped = (description, key, schema, isArray = false) => ({
 const UNAUTHORIZED = { $ref: '#/components/responses/Unauthorized' };
 const FORBIDDEN = { $ref: '#/components/responses/Forbidden' };
 
-// The identity a session carries. Deliberately the same five fields the JWT holds and
-// verifyToken() returns, because that is what `req.user` means everywhere -- see
-// issueToken() in access/orchestration/auth.js. Permissions are not among them: the
-// catalog is editable at runtime (RF-USR-05), so they are read per request instead.
+/**
+ * The identity a session carries. Deliberately the same five fields the JWT holds and
+ * verifyToken() returns, because that is what `req.user` means everywhere -- see
+ * issueToken() in access/orchestration/auth.js. Permissions are not among them: the
+ * catalog is editable at runtime (RF-USR-05), so they are read per request instead.
+ */
 const sessionUserSchema = {
   type: 'object',
   properties: {
@@ -131,9 +139,11 @@ const sessionUserSchema = {
   required: ['id', 'email', 'fullName', 'roleId', 'role', 'areaId'],
 };
 
-// Builds the document. A function rather than a module-level constant so the server URL is
-// read when the API is mounted rather than when this module is first imported -- import
-// order is not something a caller should have to reason about to get the right host.
+/**
+ * Builds the document. A function rather than a module-level constant so the server URL is
+ * read when the API is mounted rather than when this module is first imported -- import
+ * order is not something a caller should have to reason about to get the right host.
+ */
 export function buildOpenApiDocument() {
   return {
     openapi: '3.1.0',
@@ -160,10 +170,6 @@ export function buildOpenApiDocument() {
     },
     servers: [
       {
-        // Relative, and first, on purpose: Swagger UI resolves it against the page it is
-        // being served from, so "Try it out" hits the host the reader actually opened --
-        // the random port a test binds, localhost in development, the tunnel domain in
-        // production -- without this file knowing which of those it is.
         url: '/',
         description: 'This server',
       },
@@ -269,9 +275,6 @@ export function buildOpenApiDocument() {
     ],
     components: {
       securitySchemes: {
-        // One scheme, for the session token only. The invite token is also a bearer
-        // credential but it never travels in this header -- it arrives in a request body
-        // -- so describing it here would put it in Authorize, where it does not work.
         bearerAuth: {
           type: 'http',
           scheme: 'bearer',
@@ -443,9 +446,6 @@ export function buildOpenApiDocument() {
           properties: { inviteToken: { type: 'string' } },
           required: ['inviteToken'],
         },
-        // The two read shapes. RF-USR-03 lets any colleague see who else is in the
-        // organisation, so `User` is what every signed-in caller gets; `UserAdmin` adds the
-        // fields that are coordination's business and nobody else's.
         UserArea: {
           type: 'object',
           properties: {
@@ -2578,12 +2578,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- areas ---
-      //
-      // Reads need only a session (RF-USR-03); writes need the `area.manage` permission,
-      // which catalog-bootstrap grants `admin` and PUT /api/roles/{id}/permissions can grant
-      // anyone else. The first router on the permission model -- see routes/areas.js.
-
       '/api/areas': {
         get: {
           tags: ['areas'],
@@ -2831,13 +2825,6 @@ export function buildOpenApiDocument() {
           },
         },
       },
-
-      // --- roles ---
-      //
-      // The catalogues are readable by anyone signed in; editing them is editing the
-      // authorisation model, so it is admin-only. Deliberately NOT requirePermission():
-      // the grants these endpoints write are what requirePermission() reads, so gating them
-      // on one would make an empty role_permissions unrecoverable over HTTP.
 
       '/api/contract-types': {
         get: {
@@ -3106,12 +3093,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- microsoft ---
-      //
-      // Reads need spreadsheet.read, writes spreadsheet.write -- the same two codes as
-      // /api/spreadsheets, because the accounts exist only to read the books. Which account
-      // somebody may touch is a record rule (owner or admin), applied in orchestration.
-
       '/api/microsoft/callback': {
         get: {
           tags: ['microsoft'],
@@ -3244,8 +3225,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- spreadsheets ---
-
       '/api/spreadsheets': {
         get: {
           tags: ['spreadsheets'],
@@ -3372,8 +3351,6 @@ export function buildOpenApiDocument() {
         },
       },
       
-      // --- requests ---
-
       '/api/requests': {
         get: {
           tags: ['requests'],
@@ -3594,8 +3571,6 @@ export function buildOpenApiDocument() {
           },
         },
       },
-
-      // --- projects ---
 
       '/api/projects': {
         get: {
@@ -4145,8 +4120,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- requesters ---
-
       '/api/requesters': {
         get: {
           tags: ['requesters'],
@@ -4165,8 +4138,6 @@ export function buildOpenApiDocument() {
           },
         },
       },
-
-      // --- statuses ---
 
       '/api/statuses': {
         get: {
@@ -4248,8 +4219,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- data types ---
-
       '/api/data-types': {
         get: {
           tags: ['data-types'],
@@ -4275,8 +4244,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- schemas ---
-      
       '/api/schemas': {
         get: {
           tags: ['schemas'],
@@ -4570,9 +4537,6 @@ export function buildOpenApiDocument() {
         },
       },
     },
-    // Applied to every operation that does not override it. The public ones say
-    // `security: []` explicitly rather than relying on this being absent, so a route added
-    // later without a thought about auth is documented as locked rather than as open.
     security: [{ bearerAuth: [] }],
   };
 }

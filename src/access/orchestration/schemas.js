@@ -55,11 +55,16 @@ import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  requireText,
+  requireId,
+} from "../../utils/validate.js";
 
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
-
-/** Column widths from projects-spine, checked here so a 22001 becomes a 400 naming the field. */
+/**
+ *  Column widths from projects-spine, checked here so a 22001 becomes a 400 naming the field.
+ */
 const CODE_MAX = 50;
 const NAME_MAX = 300;
 
@@ -265,29 +270,9 @@ class Schemas {
   }
 }
 
-/* HELPERS */
-
 /** The session's user id, or null outside a request (a script, a job). */
 function publisher() {
   return currentActor()?.id ?? null;
-}
-
-function requireText(value, field, max) {
-  const text = typeof value === "string" ? value.trim() : "";
-  if (!text) throw ApiError.badRequest(`${field} is required.`);
-  if (text.length > max) throw ApiError.badRequest(`${field} must be ${max} characters or fewer.`);
-  return text;
-}
-
-function requireId(value, field) {
-  if (value === null || value === undefined || typeof value === "boolean") {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
 }
 
 /**
@@ -331,8 +316,6 @@ export async function validateFields(fields, vocabulary = null) {
     throw ApiError.badRequest("A format must define at least one field.");
   }
 
-  // One namespace across both sections: the code is the key in requests.data and in
-  // project_field_values, and neither knows which section it came from.
   const seen = new Set();
   const out = { deliverables: [], information: [] };
 
@@ -350,8 +333,6 @@ async function fieldVocabulary() {
   const rows = await query.listFieldKeys();
   return new Map(rows.map((row) => [row.key, row]));
 }
-
-
 
 /** One field of one section. @throws {ApiError} 400. */
 async function validateField(field, section, seen, known) {
@@ -390,8 +371,6 @@ async function validateField(field, section, seen, known) {
     throw ApiError.badRequest(`Data type "${type}" does not exist or is inactive.`);
   }
 
-  // The key already means something. Same type: fine, that is reuse and the point of the
-  // vocabulary. Different type: refused, because the values stored under it are of the old one.
   const published = known.get(code);
   if (published !== undefined && published.type !== type) {
     const where = (published.schemas ?? []).join(", ");

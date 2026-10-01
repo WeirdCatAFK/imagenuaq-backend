@@ -1,3 +1,6 @@
+// El vocabulario de claves. Una clave no es una etiqueta local de un formato: es lo que nombra
+// al valor en `requests.data` y en `project_field_values`, así que tiene que significar una sola
+// cosa en todo el sistema.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,9 +14,6 @@ import {
   TEST_SCHEMA_PREFIX,
 } from "./helpers/fixtures.js";
 
-// El vocabulario de claves. Una clave no es una etiqueta local de un formato: es lo que nombra
-// al valor en `requests.data` y en `project_field_values`, así que tiene que significar una sola
-// cosa en todo el sistema.
 describe("GET /api/schemas/field-keys", () => {
   let server;
   let adminToken;
@@ -33,7 +33,6 @@ describe("GET /api/schemas/field-keys", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -53,11 +52,9 @@ describe("GET /api/schemas/field-keys", () => {
     assert.equal(porClave.numero_orden.type, "text");
     assert.ok(porClave.numero_orden.schemas.includes("Papel institucional"));
 
-    // `descripcion` la piden varios formatos: eso es reuso, y es el punto del vocabulario.
     assert.ok(porClave.descripcion.schemaCount >= 2, "la comparten varios formatos");
     assert.equal(porClave.descripcion.type, "text");
 
-    // Ordenado por clave, para que la lista sea buscable.
     assert.deepEqual([...claves.map((una) => una.key)].sort(), claves.map((una) => una.key));
   });
 
@@ -113,7 +110,6 @@ describe("GET /api/schemas/field-keys", () => {
       information: [],
     });
 
-    // La versión 2 ya no la pide.
     const v2 = await server.post(`/api/schemas/${formato.id}/versions`, {
       token: adminToken,
       body: {
@@ -125,7 +121,6 @@ describe("GET /api/schemas/field-keys", () => {
     });
     assert.equal(v2.status, 201);
 
-    // Sigue ahí: hay datos capturados debajo, así que la clave sigue significando algo.
     assert.ok(
       (await vocabulario()).some((una) => una.key === "clave_retirada"),
       "no se puede reusar con otro significado solo porque el formato dejó de pedirla",
@@ -184,7 +179,6 @@ describe("GET /api/schemas/field-keys", () => {
         },
       });
 
-      // Es la misma regla, no otra: los valores ya capturados son del tipo viejo.
       assert.equal(res.status, 400);
       assert.match(res.body.error.message, /already exists as "text"/);
     });

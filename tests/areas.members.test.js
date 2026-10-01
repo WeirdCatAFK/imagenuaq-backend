@@ -1,3 +1,6 @@
+// Membership of an area, and leadership of it. Both live on `area_members` rather than on
+// `areas`, because somebody can lead one area and be an ordinary member of another --
+// the conclusion the schema-proofing migration reached when it dropped areas.lead_user_id.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -11,9 +14,6 @@ import {
   areaMemberships,
 } from './helpers/fixtures.js';
 
-// Membership of an area, and leadership of it. Both live on `area_members` rather than on
-// `areas`, because somebody can lead one area and be an ordinary member of another --
-// the conclusion the schema-proofing migration reached when it dropped areas.lead_user_id.
 describe('/api/areas/:id/members', () => {
   let server;
   let adminToken;
@@ -34,7 +34,6 @@ describe('/api/areas/:id/members', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -65,9 +64,6 @@ describe('/api/areas/:id/members', () => {
       });
     });
 
-    // One route for both because they are one upsert. Calling it twice must not raise on
-    // the unique index over (user_id, area_id) -- promoting an existing member and adding a
-    // new leader are the same intent expressed twice.
     test('calling it again promotes rather than failing on the unique index', async () => {
       const user = await createActive({ email: 'asciende@uaq.mx', role: 'worker' });
 
@@ -91,7 +87,6 @@ describe('/api/areas/:id/members', () => {
       assert.equal(demoted.body.isAreaLeader, false);
     });
 
-    // The reason leadership is not a column on `areas`.
     test('a user can lead one area and be an ordinary member of another', async () => {
       const user = await createActive({ email: 'doble@uaq.mx', role: 'area_lead' });
 
@@ -158,8 +153,6 @@ describe('/api/areas/:id/members', () => {
       assert.deepEqual(await areaMemberships(user.id), []);
     });
 
-    // The membership, not the account. Deleting a person because they left one area would
-    // be the most destructive possible reading of this route.
     test('leaves the user account alone', async () => {
       const user = await createActive({ email: 'sigue@uaq.mx', role: 'worker' });
       await addMember(area.id, user.id);
@@ -205,8 +198,6 @@ describe('/api/areas/:id/members', () => {
       assert.equal(res.body.members[0].role, 'area_lead');
     });
 
-    // An area with nobody in it and an area that does not exist both produce zero rows, and
-    // they are a 200 and a 404.
     test('an empty area is 200 with an empty list', async () => {
       const res = await server.get(`/api/areas/${area.id}/members`, { token: workerToken });
 

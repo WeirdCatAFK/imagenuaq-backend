@@ -51,7 +51,6 @@ class Audit {
     try {
       return await pending;
     } catch (err) {
-      // Drop a rejected promise so a failed read at start-up is retried.
       this.#actions = null;
       throw err;
     }
@@ -106,7 +105,6 @@ class Audit {
         row.user_id === null
           ? null
           : { id: row.user_id, fullName: row.user_full_name },
-      // The area recorded on the row: where the actor was then, not now.
       area:
         row.area_id === null ? null : { id: row.area_id, name: row.area_name },
       target:

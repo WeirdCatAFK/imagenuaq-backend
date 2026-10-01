@@ -2,7 +2,13 @@ import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { startServer } from './helpers/server.js';
-import { reset, createActive, createPending, softDelete, PASSWORD } from './helpers/fixtures.js';
+import {
+  reset,
+  createActive,
+  createPending,
+  softDelete,
+  PASSWORD,
+} from './helpers/fixtures.js';
 
 describe('POST /api/auth/login', () => {
   let server;
@@ -41,7 +47,6 @@ describe('POST /api/auth/login', () => {
       assert.equal(res.body.error.message, 'Email and password are required.');
     });
 
-    // `req.body ?? {}` in the route. Without it this would be a TypeError and a 500.
     test('no body at all is 400, not a crash', async () => {
       const res = await server.post('/api/auth/login');
 
@@ -50,11 +55,6 @@ describe('POST /api/auth/login', () => {
     });
   });
 
-  // The property ABSENT_USER_HASH exists to protect. Three genuinely different states --
-  // no such address, an address that has never chosen a password, and the wrong password
-  // for a live account -- must be indistinguishable from outside. Splitting any of them
-  // into its own message would hand an attacker a free "does this address have an
-  // account?" oracle, which is exactly what the dummy bcrypt comparison is paying for.
   describe('refusals are indistinguishable', () => {
     test('an unknown email is 401', async () => {
       const res = await login({ email: 'nobody@uaq.mx', password: PASSWORD });
@@ -72,9 +72,6 @@ describe('POST /api/auth/login', () => {
       assert.equal(res.body.error.message, 'Invalid email or password.');
     });
 
-    // A created-but-never-activated account has password_hash IS NULL. It must refuse like
-    // any other bad login rather than announcing that the address is real and merely
-    // dormant.
     test('an account that has never activated is 401 with the same message', async () => {
       await createPending({ email: 'pendiente@uaq.mx' });
 
@@ -139,9 +136,6 @@ describe('POST /api/auth/login', () => {
       });
     });
 
-    // The response is assembled field by field in orchestration/auth.js rather than by
-    // spreading the row, and this is what that buys. A refactor to `...user` would leak
-    // the hash to every client that logs in.
     test('never returns the password hash', async () => {
       await createActive({ email: 'ana@uaq.mx' });
 
@@ -152,9 +146,6 @@ describe('POST /api/auth/login', () => {
       assert.equal(res.text.includes('$2b$'), false);
     });
 
-    // Addresses are lowercased when the account is created, so the lookup has to lowercase
-    // too -- a phone keyboard capitalises the first letter of an email by default, and
-    // without this those users simply cannot log in.
     test('the email is matched case-insensitively', async () => {
       await createActive({ email: 'ana@uaq.mx' });
 
@@ -172,8 +163,6 @@ describe('POST /api/auth/login', () => {
       assert.equal(res.status, 200);
     });
 
-    // The password is the one thing not normalised: a trimmed password would silently
-    // accept a credential the user did not choose.
     test('whitespace in the password is significant', async () => {
       await createActive({ email: 'ana@uaq.mx' });
 

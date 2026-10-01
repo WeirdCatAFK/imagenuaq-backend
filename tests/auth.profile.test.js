@@ -1,3 +1,7 @@
+// A person editing their own record through /api/auth/me. The write half of /api/users is
+// admin-only and these cases exist to show that the self-service block is not a way round
+// it: the keys coordination owns are dropped, the id comes from the session and nowhere
+// else, and a password change demands the current one first.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,10 +16,6 @@ import {
   PASSWORD,
 } from './helpers/fixtures.js';
 
-// A person editing their own record through /api/auth/me. The write half of /api/users is
-// admin-only and these cases exist to show that the self-service block is not a way round
-// it: the keys coordination owns are dropped, the id comes from the session and nowhere
-// else, and a password change demands the current one first.
 describe('/api/auth/me self-service', () => {
   let server;
   let adminToken;
@@ -45,13 +45,10 @@ describe('/api/auth/me self-service', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
 
-  // Each case restores the worker's own row: the file logs in once and every case edits
-  // the same account, so a rename left behind would leak into the next assertion.
   beforeEach(async () => {
     await resetCases(ACCOUNTS);
     await server.patch('/api/auth/me', {
@@ -88,11 +85,9 @@ describe('/api/auth/me self-service', () => {
       assert.equal(res.status, 200);
       assert.equal(res.body.user.fullName, 'Ana G. Ruiz');
       assert.equal(res.body.user.birthday, '1990-05-04');
-      // The response carries the role, as GET does; a bare RETURNING row would say null.
       assert.equal(res.body.user.role, 'worker');
       assert.equal(res.body.user.roleId, worker.role_id);
 
-      // verifyToken() re-reads the row, so the same token now carries the new name.
       const me = await server.get('/api/auth/me', { token: workerToken });
       assert.equal(me.body.user.fullName, 'Ana G. Ruiz');
     });
@@ -185,11 +180,9 @@ describe('/api/auth/me self-service', () => {
       });
       assert.equal(fresh.status, 200);
 
-      // The session the change was made from keeps working: token_version is untouched.
       const me = await server.get('/api/auth/me', { token: workerToken });
       assert.equal(me.status, 200);
 
-      // Put it back so the other cases, and the file's own login, still work.
       await change({ currentPassword: NEW, newPassword: PASSWORD });
     });
   });

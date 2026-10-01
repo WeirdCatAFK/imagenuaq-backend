@@ -27,7 +27,6 @@ describe('GET /api/health', () => {
     assert.equal(body.database.reachable, true);
     assert.equal(typeof body.database.latencyMs, 'number');
     assert.ok(body.database.latencyMs >= 0);
-    // The error field belongs to the degraded shape and must not appear here.
     assert.equal('error' in body.database, false);
   });
 

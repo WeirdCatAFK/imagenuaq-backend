@@ -1,3 +1,6 @@
+// The hierarchy and the chart it draws. The shape asserted here is the contract with
+// react-organizational-chart on the frontend: every node carries its own `children`, so
+// <Tree>/<TreeNode> recurse over the response with no reshaping.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,28 +15,17 @@ import {
   TEST_PREFIX,
 } from './helpers/fixtures.js';
 
-// The hierarchy and the chart it draws. The shape asserted here is the contract with
-// react-organizational-chart on the frontend: every node carries its own `children`, so
-// <Tree>/<TreeNode> recurse over the response with no reshaping.
 describe('the organisation chart', () => {
   let server;
   let adminToken;
   let workerToken;
 
-  // A three-level tree built once per case:
-  //
-  //   Coordinación
-  //     ├── Diseño
-  //     │     └── Web
-  //     └── Imprenta
-  //   Suelta            (a second root -- the organisation is a forest, not a tree)
   let coordinacion;
   let diseno;
   let web;
   let imprenta;
   let suelta;
 
-  // Created once; see areas.crud.test.js for why the accounts are not rebuilt per case.
   const ACCOUNTS = ['coordinacion@uaq.mx', 'disenador@uaq.mx'];
 
   before(async () => {
@@ -47,12 +39,10 @@ describe('the organisation chart', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
 
-  // The tree is rebuilt per case because most cases move or delete part of it.
   beforeEach(async () => {
     await resetCases(ACCOUNTS);
 
@@ -85,9 +75,6 @@ describe('the organisation chart', () => {
     return walk(roots);
   };
 
-  // Express matches in declaration order, so /orgchart has to be declared before /:id. With
-  // them the other way round this URL is read as an id and refused as "Invalid area id." --
-  // a failure that only ever shows up at runtime.
   test('GET /orgchart is not captured by /:id', async () => {
     const res = await server.get('/api/areas/orgchart', { token: workerToken });
 
@@ -137,8 +124,6 @@ describe('the organisation chart', () => {
       assert.equal(nodeFor(res.body.roots, web.id).parentAreaId, diseno.id);
     });
 
-    // A forest, not a tree. Inventing a synthetic root to join the parentless areas would
-    // put a box in the chart that answers to nobody.
     test('an area with no parent is its own root', async () => {
       const res = await server.get('/api/areas/orgchart', { token: adminToken });
 
@@ -166,7 +151,6 @@ describe('the organisation chart', () => {
 
       assert.equal(design.memberCount, 2);
       assert.equal(design.members.length, 2);
-      // Leaders first, so the chart can label the node with members[0] if it wants to.
       assert.equal(design.members[0].id, lead.id);
       assert.deepEqual(design.leaders.map((person) => person.id), [lead.id]);
       assert.equal(design.members[0].fullName, 'Jefa');
@@ -182,8 +166,6 @@ describe('the organisation chart', () => {
       assert.equal(node.memberCount, 0);
     });
 
-    // A soft-deleted user is gone from the organisation's point of view, and leaving them
-    // on the chart would be the most visible possible version of that bug.
     test('soft-deleted users are not in the chart', async () => {
       const leaver = await createActive({ email: 'sale@uaq.mx', role: 'worker' });
       await server.put(`/api/areas/${diseno.id}/members/${leaver.id}`, {
@@ -199,7 +181,6 @@ describe('the organisation chart', () => {
   });
 
   describe('GET /api/areas/:id/orgchart', () => {
-    // The read RF-USR-04 is written in: everyone "a su cargo" is this subtree.
     test('returns the subtree rooted at that area', async () => {
       const res = await server.get(`/api/areas/${diseno.id}/orgchart`, { token: workerToken });
 
@@ -210,9 +191,6 @@ describe('the organisation chart', () => {
       assert.equal(res.body.roots[0].children[0].id, web.id);
     });
 
-    // depth restarts, because it describes this response; parentAreaId does not, because it
-    // describes the table. Conflating them would either lie about the organisation or make
-    // the chart indent the top node.
     test('depth restarts at the subtree root but parentAreaId still points up', async () => {
       const res = await server.get(`/api/areas/${diseno.id}/orgchart`, { token: adminToken });
 
@@ -237,7 +215,6 @@ describe('the organisation chart', () => {
 
       const chart = await server.get('/api/areas/orgchart', { token: adminToken });
       assert.equal(nodeFor(chart.body.roots, web.id).parentAreaId, imprenta.id);
-      // And it appears exactly once, which is what the single-parent primary key buys.
       assert.equal(nodeFor(chart.body.roots, diseno.id).children.length, 0);
     });
 
@@ -248,8 +225,6 @@ describe('the organisation chart', () => {
       assert.equal(res.body.error.message, 'An area cannot be its own parent.');
     });
 
-    // The refusal the database cannot make: area_hierarchy constrains one hop, and
-    // Areas.setParent() is the only thing standing between the table and a loop.
     test('a move that would close a cycle is 409', async () => {
       const res = await setParent(coordinacion.id, web.id);
 
@@ -304,7 +279,6 @@ describe('the organisation chart', () => {
 
       const chart = await server.get('/api/areas/orgchart', { token: adminToken });
       assert.ok(chart.body.roots.some((node) => node.id === diseno.id));
-      // Its own child comes with it: the subtree moves, it does not scatter.
       assert.equal(nodeFor(chart.body.roots, diseno.id).children[0].id, web.id);
     });
 
@@ -324,7 +298,6 @@ describe('the organisation chart', () => {
     });
   });
 
-  // ON DELETE CASCADE on area_hierarchy: the links go, the grandchildren stay drawable.
   test('deleting a parent area promotes its children to roots', async () => {
     await server.delete(`/api/areas/${diseno.id}/parent`, { token: adminToken });
     const res = await server.delete(`/api/areas/${diseno.id}`, { token: adminToken });

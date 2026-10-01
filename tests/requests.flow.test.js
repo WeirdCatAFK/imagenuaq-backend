@@ -1,3 +1,5 @@
+// Routing by flow (request-flows, DATAMODEL.md §2.5): a request owns a copy of its flow, sits in
+// the inbox of every area of the first phase, and hands the same phases to its project.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -13,8 +15,6 @@ import {
   sql,
 } from "./helpers/fixtures.js";
 
-// Routing by flow (request-flows, DATAMODEL.md §2.5): a request owns a copy of its flow, sits in
-// the inbox of every area of the first phase, and hands the same phases to its project.
 describe("a request's flow", () => {
   let server;
   let adminToken;
@@ -38,7 +38,6 @@ describe("a request's flow", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -53,7 +52,6 @@ describe("a request's flow", () => {
 
   const stage = (areaId, title, overrides = {}) => ({ areaId, title, estimatedDays: 2, ...overrides });
 
-  // Two areas in parallel first, then the print shop.
   const phases = () => [
     { name: "Diseño", stages: [stage(design.id, "Propuesta"), stage(texts.id, "Textos")] },
     { name: "Producción", stages: [stage(print.id, "Imprimir", { outputs: ["numero_orden"] })] },

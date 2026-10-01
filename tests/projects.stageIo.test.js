@@ -12,7 +12,6 @@ import {
   sql,
 } from "./helpers/fixtures.js";
 
-// Lo que una etapa recibe y lo que entrega (RF-FLW-06), y los dos tipos de campo de finanzas.
 describe("las entradas y salidas de una etapa", () => {
   let server;
   let adminToken;
@@ -33,7 +32,6 @@ describe("las entradas y salidas de una etapa", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -136,7 +134,6 @@ describe("las entradas y salidas de una etapa", () => {
       assert.equal(negado.status, 409);
       assert.match(negado.body.error.message, /numero_orden, folio_sin/);
 
-      // La etapa sigue abierta: nada quedó a medias.
       const lista = await server.get(`/api/projects/${hecho.id}/stages`, { token: adminToken });
       assert.equal(lista.body.stages[0].status, "active");
       assert.equal((await sql("select count(*)::int as n from approvals"))[0].n, 0);
@@ -176,7 +173,6 @@ describe("las entradas y salidas de una etapa", () => {
       });
       assert.equal(rechazado.status, 201);
 
-      // El intento nuevo debe la misma salida: es la misma etapa.
       const nueva = rechazado.body.reopened[0];
       assert.deepEqual(nueva.outputs, ["numero_orden"]);
       assert.deepEqual(nueva.inputs, ["dependencia"]);
@@ -190,8 +186,6 @@ describe("las entradas y salidas de una etapa", () => {
         { areaId: area.id, title: "Diseño", outputs: ["numero_orden"] },
       ]);
 
-      // El API ya rechaza un valor vacío, así que la fila se escribe directo para probar
-      // que el conteo mira el valor y no solo la existencia de la clave.
       await sql(
         "insert into project_field_values (project_id, key, value) values ($1, 'numero_orden', '')",
         [hecho.id],
@@ -244,12 +238,10 @@ describe("las entradas y salidas de una etapa", () => {
     test("ve el tablero y pide, sin poder editar el proyecto", async () => {
       const hecho = await project([{ areaId: area.id, title: "Diseño" }]);
 
-      // project.read le alcanza para el tablero.
       const tablero = await server.get("/api/projects", { token: financeToken });
       assert.equal(tablero.status, 200);
       assert.equal(tablero.body.projects.length, 1);
 
-      // project.write no lo tiene.
       const intento = await server.patch(`/api/projects/${hecho.id}`, {
         token: financeToken,
         body: { title: "Otro" },
@@ -265,7 +257,6 @@ describe("las entradas y salidas de una etapa", () => {
       assert.equal(pedido.body.request.needed, true);
       assert.equal(pedido.body.request.note, "Falta el desglose por partida");
 
-      // Quedó como un valor cualquiera del proyecto, así que el filtro del tablero lo encuentra.
       const encontrado = await server.get("/api/projects?fieldKey=requiere_factura", {
         token: financeToken,
       });
@@ -291,7 +282,6 @@ describe("las entradas y salidas de una etapa", () => {
       const despues = await server.get(`/api/projects/${hecho.id}/field-values`, { token: adminToken });
       assert.ok(!despues.body.fieldValues.some((uno) => uno.key === "requiere_cotizacion"));
 
-      // Retirar algo que nadie pidió no falla.
       assert.equal((await pedir({ kind: "quote", needed: false })).status, 200);
     });
 

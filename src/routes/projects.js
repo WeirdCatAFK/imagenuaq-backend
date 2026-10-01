@@ -8,9 +8,11 @@ import { Router } from "express";
 
 import projects from "../access/orchestration/projects.js";
 import { authenticate, requirePermission } from "../middlewares/auth.js";
-import { ApiError } from "../utils/ApiError.js";
+import { idParam } from "../utils/params.js";
 
 const router = Router();
+const projectId = (req) => idParam(req, "id", "project id");
+const stageId = (req) => idParam(req, "stageId", "stage id");
 
 router.use(authenticate);
 router.use(requirePermission("project.read"));
@@ -31,9 +33,6 @@ router.get("/:id/field-values", async (req, res) => {
   res.json({ fieldValues: await projects.listFieldValues(projectId(req)) });
 });
 
-// Finanzas: señalar que el proyecto necesita cotización o factura, sin poder editarlo.
-// Declarada antes del bloque de escritura y con su propio permiso: RF-USR-05 separa leer de
-// escribir, y `project.write` alcanzaría para etapas, vistos buenos y cierre.
 router.post("/:id/finance-request", requirePermission("finance.request"), async (req, res) => {
   const { kind, needed, note } = req.body ?? {};
   res.json({
@@ -68,7 +67,6 @@ router.delete("/:id", async (req, res) => {
   res.json({ project: await projects.remove(projectId(req)) });
 });
 
-// RF-PRY-01: one project may answer several requests.
 router.post("/:id/requests", requirePermission("request.write"), async (req, res) => {
   const { requestIds } = req.body ?? {};
   res.json({ project: await projects.attachRequests(projectId(req), requestIds) });
@@ -82,7 +80,6 @@ router.patch("/:id/stages/:stageId", async (req, res) => {
   res.json({ stage: await projects.updateStage(projectId(req), stageId(req), req.body ?? {}) });
 });
 
-// The sign-off RF-FLW-03 asks for. `rejected` reruns the stage at the next attempt.
 router.post("/:id/stages/:stageId/approvals", async (req, res) => {
   const { decision, comment, evidenceFileId } = req.body ?? {};
   res.status(201).json(
@@ -103,19 +100,5 @@ router.put("/:id/field-values/:key", async (req, res) => {
 router.delete("/:id/field-values/:key", async (req, res) => {
   res.json({ fieldValue: await projects.deleteFieldValue(projectId(req), req.params.key) });
 });
-
-function projectId(req) {
-  return positiveInt(req.params.id, "project id");
-}
-
-function stageId(req) {
-  return positiveInt(req.params.stageId, "stage id");
-}
-
-function positiveInt(raw, what) {
-  const id = Number(raw);
-  if (!Number.isInteger(id) || id <= 0) throw ApiError.badRequest(`Invalid ${what}.`);
-  return id;
-}
 
 export default router;

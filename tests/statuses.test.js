@@ -9,7 +9,7 @@ import {
   createArea,
   tokenFor,
   logsFor,
-  roleId,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
 describe("/api/statuses", () => {
@@ -19,7 +19,6 @@ describe("/api/statuses", () => {
 
   const ACCOUNTS = ["coordinacion@uaq.mx", "disenador@uaq.mx"];
 
-  // Seeded by projects-spine, plus `rechazada` from status-manage.
   const GLOBAL = [
     "recibido",
     "en_proceso",
@@ -44,23 +43,14 @@ describe("/api/statuses", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
 
   beforeEach(() => resetCases(ACCOUNTS));
 
-  async function grantWorker(permissions) {
-    const res = await server.put(
-      `/api/roles/${await roleId("worker")}/permissions`,
-      {
-        token: adminToken,
-        body: { permissions },
-      },
-    );
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   const create = (body, token = adminToken) =>
     server.post("/api/statuses", { token, body });
@@ -75,7 +65,6 @@ describe("/api/statuses", () => {
         GLOBAL,
       );
       assert.ok(res.body.statuses.every((s) => s.isGlobal === true));
-      // RF-EST-05 reads these: the two outcomes that end a project.
       assert.deepEqual(
         res.body.statuses.filter((s) => s.isTerminal).map((s) => s.code),
         ["rechazada", "cerrado"],
@@ -106,7 +95,6 @@ describe("/api/statuses", () => {
       assert.equal(own.areaName, area.name);
       assert.equal(own.isGlobal, false);
 
-      // Another area does not see it.
       const other = await createArea("Otra área");
       const isolated = await server.get(`/api/statuses?areaId=${other.id}`, {
         token: workerToken,
@@ -128,7 +116,6 @@ describe("/api/statuses", () => {
 
   describe("POST /", () => {
     test("an area may reuse a global code", async () => {
-      // Two partial unique indexes, not one on the pair: NULL is distinct from NULL.
       const area = await createArea("Diseño de prueba");
       const res = await create({
         areaId: area.id,
@@ -305,7 +292,6 @@ describe("/api/statuses", () => {
       const found = shown.body.statuses.find((s) => s.id === id);
       assert.equal(found.isActive, false);
 
-      // The row is still readable by id: requests and projects reference it.
       assert.equal(
         (await server.get(`/api/statuses/${id}`, { token: adminToken })).status,
         200,

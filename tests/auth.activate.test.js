@@ -76,10 +76,6 @@ describe('POST /api/auth/activate', () => {
       assert.equal(res.body.error.message, 'Invalid or expired invitation.');
     });
 
-    // The mirror of the check in auth.me: the two token kinds are interchangeable in every
-    // respect except the purpose claim, so it has to be enforced from both ends. A session
-    // accepted here would let anyone holding a login set a new password without presenting
-    // the old one.
     test('a session token is not an invitation', async () => {
       await createActive({ email: 'ana@uaq.mx' });
       const login = await server.post('/api/auth/login', {
@@ -92,8 +88,6 @@ describe('POST /api/auth/activate', () => {
       assert.equal(res.body.error.message, 'Invalid or expired invitation.');
     });
 
-    // The row is re-read at redemption rather than trusted from the token's age, so an
-    // account removed after the invite went out cannot still be claimed.
     test('an invitation for a soft-deleted user is 401', async () => {
       const { user, invite } = await invited();
       await softDelete(user.id);
@@ -124,9 +118,6 @@ describe('POST /api/auth/activate', () => {
       assert.equal(res.body.error.message, 'Password must be at least 8 characters long.');
     });
 
-    // A rejected password must leave the account exactly as it was, still claimable. If the
-    // write happened before the length check the invite would be spent on a password the
-    // user never successfully set, locking them out of their own account.
     test('a rejected password leaves the invitation usable', async () => {
       const { user, invite } = await invited();
 
@@ -152,15 +143,9 @@ describe('POST /api/auth/activate', () => {
         fullName: 'Nuevo Usuario',
         roleId: user.role_id,
         role: 'worker',
-        // The session gained the area when logs.area_id did -- a screen needs to know which
-        // area the signed-in user is in without spending a request. Asserting the whole
-        // object is what caught the addition instead of letting it reach the frontend
-        // unannounced. Null here because this fixture has no primary area.
         areaId: null,
       });
 
-      // Logged in immediately rather than bounced to a login form for credentials they
-      // have only just chosen.
       const me = await server.get('/api/auth/me', { token: res.body.token });
       assert.equal(me.status, 200);
       assert.equal(me.body.user.id, user.id);
@@ -183,15 +168,10 @@ describe('POST /api/auth/activate', () => {
 
       const { password_hash: hash } = await findUser(user.id);
 
-      // Cost 12, matching SALT_ROUNDS. A fixture or a script hashing at a different cost
-      // would still verify, so nothing else would notice the drift.
       assert.match(hash, /^\$2[aby]\$12\$/);
       assert.equal(hash.includes(NEW_PASSWORD), false);
     });
 
-    // Single use, with no table behind it and no revocation list to keep: the invite is
-    // valid only while the account has no password, and redeeming it gives the account one.
-    // A replayed link therefore fails on its second use by construction.
     test('the same invitation cannot be redeemed twice', async () => {
       const { invite } = await invited();
 
@@ -203,10 +183,6 @@ describe('POST /api/auth/activate', () => {
       assert.equal(res.body.error.message, 'This invitation has already been used.');
     });
 
-    // Ordering, pinned deliberately. completeInvite() checks the row before it checks the
-    // password, so a spent invite reports 409 even when the password would also have been
-    // refused. Hoisting the length check -- which reads as a harmless "validate early"
-    // tidy-up -- would turn this into a 400 and tell the caller to fix the wrong thing.
     test('a spent invitation reports the conflict, not the short password', async () => {
       const { invite } = await invited();
       await activate({ token: invite, password: NEW_PASSWORD });

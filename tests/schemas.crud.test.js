@@ -1,3 +1,5 @@
+// Request formats (RF-SOL-01): the identity, its immutable versions, and the field shape
+// orchestration/schemas.js normalises before anything is stored.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -14,8 +16,6 @@ import {
   TEST_SCHEMA_PREFIX,
 } from './helpers/fixtures.js';
 
-// Request formats (RF-SOL-01): the identity, its immutable versions, and the field shape
-// orchestration/schemas.js normalises before anything is stored.
 describe('/api/schemas', () => {
   let server;
   let admin;
@@ -49,7 +49,6 @@ describe('/api/schemas', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -71,15 +70,12 @@ describe('/api/schemas', () => {
       assert.equal(schema.isActive, true);
       assert.ok(schema.schemaVersionId);
 
-      // Both sections come back, in order, with the defaults filled in and baseType
-      // attached from the data_types catalogue.
       assert.deepEqual(Object.keys(schema.fields), ['deliverables', 'information']);
       assert.deepEqual(schema.fields.deliverables.map((f) => f.code), ['tiraje', 'fecha_entrega']);
       assert.deepEqual(schema.fields.deliverables[0], {
         code: 'tiraje', name: 'Tiraje', type: 'quantity', note: 'Total de piezas',
         required: true, baseType: 'number',
       });
-      // note and required defaulted, not dropped.
       assert.deepEqual(schema.fields.deliverables[1], {
         code: 'fecha_entrega', name: 'Fecha de entrega', type: 'date', note: '',
         required: false, baseType: 'date',
@@ -121,7 +117,6 @@ describe('/api/schemas', () => {
       ['a note that is not a string', withSection('information', [{ code: 'x', name: 'X', type: 'text', note: 5 }]), /note must be a string/],
       ['no name', withSection('information', [{ code: 'x', name: ' ', type: 'text' }]), /must have a name/],
       ['a field that is not an object', withSection('information', ['dependencia']), /must be an object/],
-      // The shape of the document itself.
       ['a flat array', [{ code: 'x', name: 'X', type: 'text' }], /not a flat array/],
       ['a missing section', { deliverables: [{ code: 'x', name: 'X', type: 'text' }] }, /"information" is required/],
       ['a section that is not an array', { deliverables: {}, information: [] }, /"deliverables" is required and must be an array/],
@@ -138,8 +133,6 @@ describe('/api/schemas', () => {
     }
 
     test('refuses a code repeated ACROSS the two sections', async () => {
-      // One namespace: the code is the key in requests.data and in project_field_values,
-      // and neither knows which section it came from.
       const res = await create({
         code: `${TEST_SCHEMA_PREFIX}choque`,
         name: 'Choque',
@@ -181,7 +174,6 @@ describe('/api/schemas', () => {
       assert.ok(codes.includes(`${TEST_SCHEMA_PREFIX}uno`));
       const starter = res.body.schemas.find((x) => x.code === 'papel_institucional');
       assert.ok(starter, 'the seeded starter format');
-      // The seeds were rewritten into the sections shape by schema-field-sections.
       assert.deepEqual(Object.keys(starter.fields), ['deliverables', 'information']);
       assert.ok(starter.fields.deliverables.some((f) => f.code === 'tiraje' && f.required === true));
       assert.ok(starter.fields.information.some((f) => f.code === 'numero_orden'));
@@ -199,7 +191,6 @@ describe('/api/schemas', () => {
       const list = await server.get(`/api/schemas/${schema.id}/versions`, { token: workerToken });
       assert.equal(list.status, 200);
       assert.deepEqual(list.body.versions.map((v) => v.version), [2, 1]);
-      // Version 1 is what it was: the fixture's one-per-section document, not v2's.
       assert.equal(list.body.versions[1].fields.deliverables.length, 1);
       assert.equal(list.body.versions[1].fields.information.length, 1);
 

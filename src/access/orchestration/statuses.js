@@ -9,9 +9,14 @@
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  requireText,
+  requireId,
+  requireInt,
+  requireBoolean,
+} from "../../utils/validate.js";
 
 const CODE = /^[a-z][a-z0-9_]{0,49}$/;
 const LABEL_MAX = 200;
@@ -131,15 +136,6 @@ class Statuses {
   }
 }
 
-/* HELPERS */
-
-function requireText(value, field, max) {
-  const text = typeof value === "string" ? value.trim() : "";
-  if (!text) throw ApiError.badRequest(`${field} is required.`);
-  if (text.length > max) throw ApiError.badRequest(`${field} must be ${max} characters or fewer.`);
-  return text;
-}
-
 function requireCode(code) {
   const text = typeof code === "string" ? code.trim().toLowerCase() : "";
   if (!text) throw ApiError.badRequest("code is required.");
@@ -149,28 +145,6 @@ function requireCode(code) {
     );
   }
   return text;
-}
-
-function requireInt(value, field) {
-  const n = Number(value);
-  if (!Number.isInteger(n)) throw ApiError.badRequest(`${field} must be an integer.`);
-  return n;
-}
-
-function requireBoolean(value, field) {
-  if (typeof value !== "boolean") throw ApiError.badRequest(`${field} must be a boolean.`);
-  return value;
-}
-
-function requireId(value, field) {
-  if (value === null || value === undefined || typeof value === "boolean") {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
 }
 
 function shapeStatus(row) {

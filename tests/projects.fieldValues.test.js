@@ -1,3 +1,5 @@
+// The values that cross stages (RF-FLW-06): the order number diseño produces and the print
+// shop's billing reads, without re-capture.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,8 +13,6 @@ import {
   allLogs,
 } from "./helpers/fixtures.js";
 
-// The values that cross stages (RF-FLW-06): the order number diseño produces and the print
-// shop's billing reads, without re-capture.
 describe("/api/projects/:id/field-values", () => {
   let server;
   let adminToken;
@@ -28,7 +28,6 @@ describe("/api/projects/:id/field-values", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -88,11 +87,9 @@ describe("/api/projects/:id/field-values", () => {
       "updated_at moved",
     );
 
-    // Still one row: the key is unique per project.
     const list = await server.get(`/api/projects/${made.id}/field-values`, { token: adminToken });
     assert.equal(list.body.fieldValues.length, 1);
 
-    // Created once, then updated: the trail says so without a table of its own.
     const logs = (await allLogs()).filter((l) => l.target_table === "project_field_values");
     assert.deepEqual(logs.map((l) => l.action), ["record_created", "record_updated"]);
   });

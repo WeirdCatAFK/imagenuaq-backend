@@ -80,35 +80,68 @@ function jwtSecret() {
 const issuer = () => process.env.API_DOMAIN || "http://localhost:3000";
 const audience = () => process.env.FRONTEND_DOMAIN || "http://localhost:5173";
 
+/** Signs a token for `subjectId` carrying `purpose` and any extra claims. */
+function sign(purpose, subjectId, ttl, claims = {}) {
+  return new jose.SignJWT({ purpose, ...claims })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(String(subjectId))
+    .setIssuedAt()
+    .setIssuer(issuer())
+    .setAudience(audience())
+    .setExpirationTime(ttl)
+    .sign(jwtSecret());
+}
+
+/**
+ * Verifies signature, expiry, issuer, audience and purpose.
+ *
+ * @returns {Promise<object>} The payload.
+ * @throws {ApiError} 401 with `message` on any failure.
+ */
+async function verify(token, purpose, message) {
+  let payload;
+  try {
+    ({ payload } = await jose.jwtVerify(token, jwtSecret(), {
+      issuer: issuer(),
+      audience: audience(),
+    }));
+  } catch (err) {
+    if (!(err instanceof jose.errors.JOSEError)) throw err;
+    throw ApiError.unauthorized(message);
+  }
+  if (payload.purpose !== purpose) throw ApiError.unauthorized(message);
+  return payload;
+}
+
+/** The session subject: what `req.user` holds and what a login returns. */
+function toSubject(row) {
+  return {
+    id: row.id,
+    email: row.email,
+    fullName: row.full_name,
+    roleId: row.role_id,
+    role: row.role_name,
+    areaId: row.primary_area_id ?? null,
+  };
+}
+
 class Auth {
   /**
-   * Hashes and stores a password. The cost factor and the column are one decision, so
-   * nothing else may write `password_hash`.
+   * Hashes and stores a password. Nothing else may write `password_hash`.
    *
    * @param {number} userId
    * @param {string} password
-   * @throws {ApiError} 404 when no live row matched.
+   * @throws {ApiError} 400 when shorter than 8 characters, 404 when no live row matched.
    */
   async setPassword(userId, password) {
-    if (!password || password.length < 8) {
-      throw ApiError.badRequest("Password must be at least 8 characters long.");
-    }
-
-    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    const hash = await this.hashPassword(password);
     const updated = await query.setPasswordHash(userId, hash);
-
-    // null means no live row matched: a wrong id, or a soft-deleted user.
     if (updated === null) throw ApiError.notFound("User not found.");
   }
 
   /**
-   * A person changing their own password: the current one is checked first, so a session
-   * left open on a shared machine cannot be turned into a permanent takeover.
-   *
-   * `token_version` is deliberately NOT bumped. Bumping it would sign the caller out of
-   * the very session they are using, and the frontend would have to log them in again
-   * with the new password to carry on; the trade is that other open sessions keep working
-   * until they expire. "Sign out everywhere" is a separate action when it is wanted.
+   * A person changing their own password, after checking the current one. Does not bump
+   * `token_version`, which would sign the caller out of the session they are using.
    *
    * @param {number} userId The caller's own id, from the session.
    * @param {string} currentPassword
@@ -124,19 +157,12 @@ class Auth {
     const user = await query.getAuthUserById(userId);
     if (!user) throw ApiError.notFound("User not found.");
 
-    // The placeholder keeps a never-activated account costing the same as a wrong guess,
-    // as in authenticate(); such an account cannot reach here with a session anyway.
-    const matches = await bcrypt.compare(
-      currentPassword,
-      user.password_hash ?? ABSENT_USER_HASH,
-    );
+    const matches = await bcrypt.compare(currentPassword, user.password_hash ?? ABSENT_USER_HASH);
     if (!user.password_hash || !matches) {
       throw ApiError.unauthorized("Current password is incorrect.");
     }
 
     await this.setPassword(user.id, newPassword);
-
-    // Only the fact of the change; audit.js would redact the hash in any case.
     await events.emit({
       action: "record_updated",
       target: { table: "users", id: user.id },
@@ -146,12 +172,11 @@ class Auth {
   }
 
   /**
-   * Hashes without writing, for scripts/createAdmin.js, which moves the role and the
-   * password in one statement and so cannot go through setPassword(). Exists to keep the
-   * cost factor in a single place.
+   * Hashes without writing, for scripts/createAdmin.js. Keeps the cost factor in one place.
    *
    * @param {string} password
    * @returns {Promise<string>}
+   * @throws {ApiError} 400 when shorter than 8 characters.
    */
   async hashPassword(password) {
     if (!password || password.length < 8) {
@@ -161,39 +186,29 @@ class Auth {
   }
 
   /**
-   * Checks credentials and returns the session subject. Never returns null -- a throw
-   * cannot be ignored by a caller that forgets to check, and Express 5 forwards it.
+   * Checks credentials and returns the session subject. A missing account, one never
+   * activated and a wrong password cost the same time and get the same message.
    *
    * @param {string} email
    * @param {string} password
    * @returns {Promise<object>} The session subject.
-   * @throws {ApiError} 401 on any failure, with one message for all of them.
+   * @throws {ApiError} 400 when a field is missing, 401 on any failure.
    */
   async authenticate(email, password) {
     if (!email || !password) {
       throw ApiError.badRequest("Email and password are required.");
     }
 
-    // Lowercased to match how users.js stores it; the unique index is on the raw column.
-    const user = await query.getAuthUserByEmail(
-      String(email).trim().toLowerCase(),
-    );
+    const address = String(email).trim().toLowerCase();
+    const user = await query.getAuthUserByEmail(address);
+    const matches = await bcrypt.compare(password, user?.password_hash ?? ABSENT_USER_HASH);
 
-    // password_hash is nullable (an RF-MIG-01 import has a row before a password), so the
-    // placeholder makes that case cost the same as a wrong password. It is refused below.
-    const hash = user?.password_hash ?? ABSENT_USER_HASH;
-    const matches = await bcrypt.compare(password, hash);
-
-    // One message for "no such email", "no password set" and "wrong password".
     if (!user || !user.password_hash || !matches) {
-      // The trail may say which it was; it is read by coordination, not returned to the
-      // caller. The attempted address is recorded, the attempted password never is. `actor`
-      // is explicit because a failed login has no session to read one from.
       await events.emit({
         action: "user_login_failed",
         actor: user?.id ?? null,
         after: {
-          email: String(email).trim().toLowerCase(),
+          email: address,
           reason: !user
             ? "no such account"
             : !user.password_hash
@@ -201,234 +216,111 @@ class Auth {
               : "wrong password",
         },
       });
-
       throw ApiError.unauthorized("Invalid email or password.");
     }
 
-    // The actor is established BY this action, so it is passed rather than read from the
-    // request context. The area is not passed: query.insertLog() resolves it in the same
-    // statement, so there is one source for it.
     await events.emit({
       action: "user_login",
       actor: user.id,
       target: { table: "users", id: user.id },
     });
 
-    return {
-      id: user.id,
-      email: user.email,
-      fullName: user.full_name,
-      roleId: user.role_id,
-      role: user.role_name,
-      areaId: user.primary_area_id ?? null,
-    };
+    return toSubject(user);
   }
 
   /**
-   * Mints a session token. Carries both `role` (the name requireRole() compares) and
-   * `roleId` (what a query joins on), so authorising costs no round trip.
+   * Mints a session token. Permissions are not in it: RF-USR-05 makes them editable at
+   * runtime, so requirePermission() reads them per request.
    *
-   * Permissions are deliberately not included: RF-USR-05 makes the catalog editable at
-   * runtime, so a set baked into a week-long token goes stale. Use permissionsFor().
-   *
-   * @param {object} user
+   * @param {object} user A session subject.
    * @returns {Promise<string>}
    */
   async issueToken(user) {
-    // Read from the row rather than taken from the subject, for two reasons. It is what
-    // verifyToken() compares against, so it has to be the version at signing time and not
-    // whatever the caller happened to be holding; and keeping it out of the subject keeps
-    // `tokenVersion` an internal claim instead of a field on every session response. One
-    // primary-key lookup, on the two paths that already pay for bcrypt.
     const row = await query.getAuthUserById(Number(user.id));
-
-    return (
-      new jose.SignJWT({
-        purpose: PURPOSE_SESSION,
-        email: user.email,
-        fullName: user.fullName,
-        roleId: user.roleId,
-        role: user.role,
-        areaId: user.areaId ?? null,
-        // Compared against the row on every request. A bump elsewhere makes every token
-        // minted before it stop verifying, which is the whole revocation mechanism.
-        tokenVersion: row?.token_version ?? 0,
-      })
-        .setProtectedHeader({ alg: "HS256" })
-        // `sub` is the registered claim for the subject; jose requires a string.
-        .setSubject(String(user.id))
-        .setIssuedAt()
-        .setIssuer(issuer())
-        .setAudience(audience())
-        .setExpirationTime(TOKEN_TTL)
-        .sign(jwtSecret())
-    );
+    return sign(PURPOSE_SESSION, user.id, TOKEN_TTL, {
+      email: user.email,
+      fullName: user.fullName,
+      roleId: user.roleId,
+      role: user.role,
+      areaId: user.areaId ?? null,
+      tokenVersion: row?.token_version ?? 0,
+    });
   }
 
   /**
-   * Verifies signature, expiry, issuer, audience and purpose, then that the account is
-   * still live and still at the token's `token_version`. Returns the same shape
-   * authenticate() does -- so `req.user` means one thing either way.
-   *
-   * Role and area come from the row, not from the claims: the same read that proves the
-   * token has not been revoked is already paid for, and taking them from a week-old token
-   * is what made a role change wait seven days to take effect.
+   * Verifies a session token, then that the account is still live and at the token's
+   * `token_version`. Role and area are read from the row, not the claims.
    *
    * @param {string} token
-   * @returns {Promise<object>}
-   * @throws {ApiError} 401 for every failure mode jose distinguishes, for a deleted
-   *   account, and for a revoked token.
+   * @returns {Promise<object>} The session subject.
+   * @throws {ApiError} 401 on a bad token, a deleted account or a revoked token.
    */
   async verifyToken(token) {
-    try {
-      const { payload } = await jose.jwtVerify(token, jwtSecret(), {
-        issuer: issuer(),
-        audience: audience(),
-      });
+    const message = "Invalid or expired token.";
+    const payload = await verify(token, PURPOSE_SESSION, message);
 
-      // An invite is signed with the same key and passes every other check; only this keeps
-      // a not-yet-activated account from being a working login.
-      if (payload.purpose !== PURPOSE_SESSION) {
-        throw ApiError.unauthorized("Invalid or expired token.");
-      }
-
-      // Last, and deliberately so. Every check above is answerable from the token alone,
-      // and each one refuses for its own reason; putting the lookup first would make a
-      // forged or expired token fail as "no such user" instead.
-      const user = await query.getAuthUserById(Number(payload.sub));
-      if (!user || user.token_version !== (payload.tokenVersion ?? 0)) {
-        throw ApiError.unauthorized("Invalid or expired token.");
-      }
-
-      return {
-        id: user.id,
-        email: user.email,
-        fullName: user.full_name,
-        roleId: user.role_id,
-        role: user.role_name,
-        areaId: user.primary_area_id ?? null,
-      };
-    } catch (err) {
-      // A missing JWT_SECRET is a server bug, not a bad token -- a 401 would have clients
-      // retrying a login that can never succeed.
-      if (!(err instanceof jose.errors.JOSEError)) throw err;
-      throw ApiError.unauthorized("Invalid or expired token.");
+    const user = await query.getAuthUserById(Number(payload.sub));
+    if (!user || user.token_version !== (payload.tokenVersion ?? 0)) {
+      throw ApiError.unauthorized(message);
     }
+    return toSubject(user);
   }
 
   /**
-   * A one-time link for an account that has no password yet. Carries nothing but the
-   * subject, so an admin correcting the role or area before it is redeemed need not
-   * re-issue.
+   * A one-time link for an account that has no password yet.
    *
    * @param {number} userId
    * @returns {Promise<string>}
    */
   async issueInviteToken(userId) {
-    return new jose.SignJWT({ purpose: PURPOSE_INVITE })
-      .setProtectedHeader({ alg: "HS256" })
-      .setSubject(String(userId))
-      .setIssuedAt()
-      .setIssuer(issuer())
-      .setAudience(audience())
-      .setExpirationTime(INVITE_TTL)
-      .sign(jwtSecret());
+    return sign(PURPOSE_INVITE, userId, INVITE_TTL);
   }
 
   /**
-   * The `state` for a Microsoft sign-in (RF-MIG-01, orchestration/microsoft.js). The
-   * browser leaves for Microsoft and comes back to a public callback with no session
-   * header, so this is how the callback learns who was connecting: a short-lived token
-   * naming the subject, signed with the session key. Its purpose claim keeps it from being
-   * accepted anywhere a session or an invite is, and vice versa.
+   * The `state` for a Microsoft sign-in (RF-MIG-01): how the public callback learns who was
+   * connecting.
    *
    * @param {number} userId
    * @returns {Promise<string>}
    */
   async issueConnectState(userId) {
-    return new jose.SignJWT({ purpose: PURPOSE_MS_CONNECT })
-      .setProtectedHeader({ alg: "HS256" })
-      .setSubject(String(userId))
-      .setIssuedAt()
-      .setIssuer(issuer())
-      .setAudience(audience())
-      .setExpirationTime(MS_CONNECT_TTL)
-      .sign(jwtSecret());
+    return sign(PURPOSE_MS_CONNECT, userId, MS_CONNECT_TTL);
   }
 
   /**
-   * Verifies a `state` issued by issueConnectState() and returns the user id it names.
+   * Verifies a `state` issued by issueConnectState().
    *
    * @param {string} state
-   * @returns {Promise<number>}
+   * @returns {Promise<number>} The user id it names.
    * @throws {ApiError} 401 on a missing, tampered, expired or wrong-purpose state.
    */
   async verifyConnectState(state) {
-    if (typeof state !== "string" || state === "") {
-      throw ApiError.unauthorized("Invalid or expired sign-in state.");
-    }
-
-    let payload;
-    try {
-      ({ payload } = await jose.jwtVerify(state, jwtSecret(), {
-        issuer: issuer(),
-        audience: audience(),
-      }));
-    } catch (err) {
-      if (!(err instanceof jose.errors.JOSEError)) throw err;
-      throw ApiError.unauthorized("Invalid or expired sign-in state.");
-    }
-
-    if (payload.purpose !== PURPOSE_MS_CONNECT) {
-      throw ApiError.unauthorized("Invalid or expired sign-in state.");
-    }
-
+    const message = "Invalid or expired sign-in state.";
+    if (typeof state !== "string" || state === "") throw ApiError.unauthorized(message);
+    const payload = await verify(state, PURPOSE_MS_CONNECT, message);
     return Number(payload.sub);
   }
 
   /**
-   * Redeems an invite: sets the password and returns a session, so the new user is logged
-   * in rather than bounced to a login form.
-   *
-   * Single use by construction, with no table and no revocation list -- the invite is valid
-   * only while the account has no password, and redeeming it gives the account one. That
-   * trick does NOT extend to password resets, which need a hashed single-use token in its
-   * own table.
+   * Redeems an invite: sets the password and returns a session. Single use because the
+   * invite is only valid while the account has no password.
    *
    * @param {string} token
    * @param {string} password
-   * @returns {Promise<object>}
-   * @throws {ApiError} 401 on a bad token, 404 on a dead user, 409 on a spent invite.
+   * @returns {Promise<{ user: object, token: string }>}
+   * @throws {ApiError} 401 on a bad token or a dead user, 409 on a spent invite.
    */
   async completeInvite(token, password) {
-    let payload;
-    try {
-      ({ payload } = await jose.jwtVerify(token, jwtSecret(), {
-        issuer: issuer(),
-        audience: audience(),
-      }));
-    } catch (err) {
-      if (!(err instanceof jose.errors.JOSEError)) throw err;
-      throw ApiError.unauthorized("Invalid or expired invitation.");
-    }
+    const message = "Invalid or expired invitation.";
+    const payload = await verify(token, PURPOSE_INVITE, message);
 
-    if (payload.purpose !== PURPOSE_INVITE) {
-      throw ApiError.unauthorized("Invalid or expired invitation.");
-    }
-
-    // Re-read: the user may have been soft-deleted or activated since the invite was sent.
     const user = await query.getAuthUserById(Number(payload.sub));
-    if (!user) throw ApiError.unauthorized("Invalid or expired invitation.");
-
-    // The single-use check. 409 and not 401: the link was genuine, it has been spent, and
-    // the caller's next move is to log in.
+    if (!user) throw ApiError.unauthorized(message);
     if (user.password_hash !== null) {
       throw ApiError.conflict("This invitation has already been used.");
     }
 
     await this.setPassword(user.id, password);
-
-    // Only the state transition; audit.js redacts the hash in any case.
     await events.emit({
       action: "record_updated",
       actor: user.id,
@@ -437,21 +329,12 @@ class Auth {
       after: { activated: true },
     });
 
-    // The same shape authenticate() returns, so a session minted here is indistinguishable.
-    const subject = {
-      id: user.id,
-      email: user.email,
-      fullName: user.full_name,
-      roleId: user.role_id,
-      role: user.role_name,
-      areaId: user.primary_area_id ?? null,
-    };
-
+    const subject = toSubject(user);
     return { user: subject, token: await this.issueToken(subject) };
   }
 
   /**
-   * Live permission codes for a role, read on demand rather than carried in the token.
+   * Live permission codes for a role.
    *
    * @param {number} roleId
    * @returns {Promise<string[]>}

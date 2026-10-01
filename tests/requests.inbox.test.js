@@ -1,3 +1,5 @@
+// The inbox RF-SOL-04 asks for -- ordered and filterable, so nobody reads four channels to find
+// their work -- and the search of RF-SOL-05.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -9,12 +11,10 @@ import {
   createArea,
   createSchema,
   tokenFor,
-  roleId,
   sql,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// The inbox RF-SOL-04 asks for -- ordered and filterable, so nobody reads four channels to find
-// their work -- and the search of RF-SOL-05.
 describe("GET /api/requests", () => {
   let server;
   let worker;
@@ -40,7 +40,6 @@ describe("GET /api/requests", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -59,13 +58,8 @@ describe("GET /api/requests", () => {
     });
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   async function add(body) {
     const res = await server.post("/api/requests", {
@@ -118,7 +112,6 @@ describe("GET /api/requests", () => {
 
     assert.equal(rows.length, 4);
     assert.equal(rows[0].folio, urgent.folio, "priority 9 leads");
-    // The rest share priority 0, so the newest of them comes next.
     assert.deepEqual(rows.slice(1).map((r) => r.title), ["Fotografía del congreso", "Lonas", "Hojas membretadas"]);
   });
 
@@ -177,7 +170,6 @@ describe("GET /api/requests", () => {
 
   test("duplicates=true finds only the flagged rows", async () => {
     const { urgent, normal } = await seed();
-    // The import sets this; here it is set directly, since the import is a later increment.
     await sql("update requests set possible_duplicate_of = $2 where id = $1", [normal.id, urgent.id]);
 
     assert.deepEqual((await list("?duplicates=true")).map((r) => r.title), ["Hojas membretadas"]);
@@ -212,8 +204,6 @@ describe("GET /api/requests", () => {
   test("total counts what matches the filters, not the page", async () => {
     await seed();
 
-    // Sin él una bandeja paginada no puede decir cuánto falta por ver, y contar la página es
-    // justamente el número equivocado.
     const pagina = await server.get("/api/requests?limit=2", { token: adminToken });
     assert.equal(pagina.status, 200);
     assert.equal(pagina.body.requests.length, 2);
@@ -221,17 +211,14 @@ describe("GET /api/requests", () => {
     assert.equal(pagina.body.limit, 2);
     assert.equal(pagina.body.offset, 0);
 
-    // El total sigue al filtro, no al conjunto entero.
     const deUnArea = await server.get("/api/requests?areaId=none&limit=1", { token: adminToken });
     assert.equal(deUnArea.body.total, deUnArea.body.requests.length === 0 ? 0 : deUnArea.body.total);
     assert.ok(deUnArea.body.total <= 4);
 
-    // Una consulta sin resultados trae cero, no se queda sin el campo.
     const vacia = await server.get("/api/requests?q=no-existe-este-folio", { token: adminToken });
     assert.deepEqual(vacia.body.requests, []);
     assert.equal(vacia.body.total, 0);
 
-    // La última página no miente sobre el total.
     const ultima = await server.get("/api/requests?limit=2&offset=3", { token: adminToken });
     assert.equal(ultima.body.requests.length, 1);
     assert.equal(ultima.body.total, 4);

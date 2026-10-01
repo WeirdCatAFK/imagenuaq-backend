@@ -1,3 +1,7 @@
+// The account half of the spreadsheet feature: starting a sign-in, what the callback does
+// with a state it did not mint, listing and revoking. The code exchange itself is not here
+// -- it is the one call that needs Microsoft -- so the accounts these cases read are
+// written by the fixture exactly as completeConnect() would write them.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -9,16 +13,12 @@ import {
   createMicrosoftAccount,
   tokenFor,
   logsFor,
-  roleId,
   sql,
+  grantPermissions,
 } from './helpers/fixtures.js';
 import auth from '../src/access/orchestration/auth.js';
 import { open } from '../src/utils/crypto.js';
 
-// The account half of the spreadsheet feature: starting a sign-in, what the callback does
-// with a state it did not mint, listing and revoking. The code exchange itself is not here
-// -- it is the one call that needs Microsoft -- so the accounts these cases read are
-// written by the fixture exactly as completeConnect() would write them.
 describe('/api/microsoft', () => {
   let server;
   let admin;
@@ -38,28 +38,19 @@ describe('/api/microsoft', () => {
     adminToken = await tokenFor(server, ACCOUNTS[0]);
     workerToken = await tokenFor(server, ACCOUNTS[1]);
 
-    // `worker` is seeded with no grants and resetCases() leaves seeded roles alone, so
-    // the feature is granted to it for this file and taken back in after(). The ownership
-    // cases below are then about rows, not about the permission guard.
     await grantWorker(['spreadsheet.read', 'spreadsheet.write']);
   });
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
 
   beforeEach(() => resetCases(ACCOUNTS));
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId('worker')}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, 'worker', permissions);
 
   describe('POST /connect', () => {
     test('returns the authorize URL with a state naming the caller', async () => {
@@ -75,12 +66,10 @@ describe('/api/microsoft', () => {
         url.searchParams.get('redirect_uri'),
         `${process.env.API_DOMAIN}/api/microsoft/callback`,
       );
-      // No openid, no id_token, no identity to store: the one scope that is not optional.
       assert.match(url.searchParams.get('scope'), /(^| )openid( |$)/);
       assert.match(url.searchParams.get('scope'), /offline_access/);
       assert.match(url.searchParams.get('scope'), /Files\.Read\.All/);
 
-      // The state is what the callback will trust, so it had better name this user.
       const userId = await auth.verifyConnectState(url.searchParams.get('state'));
       assert.equal(userId, admin.id);
     });
@@ -130,7 +119,6 @@ describe('/api/microsoft', () => {
       assert.equal(url.pathname, '/organizations/oauth2/v2.0/authorize');
       assert.equal(url.searchParams.get('client_id'), APP.clientId);
 
-      // The secret is a column on the row, and the trail must not carry it.
       const logs = await logsFor('microsoft_app', 1);
       assert.deepEqual(logs.map((l) => l.action), ['record_created']);
       assert.equal(logs[0].after_data.client_secret_enc, '[redacted]');
@@ -197,8 +185,6 @@ describe('/api/microsoft', () => {
   });
 
   describe('GET /callback', () => {
-    // A session token is signed with the same key and passes every structural check; only
-    // the purpose claim keeps it from being accepted as a state. Same trick as invites.
     test('a session token used as the state is refused', async () => {
       const res = await server.get(
         `/api/microsoft/callback?code=abc&state=${encodeURIComponent(adminToken)}`,
@@ -259,8 +245,6 @@ describe('/api/microsoft', () => {
       );
     });
 
-    // The token goes through bytea and back; accessTokenFor() decrypts what the driver
-    // returns, so the round trip is asserted here rather than discovered on first refresh.
     test('the sealed token survives the database round trip', async () => {
       const account = await createMicrosoftAccount(worker.id);
 
@@ -300,7 +284,6 @@ describe('/api/microsoft', () => {
         ['microsoft_account_revoked'],
       );
       assert.equal(logs[0].user_id, worker.id);
-      // The sealed token is a column on the row, and the trail must not carry it.
       assert.equal(logs[0].before_data.refresh_token_enc, '[redacted]');
       assert.equal(logs[0].after_data.refresh_token_enc, '[redacted]');
     });

@@ -1,3 +1,5 @@
+// Flow templates (RF-FLW-02, RF-PRY-06): phases of parallel stages, published as immutable
+// versions, written only by workflow.manage.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -13,8 +15,6 @@ import {
   sql,
 } from "./helpers/fixtures.js";
 
-// Flow templates (RF-FLW-02, RF-PRY-06): phases of parallel stages, published as immutable
-// versions, written only by workflow.manage.
 describe("/api/workflows", () => {
   let server;
   let admin;
@@ -35,7 +35,6 @@ describe("/api/workflows", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });

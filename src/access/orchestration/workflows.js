@@ -28,13 +28,18 @@ import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  CHECK_VIOLATION,
+  requireText,
+  requireId,
+} from "../../utils/validate.js";
 import { requireKeyList } from "../../utils/fieldKeys.js";
 
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
-const CHECK_VIOLATION = "23514";
-
-/** Column widths from flow-templates, checked here so a 22001 becomes a 400 naming the field. */
+/**
+ *  Column widths from flow-templates, checked here so a 22001 becomes a 400 naming the field.
+ */
 const CODE_MAX = 50;
 const NAME_MAX = 300;
 const PHASE_NAME_MAX = 100;
@@ -148,7 +153,9 @@ class Workflows {
     return this.get(row.id);
   }
 
-  /** Every template with a summary of its latest version, active or not; the client filters. */
+  /**
+   *  Every template with a summary of its latest version, active or not; the client filters.
+   */
   async list() {
     return (await query.listWorkflows()).map(shapeWorkflow);
   }
@@ -237,9 +244,6 @@ class Workflows {
  * defaultAssigneeId, inputs, outputs, inputNote, outputNote, estimatedDays}]}]`. Order is
  * position in the arrays. Each refusal names the phase and stage it is about.
  *
- * Exported so a project flow can be validated with the same rules when it is edited in the
- * designer.
- *
  * @param {unknown} phases
  * @returns {Promise<object[]>}
  * @throws {ApiError} 400
@@ -289,8 +293,6 @@ export async function validatePhases(phases) {
   return normalised;
 }
 
-/* HELPERS */
-
 /**
  * Areas must exist and a default person must be an active member of the stage's area, both
  * checked with one read each rather than one per stage. The foreign keys would catch an
@@ -339,13 +341,6 @@ function publisher() {
   return currentActor()?.id ?? null;
 }
 
-function requireText(value, field, max) {
-  const text = typeof value === "string" ? value.trim() : "";
-  if (!text) throw ApiError.badRequest(`${field} is required.`);
-  if (text.length > max) throw ApiError.badRequest(`${field} must be ${max} characters or fewer.`);
-  return text;
-}
-
 function optionalNote(value, field) {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") throw ApiError.badRequest(`${field} must be a string.`);
@@ -361,17 +356,6 @@ function requireDays(value, field) {
     throw ApiError.badRequest(`${field} must be a whole number of days from 1 to ${DAYS_MAX}.`);
   }
   return days;
-}
-
-function requireId(value, field) {
-  if (value === null || value === undefined || typeof value === "boolean") {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
 }
 
 /** The `workflows` row out of a read that also carries its latest version. */

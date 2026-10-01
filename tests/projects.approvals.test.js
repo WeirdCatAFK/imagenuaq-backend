@@ -9,11 +9,10 @@ import {
   createArea,
   tokenFor,
   logsFor,
-  roleId,
   sql,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// The sign-off (RF-FLW-03) and what a rejection does to the stage (§2.6).
 describe("/api/projects/:id/stages/:stageId/approvals", () => {
   let server;
   let admin;
@@ -37,7 +36,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -47,13 +45,8 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     area = await createArea("Diseño de prueba");
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   async function project(stages = [{ areaId: null, title: "Diseño" }]) {
     const res = await server.post("/api/projects", {
@@ -112,7 +105,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.notEqual(rerun.id, stage.id);
     assert.equal(rerun.flowStageId, stage.flowStageId, "a rerun is the same definition, not a copy");
 
-    // Both attempts stay readable: the history is not overwritten.
     const read = await server.get(`/api/projects/${made.id}`, { token: adminToken });
     assert.deepEqual(read.body.project.stages.map((s) => [s.attempt, s.status]), [[1, "done"], [2, "active"]]);
     assert.deepEqual(read.body.project.activeStageIds, [rerun.id]);
@@ -182,7 +174,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.equal(bad.status, 400);
     assert.match(bad.body.error.message, /referenced record/);
 
-    // The stage survived the failed attempt: nothing was half-written.
     const stages = await server.get(`/api/projects/${made.id}/stages`, { token: adminToken });
     assert.equal(stages.body.stages[0].status, "active");
     assert.equal((await sql("select count(*)::int as n from approvals"))[0].n, 0);
@@ -203,7 +194,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
 
     await grantWorker(["project.read", "project.write"]);
     try {
-      // The worker is in no area of this project, and signs anyway: the permission is the policy.
       const res = await sign(made.id, made.stages[0].id, { decision: "approved" }, workerToken);
       assert.equal(res.status, 201);
       assert.equal(res.body.approval.approverUserId, worker.id);
@@ -219,7 +209,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.equal((await sign(theirs.id, mine.stages[0].id, { decision: "approved" })).status, 404);
   });
 
-  // RF-FLW-04: the next phase starts when nothing is left open in the current one.
   describe("advancing to the next phase", () => {
     const byTitle = (stages, title) => stages.find((s) => s.title === title);
 

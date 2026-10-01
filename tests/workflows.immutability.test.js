@@ -1,3 +1,6 @@
+// A published version is sealed by triggers, not by the API's good manners (flow-templates,
+// DATAMODEL.md §2.2). These go around the API on purpose: the point is what the database
+// refuses when something does.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,9 +14,6 @@ import {
   sql,
 } from "./helpers/fixtures.js";
 
-// A published version is sealed by triggers, not by the API's good manners (flow-templates,
-// DATAMODEL.md §2.2). These go around the API on purpose: the point is what the database
-// refuses when something does.
 describe("published flow templates are immutable", () => {
   let server;
   let adminToken;
@@ -30,7 +30,6 @@ describe("published flow templates are immutable", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });

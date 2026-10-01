@@ -61,8 +61,6 @@ export class StorageError extends Error {
 
 let volumes = null;
 
-// --- Registry ---
-
 /**
  * Parses STORAGE_VOLUMES: comma-separated `label:path` pairs, split on the FIRST colon
  * only — a Windows mount is `C:\storage` and splitting on every colon eats the drive
@@ -132,9 +130,6 @@ async function verifyMarker(volume) {
  * Writes the marker and the directories for a genuinely new disk, then insert the
  * matching storage_volumes row with the same label.
  *
- * Deliberately separate from openVolumes() and deliberately not automatic: creating the
- * marker on demand is exactly what would defeat the check it exists for.
- *
  * @param {string} mountPath
  * @param {string} label
  */
@@ -157,8 +152,6 @@ export async function openVolumes() {
 
   for (const volume of parsed) {
     await verifyMarker(volume);
-    // Recreated rather than assumed: tmp/ holds partial files from interrupted writes,
-    // and someone will eventually clear it out by hand.
     await fs.mkdir(path.join(volume.mountPath, TMP_DIR), { recursive: true });
   }
 
@@ -192,7 +185,6 @@ export async function listVolumes() {
       return {
         label: volume.label,
         mountPath: volume.mountPath,
-        // bavail, not bfree: bfree counts blocks reserved for root.
         freeBytes: stat.bavail * stat.bsize,
         totalBytes: stat.blocks * stat.bsize,
       };
@@ -223,8 +215,6 @@ export async function pickVolume({ allow = null } = {}) {
 
   return candidates.reduce((best, v) => (v.freeBytes > best.freeBytes ? v : best));
 }
-
-// --- Content ---
 
 export function contentPath(label, hash) {
   if (!HASH_RE.test(hash)) throw new StorageError(`Not a sha-256 hex digest: ${hash}`, 'EBADHASH');
@@ -278,24 +268,18 @@ export async function putContent(source, { maxBytes = null, volumeLabel = null, 
   const gauge = meter(maxBytes);
 
   try {
-    // flush: true fsyncs before the stream closes (Node >= 20.10), so a rename can never
-    // publish a file whose contents are still only in the page cache.
     await pipeline(readable, gauge.stream, createWriteStream(tmpPath, { flush: true }));
 
     const { hash, size } = gauge.result();
     const target = contentPath(volume.label, hash);
 
-    try {
-      await fs.access(target);
+    const existed = await fs.access(target).then(() => true, () => false);
+    if (existed) {
       await fs.rm(tmpPath, { force: true });
       return { hash, size, volumeLabel: volume.label, existed: true };
-    } catch {
-      // Not here yet; fall through and publish it.
     }
 
     await fs.mkdir(path.dirname(target), { recursive: true });
-    // Atomic: tmp/ lives under the same mount. Overwriting is harmless — an identical
-    // hash means identical bytes.
     await fs.rename(tmpPath, target);
 
     return { hash, size, volumeLabel: volume.label, existed: false };

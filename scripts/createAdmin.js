@@ -46,11 +46,13 @@ import audit from '../src/access/orchestration/audit.js';
 
 const ADMIN_ROLE = 'admin';
 
-// Control characters as read in raw mode, written as escapes rather than as the literal
-// bytes: an invisible U+0003 in a source file survives no copy, paste or editor round trip
-// that normalises control characters, and its disappearance is silent.
-const ETX = '\u0003'; // Ctrl-C
-const BACKSPACE = '\u007f'; // DEL, which is what most terminals send for Backspace
+/**
+ * Control characters as read in raw mode, written as escapes rather than as the literal
+ * bytes: an invisible U+0003 in a source file survives no copy, paste or editor round trip
+ * that normalises control characters, and its disappearance is silent.
+ */
+const ETX = '\u0003';
+const BACKSPACE = '\u007f';
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -62,9 +64,11 @@ function fail(message) {
   process.exit(1);
 }
 
-// Prompt with the echo suppressed. readline has no password mode, so the terminal goes
-// into raw mode and keystrokes are read by hand; otherwise the password stays on screen
-// and in the scrollback of whoever ran the recovery.
+/**
+ * Prompt with the echo suppressed. readline has no password mode, so the terminal goes
+ * into raw mode and keystrokes are read by hand; otherwise the password stays on screen
+ * and in the scrollback of whoever ran the recovery.
+ */
 function promptHidden(questionText) {
   return new Promise((resolve, reject) => {
     if (!process.stdin.isTTY) {
@@ -93,8 +97,6 @@ function promptHidden(questionText) {
       for (const char of chunk) {
         if (char === '\n' || char === '\r') return finish(resolve, value);
 
-        // Raw mode stops the terminal turning Ctrl-C into SIGINT, so without this branch
-        // the prompt cannot be interrupted at all.
         if (char === ETX) return finish(() => process.exit(130));
 
         if (char === BACKSPACE || char === '\b') {
@@ -123,8 +125,6 @@ if (!email || !fullName) {
 
 openStore();
 
-// api.js subscribes the trail when it builds; nothing here builds an Api, so the grants
-// restored below would otherwise be announced to nobody. Subscribed in the open, on purpose.
 audit.subscribe();
 
 try {
@@ -138,7 +138,6 @@ try {
 
   const before = await query.countLiveUsersWithRole(ADMIN_ROLE);
 
-  // Read the password before touching anything, so a mistyped or empty one costs nothing.
   const password =
     process.env.ADMIN_PASSWORD ?? (await promptHidden('  New admin password: '));
 
@@ -146,7 +145,6 @@ try {
     fail('Password must be at least 8 characters long.');
   }
 
-  // Before the account, so that if this fails nothing else was touched.
   const catalogue = await query.getPermissions();
   const heldBefore = (await query.getRolePermissions(role)).length;
   await roles.setPermissions(role, catalogue.map((permission) => permission.code));
@@ -158,9 +156,6 @@ try {
   const existing = await query.getAuthUserByEmail(email);
 
   if (existing) {
-    // The lockout path. setPassword() is not reused because the role has to move in the
-    // same statement: a promotion that committed while the password write failed would
-    // leave an admin nobody can log in as -- the very state being recovered from.
     const hash = await auth.hashPassword(password);
     await query.promoteToRoleAndSetPassword(existing.id, role, hash);
 
@@ -207,9 +202,6 @@ try {
     console.log(`  Live admins: ${before} -> ${after}.\n`);
   }
 } catch (err) {
-  // A unique violation here means the address belongs to a SOFT-DELETED user: the live
-  // lookup found nothing, but a plain index still holds the row. Say so -- "duplicate key"
-  // on an address the operator was just told does not exist is baffling.
   if (err?.code === '23505') {
     fail(`${email} belongs to a deleted user. Restore that row or use another address.`);
   }

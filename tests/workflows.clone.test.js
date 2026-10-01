@@ -12,7 +12,6 @@ import {
   sql,
 } from "./helpers/fixtures.js";
 
-// "Partir de una plantilla": a new template whose version 1 is a copy of the source's latest.
 describe("POST /api/workflows/:id/clone", () => {
   let server;
   let adminToken;
@@ -28,7 +27,6 @@ describe("POST /api/workflows/:id/clone", () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
