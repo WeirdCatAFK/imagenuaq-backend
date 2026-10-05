@@ -1503,20 +1503,35 @@ class Query {
   async listProjects({
     q = null, statusId = null, areaId = null, requester = null,
     hasCost = null, carriedOver = null, state = 'open',
-    fieldKey = null, fieldValue = null, assignedTo = null,
+    fieldKey = null, fieldValue = null, assignedTo = null, viewerId = null, mine = false,
     sort = 'priority', limit = 50, offset = 0,
   } = {}) {
     return this.#rows(
       `select
         p.id, p.key, p.title, p.requester, p.status_id, p.status_since, p.priority,
         p.has_cost, p.carried_over, p.starts_on, p.due_on,
-        p.closed_at, p.archived_at, p.created_at,
+        p.closed_at, p.archived_at, p.created_at, p.created_by,
+        count(*) over () as total,
         s.code as status_code, s.label as status_label,
         (select count(*) from ${STAGE_FROM}
           where fp.project_id = p.id and ps.status in ('active', 'waiting_external'))::int
           as open_stage_count,
+        -- The board says where a project is by naming its open stages, not by counting them:
+        -- "Diseño gráfico - Propuesta" is what somebody can act on, a 2 is not.
+        (select coalesce(json_agg(json_build_object(
+            'id', ps.id, 'areaName', a.name, 'title', fs.title, 'status', ps.status
+          ) order by fp.seq, fs.seq), '[]'::json)
+          from ${STAGE_FROM}
+          where fp.project_id = p.id and ps.status in ('active', 'waiting_external'))
+          as open_stages,
         (select count(*) from requests r
-          where r.project_id = p.id and r.deleted_at is null)::int as request_count
+          where r.project_id = p.id and r.deleted_at is null)::int as request_count,
+        -- What the viewer has a part in, said per row so the board can mark it: a project they
+        -- created, or one where a stage is theirs. Being in the area is not a part in it.
+        ($11::bigint is not null and p.created_by = $11::bigint) as mine_created,
+        ($11::bigint is not null and exists (
+          select 1 from ${STAGE_FROM}
+          where fp.project_id = p.id and ps.assigned_to = $11::bigint)) as mine_responsible
       from projects p
       join statuses s on s.id = p.status_id
       where p.deleted_at is null
@@ -1542,14 +1557,19 @@ class Query {
         and ($10::bigint is null or exists (
               select 1 from ${STAGE_FROM}
               where fp.project_id = p.id and ps.assigned_to = $10::bigint))
+        and (not $12::boolean
+             or p.created_by = $11::bigint
+             or exists (
+               select 1 from ${STAGE_FROM}
+               where fp.project_id = p.id and ps.assigned_to = $11::bigint))
       order by
-        case when $11::text = 'priority' then p.priority end desc nulls last,
-        case when $11::text = 'due' then p.due_on end asc nulls last,
+        case when $13::text = 'priority' then p.priority end desc nulls last,
+        case when $13::text = 'due' then p.due_on end asc nulls last,
         p.created_at desc, p.id desc
-      limit $12 offset $13`,
+      limit $14 offset $15`,
       [
         q, statusId, areaId, requester, hasCost, carriedOver, state,
-        fieldKey, fieldValue, assignedTo, sort, limit, offset,
+        fieldKey, fieldValue, assignedTo, viewerId, mine, sort, limit, offset,
       ],
     );
   }

@@ -169,8 +169,17 @@ class Projects {
   /**
    * The board (RF-PRY-02). `state` defaults to `open`; `fieldKey`/`fieldValue` is RF-IMP-08's
    * lookup by a value some stage produced.
+   *
+   * `mine` keeps only what the viewer has a part in: a project they created or one where a
+   * stage is theirs. Every row says so anyway (`mineCreated`, `mineResponsible`), so a board
+   * showing all of them can still mark the viewer's own.
+   *
+   * @param {object} [filters]
+   * @param {number|string|null} [viewerId] Who is asking, for those two flags and `mine`.
+   * @returns {Promise<{projects: object[], total: number, limit: number, offset: number}>}
+   *   `total` counts every project matching the filters, not the page.
    */
-  async list(filters = {}) {
+  async list(filters = {}, viewerId = null) {
     const state = filters.state ?? "open";
     if (!LIST_STATES.includes(state)) {
       throw ApiError.badRequest(`state must be one of: ${LIST_STATES.join(", ")}.`);
@@ -191,13 +200,16 @@ class Projects {
       carriedOver: optionalBoolean(filters.carriedOver, "carriedOver"),
       fieldKey: cleanText(filters.fieldKey),
       fieldValue: cleanText(filters.fieldValue),
+      viewerId: viewerId === null ? null : requireId(viewerId, "viewerId"),
+      mine: optionalBoolean(filters.mine, "mine") === true,
       state,
       sort: filters.sort === "due" ? "due" : "priority",
       limit,
       offset,
     });
 
-    return rows.map(shapeListed);
+    const total = rows.length === 0 ? 0 : Number(rows[0].total);
+    return { projects: rows.map(shapeListed), total, limit, offset };
   }
 
   /** @throws {ApiError} 400 when nothing valid is sent, 404, 409 on a duplicate key. */
@@ -977,7 +989,11 @@ function shapeListed(row) {
     archivedAt: row.archived_at,
     createdAt: row.created_at,
     openStageCount: row.open_stage_count,
+    openStages: row.open_stages ?? [],
     requestCount: row.request_count,
+    createdBy: row.created_by,
+    mineCreated: row.mine_created === true,
+    mineResponsible: row.mine_responsible === true,
   };
 }
 

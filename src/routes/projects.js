@@ -18,7 +18,7 @@ router.use(authenticate);
 router.use(requirePermission("project.read"));
 
 router.get("/", async (req, res) => {
-  res.json({ projects: await projects.list(req.query) });
+  res.json(await projects.list(req.query, req.user.id));
 });
 
 router.get("/:id", async (req, res) => {

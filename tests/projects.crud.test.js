@@ -18,6 +18,7 @@ describe("/api/projects", () => {
   let server;
   let admin;
   let adminToken;
+  let worker;
   let workerToken;
   let statusId;
   let area;
@@ -29,7 +30,7 @@ describe("/api/projects", () => {
     await reset();
 
     admin = await createActive({ email: ACCOUNTS[0], role: "admin" });
-    await createActive({ email: ACCOUNTS[1], role: "worker" });
+    worker = await createActive({ email: ACCOUNTS[1], role: "worker" });
 
     adminToken = await tokenFor(server, ACCOUNTS[0]);
     workerToken = await tokenFor(server, ACCOUNTS[1]);
@@ -239,6 +240,44 @@ describe("/api/projects", () => {
       assert.equal(first.openStageCount, 1);
       assert.equal(first.requestCount, 0);
       assert.equal(first.statusLabel, "Recibido");
+    });
+
+    test("names the open stages and counts the whole list", async () => {
+      await seed();
+      const res = await server.get("/api/projects", { token: adminToken });
+
+      assert.equal(res.body.total, 2, "total counts what matches the filters, not the page");
+      const [withCost, plain] = res.body.projects;
+      assert.deepEqual(
+        withCost.openStages.map((e) => [e.areaName, e.title, e.status]),
+        [[area.name, "Diseño", "active"]],
+      );
+      assert.deepEqual(plain.openStages, [], "nothing open, nothing named");
+    });
+
+    test("mine is what the caller created or is responsible for", async () => {
+      const { withCost } = await seed();
+      await grantWorker(["project.read"]);
+      const mine = async (token) =>
+        (await server.get("/api/projects?mine=true", { token })).body.projects.map((p) => p.key);
+
+      assert.deepEqual(await mine(adminToken), ["CON-COSTO", "SIN-COSTO"], "the admin created both");
+      assert.deepEqual(await mine(workerToken), [], "a colleague's project is not yours");
+
+      await sql(
+        `update project_stages ps set assigned_to = $2
+          from flow_stages fs, flow_phases fp
+          where fs.id = ps.flow_stage_id and fp.id = fs.phase_id and fp.project_id = $1`,
+        [withCost.id, worker.id],
+      );
+
+      assert.deepEqual(await mine(workerToken), ["CON-COSTO"], "a stage of yours makes it yours");
+      const row = (await server.get("/api/projects", { token: workerToken })).body.projects
+        .find((p) => p.key === "CON-COSTO");
+      assert.equal(row.mineResponsible, true);
+      assert.equal(row.mineCreated, false, "the admin created it");
+
+      await grantWorker([]);
     });
 
     test("filters by requester, area, cost and produced value", async () => {

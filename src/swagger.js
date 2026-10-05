@@ -3587,6 +3587,7 @@ export function buildOpenApiDocument() {
             { name: 'requester', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact match, case-insensitive.' },
             { name: 'hasCost', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-07.' },
             { name: 'carriedOver', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-08.' },
+            { name: 'mine', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: only what the caller has a part in -- a project they created or one where a stage is assigned to them. Every row carries `mineCreated` and `mineResponsible` either way.' },
             { name: 'fieldKey', in: 'query', required: false, schema: { type: 'string' }, description: 'RF-IMP-08: look a project up by a value a stage produced.' },
             { name: 'fieldValue', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact value; needs fieldKey.' },
             { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'due'], default: 'priority' } },
