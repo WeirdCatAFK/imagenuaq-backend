@@ -3383,6 +3383,7 @@ export function buildOpenApiDocument() {
               description: 'Omitted: everything. `false`: still unconverted, which is the working inbox.',
             },
             { name: 'duplicates', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: only rows flagged as a probable correction.' },
+            { name: 'routed', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: some area already has it, by its flow or by an assigned area. `false`: nobody has it yet, which is what the inbox triages.' },
             { name: 'source', in: 'query', required: false, schema: { type: 'string', enum: ['manual', 'form', 'email', 'sheet'] } },
             { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'created'], default: 'priority' } },
             { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },

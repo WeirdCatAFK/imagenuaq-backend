@@ -168,6 +168,23 @@ describe("GET /api/requests", () => {
     assert.deepEqual((await list("?converted=true")).map((r) => r.folio), [urgent.folio]);
   });
 
+  test("routed splits what an area already has from what nobody has yet", async () => {
+    await seed();
+    const loose = await add({ title: "Sin repartir" });
+
+    assert.deepEqual((await list("?routed=false")).map((r) => r.title), ["Sin repartir"]);
+    assert.equal((await list("?routed=true")).length, 4, "the seeded four all have an area");
+
+    const flowed = await server.put(`/api/requests/${loose.id}/flow`, {
+      token: adminToken,
+      body: { phases: [{ name: "Diseño", stages: [{ areaId: design.id, title: "Propuesta", estimatedDays: 2 }] }] },
+    });
+    assert.equal(flowed.status, 200);
+
+    assert.deepEqual(await list("?routed=false"), [], "a flow routes it although it has no area");
+    assert.equal((await list("?routed=true")).length, 5);
+  });
+
   test("duplicates=true finds only the flagged rows", async () => {
     const { urgent, normal } = await seed();
     await sql("update requests set possible_duplicate_of = $2 where id = $1", [normal.id, urgent.id]);

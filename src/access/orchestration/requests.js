@@ -117,6 +117,9 @@ class Requests {
    * The inbox (RF-SOL-04): ordered, filterable, and by default only what has not been converted,
    * because that is what an area still has to act on.
    *
+   * `routed` splits the two steps a hand has to move: `false` is what nobody has yet, with no
+   * flow and no area, and `true` is what an area already holds (DATAMODEL.md §8.2).
+   *
    * @returns {Promise<{requests: object[], total: number, limit: number, offset: number}>} `total`
    *   counts every request matching the filters, not the page, so a client can page through and
    *   say how much is left.
@@ -138,6 +141,7 @@ class Requests {
       converted: optionalBoolean(filters.converted, "converted"),
       duplicates: optionalBoolean(filters.duplicates, "duplicates"),
       source: filters.source === undefined ? null : requireAnySource(filters.source),
+      routed: optionalBoolean(filters.routed, "routed"),
       sort: filters.sort === "created" ? "created" : "priority",
       limit,
       offset,

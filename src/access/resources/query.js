@@ -1084,7 +1084,7 @@ class Query {
   async listRequests({
     areaId = null, statusId = null, assigneeId = null, requester = null, sheetId = null,
     schemaId = null, q = null, converted = null, duplicates = null, source = null,
-    sort = 'priority', limit = 50, offset = 0,
+    routed = null, sort = 'priority', limit = 50, offset = 0,
   } = {}) {
     return this.#rows(
       `select
@@ -1141,13 +1141,19 @@ class Query {
              or ($9::boolean and r.possible_duplicate_of is not null)
              or (not $9::boolean and r.possible_duplicate_of is null))
         and ($10::text is null or r.source = $10::text)
+        -- Routed is the step the inbox tabs split on: a request nobody has yet (no area and
+        -- no flow) against one an area already holds. The negative case is the same condition
+        -- as areaId -1, so one of the two filters is enough.
+        and ($11::boolean is null
+             or ($11::boolean = (r.area_id is not null
+                 or exists (select 1 from flow_phases fp where fp.request_id = r.id))))
       order by
-        case when $11::text = 'priority' then r.priority end desc nulls last,
+        case when $12::text = 'priority' then r.priority end desc nulls last,
         r.created_at desc, r.id desc
-      limit $12 offset $13`,
+      limit $13 offset $14`,
       [
         areaId, statusId, assigneeId, requester, sheetId, schemaId, q,
-        converted, duplicates, source, sort, limit, offset,
+        converted, duplicates, source, routed, sort, limit, offset,
       ],
     );
   }
