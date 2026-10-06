@@ -2239,7 +2239,17 @@ class Query {
         v.version,
         v.fields,
         v.published_at,
-        v.published_by
+        v.published_by,
+        pu.full_name as published_by_name,
+        -- What publishing a version would affect, said in this format's own numbers: the
+        -- requests already captured with one of its versions keep being read with theirs, and
+        -- a workbook stays mapped to the version it names until somebody remaps it.
+        (select count(*) from requests r
+          join schema_versions rv on rv.id = r.schema_version_id
+          where rv.schema_id = s.id and r.deleted_at is null)::int as request_count,
+        (select count(*) from sheets sh
+          join schema_versions shv on shv.id = sh.schema_version_id
+          where shv.schema_id = s.id and sh.deleted_at is null)::int as sheet_count
       from schemas s
       left join lateral (
         select
@@ -2249,6 +2259,7 @@ class Query {
         order by version desc
         limit 1
       ) v on true
+      left join users pu on pu.id = v.published_by
       order by s.name, s.id`,
     );
   }

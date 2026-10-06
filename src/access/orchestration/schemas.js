@@ -433,7 +433,10 @@ function shapeSchema(row, types) {
     fields: row.fields ? withBaseTypes(row.fields, types) : null,
     publishedAt: row.published_at ?? null,
     publishedBy: row.published_by ?? null,
+    publishedByName: row.published_by_name ?? null,
     schemaVersionId: row.schema_version_id ?? null,
+    requestCount: row.request_count ?? 0,
+    sheetCount: row.sheet_count ?? 0,
   };
 }
 

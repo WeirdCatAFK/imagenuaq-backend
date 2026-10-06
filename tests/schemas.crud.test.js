@@ -179,6 +179,35 @@ describe('/api/schemas', () => {
       assert.ok(starter.fields.information.some((f) => f.code === 'numero_orden'));
     });
 
+    test('says who published the version and how much uses the format', async () => {
+      const made = await create({
+        code: `${TEST_SCHEMA_PREFIX}usado`,
+        name: 'Formato usado',
+        fields: {
+          deliverables: [{ code: 'entregable', name: 'Entregable', type: 'text', required: true }],
+          information: [],
+        },
+      });
+      assert.equal(made.status, 201);
+      const schema = made.body.schema;
+
+      const sinUso = (await server.get('/api/schemas', { token: adminToken })).body.schemas
+        .find((uno) => uno.id === schema.id);
+      assert.equal(sinUso.requestCount, 0);
+      assert.equal(sinUso.sheetCount, 0);
+      assert.ok(sinUso.publishedByName, 'the version carries the name of whoever published it');
+
+      const solicitud = await server.post('/api/requests', {
+        token: adminToken,
+        body: { schemaId: schema.id, title: 'Algo', data: { entregable: 'Hojas' } },
+      });
+      assert.equal(solicitud.status, 201);
+
+      const conUso = (await server.get('/api/schemas', { token: adminToken })).body.schemas
+        .find((uno) => uno.id === schema.id);
+      assert.equal(conUso.requestCount, 1, 'a request captured with one of its versions counts');
+    });
+
     test('GET /:id/versions lists newest first and GET /versions/:id reads one', async () => {
       const schema = await createSchema('versiones');
       const v2 = await server.post(`/api/schemas/${schema.id}/versions`, {
