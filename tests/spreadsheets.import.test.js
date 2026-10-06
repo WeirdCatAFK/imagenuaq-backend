@@ -305,7 +305,7 @@ describe("importing a book's rows", () => {
     assert.equal(fresh.possible_duplicate_of, null);
   });
 
-  test("a row missing a required value is reported and not inserted", async () => {
+  test("an empty required value comes in; an unreadable one is reported and stays out", async () => {
     const broken = [
       ...ROWS,
       row({ id: 300, email: "", entity: "Facultad de Enfermería", kind: "Hoja membretada", status: "" }),
@@ -315,13 +315,17 @@ describe("importing a book's rows", () => {
     const run = await spreadsheets.importRows(sheet, read(broken));
 
     assert.equal(run.rowsRead, 5);
-    assert.equal(run.rowsCreated, 3);
-    assert.equal(run.rowsFailed, 2);
-    assert.deepEqual(run.errors.map((entry) => entry.index), [3, 4]);
-    assert.match(run.errors[0].message, /"Correo del contacto" is required/);
-    assert.match(run.errors[1].message, /valid email/);
+    assert.equal(run.rowsCreated, 4, "the row with the empty required cell comes in incomplete");
+    assert.equal(run.rowsFailed, 1, "only the one whose cell cannot be read stays out");
+    assert.deepEqual(run.errors.map((entry) => entry.index), [4]);
+    assert.match(run.errors[0].message, /valid email/);
 
-    assert.equal((await requests()).length, 3);
+    const todas = await requests();
+    assert.equal(todas.length, 4);
+
+    const leidas = await Promise.all(todas.map((una) => query.getRequest(una.id)));
+    const incompletas = leidas.filter((una) => (una.data ?? {}).contacto_correo === undefined);
+    assert.equal(incompletas.length, 1, "exactly the row whose required cell was empty");
   });
 
   test("the run is written down, and the book remembers when it last ran", async () => {

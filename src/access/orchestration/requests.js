@@ -370,12 +370,17 @@ class Requests {
   /**
    * Turns a request into a project (RF-PRY-01), optionally answering several at once.
    *
+   * This is where an incomplete request is stopped: a row imported from a tracker may come in
+   * without a value its format marks required, because the sheet had it half filled. It exists,
+   * it shows in the inbox saying what it owes, and here it is refused by name until somebody
+   * fills it, which is the last moment where that is still cheap.
+   *
    * @param {number} requestId
    * @param {object} [input] `key`, `title`, `requester`, `stages`, `requestIds` and the project
    *   flags; anything omitted is taken from the request.
    * @returns {Promise<{project: object, conflicts: object[], discardedFlows: string[]}>}
    * @throws {ApiError} 400 on stages for a request with a flow, 404, 409 when it is already
-   *   converted.
+   *   converted or still missing a required value.
    */
   async convert(requestId, input = {}) {
     const id = requireId(requestId, "requestId");
@@ -396,6 +401,15 @@ class Requests {
         throw ApiError.conflict(`Request ${other.folio} already belongs to a project.`);
       }
       all.push(other);
+    }
+
+    for (const row of all) {
+      const faltan = faltantesDe(row);
+      if (faltan.length > 0) {
+        throw ApiError.conflict(
+          `${row.folio} still has no value for ${faltan.map((campo) => `"${campo.name}"`).join(", ")}; fill it in before converting.`,
+        );
+      }
     }
 
     const { fieldValues, conflicts } = mergeCaptures(all);
@@ -563,8 +577,33 @@ function areaFilter(value) {
   return optionalId(value, "areaId");
 }
 
+/**
+ * Los campos obligatorios del formato que la solicitud todavía no tiene. Una importada puede
+ * entrar incompleta a propósito; convertirla en proyecto es lo que se niega hasta que estén
+ * (RF-SOL-06, §2.16).
+ *
+ * @param {object} row A `requests` row with `schema_fields` and `data`.
+ * @returns {{code: string, name: string}[]}
+ */
+function faltantesDe(row) {
+  const campos = [
+    ...(row.schema_fields?.deliverables ?? []),
+    ...(row.schema_fields?.information ?? []),
+  ];
+  const data = row.data ?? {};
+
+  return campos
+    .filter((campo) => campo.required)
+    .filter((campo) => {
+      const valor = data[campo.code];
+      return valor === undefined || valor === null || valor === "";
+    })
+    .map((campo) => ({ code: campo.code, name: campo.name }));
+}
+
 function shapeRequest(row) {
   return {
+    missingRequired: faltantesDe(row),
     id: row.id,
     folio: row.folio,
     title: row.title,
@@ -642,6 +681,7 @@ function shapeListed(row) {
     schemaCode: row.schema_code,
     schemaName: row.schema_name,
     possibleDuplicateOf: row.possible_duplicate_of,
+    missingRequired: row.missing_required ?? 0,
     projectId: row.project_id,
     projectKey: row.project_key ?? null,
     createdAt: row.created_at,

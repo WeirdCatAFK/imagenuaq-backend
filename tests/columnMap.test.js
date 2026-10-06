@@ -268,8 +268,21 @@ describe("applyMapping()", () => {
     blank[5] = "";
     const out = apply(MAP, blank, TEXTS);
 
-    assert.deepEqual(out.errors.map((e) => e.key), ["title", "tipo_papel"]);
+    assert.deepEqual(out.errors.map((e) => e.key), ["title"]);
     assert.match(out.errors[0].message, /nothing to use as a title/);
+  });
+
+  test("a required field the sheet left empty comes in missing, it does not stop the row", () => {
+    const blank = [...ROW];
+    blank[5] = "";
+    const out = apply(MAP, blank, TEXTS);
+
+    assert.deepEqual(out.missingRequired, ["tipo_papel"]);
+    assert.ok(
+      out.warnings.some((w) => w.key === "tipo_papel" && /comes in missing/.test(w.message)),
+      "it is said as a warning, not as a refusal",
+    );
+    assert.equal(out.data.tipo_papel, undefined, "nothing is invented for it");
   });
 
   test("a required field that will not coerce stops the row; an optional one warns", () => {

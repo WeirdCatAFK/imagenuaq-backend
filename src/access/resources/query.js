@@ -1101,6 +1101,15 @@ class Query {
         sc.code as schema_code, sc.name as schema_name,
         p.key as project_key,
         exists (select 1 from flow_phases fp where fp.request_id = r.id) as has_flow,
+        -- Cuántos campos obligatorios de su formato siguen sin valor. Una fila importada de un
+        -- concentrador puede entrar incompleta a propósito (§2.16): lo que se niega es volverla
+        -- proyecto, no que exista, así que la bandeja tiene que poder decir cuántas lo están.
+        (select count(*)::int
+           from jsonb_array_elements(
+                  coalesce(v.fields->'deliverables', '[]'::jsonb)
+                  || coalesce(v.fields->'information', '[]'::jsonb)) f
+          where coalesce((f->>'required')::boolean, false)
+            and nullif(r.data->>(f->>'code'), '') is null) as missing_required,
         (select coalesce(json_agg(distinct fa.name), '[]'::json)
           from flow_phases fp
           join flow_stages fs on fs.phase_id = fp.id

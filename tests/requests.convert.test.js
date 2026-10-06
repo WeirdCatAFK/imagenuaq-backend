@@ -11,6 +11,7 @@ import {
   tokenFor,
   logsFor,
   grantPermissions,
+  sql,
 } from "./helpers/fixtures.js";
 
 describe("POST /api/requests/:id/convert", () => {
@@ -79,6 +80,30 @@ describe("POST /api/requests/:id/convert", () => {
 
   const convert = (id, body = {}, token = adminToken) =>
     server.post(`/api/requests/${id}/convert`, { token, body });
+
+  test("an imported request missing a required value is refused by name", async () => {
+    const made = await request();
+    await sql("update requests set data = data - 'tiraje' where id = $1", [made.id]);
+
+    const res = await convert(made.id);
+
+    assert.equal(res.status, 409);
+    assert.match(res.body.error.message, /"Tiraje"/, "it says which value is missing");
+    assert.match(res.body.error.message, /fill it in before converting/);
+
+    const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
+    assert.deepEqual(
+      read.body.request.missingRequired.map((campo) => campo.code),
+      ["tiraje"],
+      "the request itself says what it owes, so the inbox can show it",
+    );
+
+    await server.patch(`/api/requests/${made.id}`, {
+      token: adminToken,
+      body: { data: { descripcion: "Hojas", tiraje: 500 } },
+    });
+    assert.equal((await convert(made.id)).status, 201, "once filled, it converts");
+  });
 
   test("carries the requester, the title, the priority and every captured value", async () => {
     const made = await request();

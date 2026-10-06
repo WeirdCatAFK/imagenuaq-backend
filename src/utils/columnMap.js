@@ -30,6 +30,13 @@
 // number and the same date typed by hand arrives as a string; `from: "text"` asks for what Excel
 // displays. The probe script prints both so a person can see which a column holds.
 //
+// **A required field the sheet left empty does not reject the row.** The request comes in
+// incomplete, with the field named in `missingRequired`; the inbox says so and conversion to a
+// project is what refuses until somebody fills it. A tracker always carries rows that were
+// started and never finished, and leaving them outside the system is how they get lost. A cell
+// that *has* a value the field's type cannot read is a different thing and still rejects the row:
+// there the sheet says something, and importing it wrong would be worse than not importing it.
+//
 // **`hashColumns` is the row's identity, and an Id column is better than content.** The papel
 // institucional tracker carries a Forms `Id`, so hashing that alone means correcting a typo in
 // the sheet does not look like a new row. The consequence, accepted: an edit after the import is
@@ -156,8 +163,10 @@ export function validateColumnMap(map, fields, headers = null) {
  * @param {unknown[]} row The row's values.
  * @param {unknown[]} [texts] The same row as Excel displays it, for `from: "text"`.
  * @returns {{ title: string|null, requester: string|null, priority: number,
- *   statusCode: string|null, data: object, sourceData: object, sourceHash: string,
- *   errors: {key: string, message: string}[], warnings: {key: string, message: string}[] }}
+ *   statusCode: string|null, data: object, missingRequired: string[], sourceData: object,
+ *   sourceHash: string, errors: {key: string, message: string}[],
+ *   warnings: {key: string, message: string}[] }} `missingRequired` names the required fields the
+ *   row left empty: the request comes in anyway and conversion is what refuses until they exist.
  */
 export function applyMapping(map, fields, headers, row, texts = []) {
   const errors = [];
@@ -194,6 +203,7 @@ export function applyMapping(map, fields, headers, row, texts = []) {
   }
 
   const data = {};
+  const missingRequired = [];
   for (const field of fields) {
     const rule = map.fields[field.code];
     if (rule === undefined) continue;
@@ -210,7 +220,11 @@ export function applyMapping(map, fields, headers, row, texts = []) {
 
     if (value === null) {
       if (field.required) {
-        errors.push({ key: field.code, message: `"${field.name}" is required and the row has no value.` });
+        missingRequired.push(field.code);
+        warnings.push({
+          key: field.code,
+          message: `"${field.name}" is required and the row has no value; it comes in missing.`,
+        });
       }
       continue;
     }
@@ -219,6 +233,7 @@ export function applyMapping(map, fields, headers, row, texts = []) {
   }
 
   return {
+    missingRequired,
     title: title === null ? null : String(title).trim(),
     requester: requester === null || String(requester).trim() === "" ? null : String(requester).trim(),
     priority,
