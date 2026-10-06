@@ -292,13 +292,15 @@ class Microsoft {
   }
 
   /**
-   * The actor's own live accounts; every live account for an admin.
+   * The actor's own accounts; everyone's for an admin. Revoked ones come too, because the
+   * screen has to offer reconnecting them: the books read with one stop working until somebody
+   * does.
    *
    * @param {object} actor
    * @returns {Promise<object[]>}
    */
   async listAccounts(actor) {
-    const rows = await query.listMicrosoftAccounts(isAdmin(actor) ? null : actor.id);
+    const rows = await query.listMicrosoftAccounts(isAdmin(actor) ? null : actor.id, true);
     return rows.map(shapeAccount);
   }
 
@@ -350,6 +352,7 @@ function shapeAccount(row) {
     connectedAt: row.connected_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at,
+    sheetCount: row.sheet_count ?? 0,
   };
 }
 

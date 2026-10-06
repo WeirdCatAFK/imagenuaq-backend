@@ -276,7 +276,10 @@ describe('/api/microsoft', () => {
       assert.notEqual(res.body.account.revokedAt, null);
 
       const list = await server.get('/api/microsoft/accounts', { token: workerToken });
-      assert.equal(list.body.accounts.length, 0);
+      const listed = list.body.accounts.find((one) => one.id === account.id);
+      assert.ok(listed, 'a revoked account stays listed: the books read with it say to reconnect');
+      assert.notEqual(listed.revokedAt, null);
+      assert.equal(listed.sheetCount, 0, 'how many books stop working if it is disconnected');
 
       const logs = await logsFor('microsoft_accounts', account.id);
       assert.deepEqual(

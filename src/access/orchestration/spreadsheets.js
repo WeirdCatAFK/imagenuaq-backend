@@ -641,7 +641,18 @@ function shapeSheet(row) {
     schemaVersionId: row.schema_version_id,
     columnMap: row.column_map,
     mapped: row.schema_version_id !== null,
+    schemaName: row.schema_name ?? null,
+    schemaVersion: row.schema_version ?? null,
     lastImportedAt: row.last_imported_at,
+    lastImport:
+      row.last_finished_at == null
+        ? null
+        : {
+            finishedAt: row.last_finished_at,
+            created: row.last_rows_created,
+            skipped: row.last_rows_skipped,
+            failed: row.last_rows_failed,
+          },
     markedRows: row.marked_rows ?? 0,
     accountId: row.microsoft_account_id,
     accountEmail: row.account_email ?? null,

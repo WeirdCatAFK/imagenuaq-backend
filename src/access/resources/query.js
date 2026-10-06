@@ -2919,19 +2919,24 @@ class Query {
   }
 
   /**
-   * Live accounts, everyone's or one person's.
+   * Accounts, everyone's or one person's, each with how many live books are read with it: a
+   * screen that offers to disconnect one has to be able to say what stops working.
    *
    * @param {number | null} userId Null lists them all.
+   * @param {boolean} includeRevoked Revoked rows stay, so a book can say which account to
+   *   reconnect; the connect flow only wants the live ones.
    */
-  async listMicrosoftAccounts(userId = null) {
+  async listMicrosoftAccounts(userId = null, includeRevoked = false) {
     return this.#rows(
-      `select a.*, u.full_name as user_full_name
+      `select a.*, u.full_name as user_full_name,
+              (select count(*)::int from sheets s
+                where s.microsoft_account_id = a.id and s.deleted_at is null) as sheet_count
          from microsoft_accounts a
          join users u on u.id = a.user_id
-        where a.revoked_at is null
+        where ($2::boolean or a.revoked_at is null)
           and ($1::bigint is null or a.user_id = $1)
-        order by a.connected_at desc, a.id desc`,
-      [userId],
+        order by a.revoked_at nulls first, a.connected_at desc, a.id desc`,
+      [userId, includeRevoked],
     );
   }
 
@@ -3001,10 +3006,29 @@ class Query {
            u.full_name    as registered_by_name,
            -- Cuántas filas se marcaron como ya vistas sin importarlas: una pantalla que ofrece
            -- deshacerlo tiene que poder decir cuántas son.
-           (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows
+           (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows,
+           -- A qué formato está mapeado, por su nombre: la pantalla dice «Papel institucional
+           -- v2», no un id, y un libro puede quedarse en una versión vieja.
+           sc.name    as schema_name,
+           sv.version as schema_version,
+           -- Cómo salió la última importación, para decirlo en el renglón sin pedir la
+           -- historia de cada libro por separado.
+           li.rows_created  as last_rows_created,
+           li.rows_skipped  as last_rows_skipped,
+           li.rows_failed   as last_rows_failed,
+           li.finished_at   as last_finished_at
       from sheets s
       join microsoft_accounts a on a.id = s.microsoft_account_id
-      left join users u on u.id = s.registered_by`;
+      left join users u on u.id = s.registered_by
+      left join schema_versions sv on sv.id = s.schema_version_id
+      left join schemas sc on sc.id = sv.schema_id
+      left join lateral (
+        select rows_created, rows_skipped, rows_failed, finished_at
+          from sheet_imports
+         where sheet_id = s.id and finished_at is not null
+         order by started_at desc
+         limit 1
+      ) li on true`;
 
   async listSheets() {
     return this.#rows(
