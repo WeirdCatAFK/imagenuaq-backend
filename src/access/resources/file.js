@@ -6,7 +6,7 @@
  * - Validar los datos antes de enviarlos al almacenamiento.
  *
  * Este módulo NO depende de Express ni de PostgreSQL.
- * 
+ *
  * La dependencia "storage" se inyecta desde fuera. Así, este recurso
  * puede utilizar MinIO u otro proveedor sin cambiar su lógica.
  *
@@ -75,17 +75,23 @@ function normalizeProjectKey(projectKey) {
  * Una cadena vacía representa la raíz del proyecto.
 */
 
+/**
+ * Normaliza una ruta de carpeta a la forma que usa el almacenamiento: separadores "/" y
+ * sin barras sobrantes al principio ni al final. La primera sustitución convierte las
+ * barras invertidas de Windows, y la segunda recorta los extremos, de ahí el anclaje
+ * "^" y "$" y la bandera global.
+ *
+ * @param {string} [folderPath] Ruta tal como la escribió quien llama.
+ * @returns {string} Ruta normalizada, o cadena vacía si la carpeta es la raíz.
+ */
 function normalizeFolderPath(folderPath = "") {
   if (folderPath === "" || folderPath === null) {
     return "";
   }
 
   const path = requireString(folderPath, "folderPath")
-    .replace(/\\/g, "/") 
+    .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "");
-    //^incio string y $fin cadena
-    // "\/" busca una O más barras normales "/" (si se deja solo "/" sin "\/" solo delimita la expresión regular) 
-    //"/ /g" expresión para reemplazar TODAS la conincidencias encontradas seguido de la coma para reemplazar con lo que se indique
 
   if (!path) {
     return "";
@@ -264,19 +270,11 @@ function normalizePagination({ limit = 100, continuationToken = null } = {}) {
   return { limit, continuationToken };
 }
 
-// ------------------------------------------------------
-// CRUD FILES
-// ------------------------------------------------------
-
 /**
  * Crea el recurso de archivos utilizando un adaptador de almacenamiento.
  **/
 export function createFilesResource(storage) {
   validateStorage(storage);
-
-  // ----------------------------------------------------
-  // CREATE
-  // ----------------------------------------------------
 
   /**
    * Crea o almacena un archivo dentro de un proyecto.
@@ -316,7 +314,6 @@ export function createFilesResource(storage) {
       );
     }
 
-    // Comprueba previamente si ya existe.
     const existing = await storage.headObject({ key });
 
     if (existing) {
@@ -344,11 +341,7 @@ export function createFilesResource(storage) {
     };
   }
 
-  // ----------------------------------------------------
-  // READ
-  // ----------------------------------------------------
-
-  /*Obtiene un archivo por su clave completa.*/
+  /** Obtiene un archivo por su clave completa. */
   async function getFile({
     projectKey,
     folderPath = "",
@@ -445,8 +438,6 @@ export function createFilesResource(storage) {
       projectKey: project,
       folderPath: folder,
       files: objects.filter((object) => {
-        // Excluye los marcadores usados para representar
-        // carpetas, si el proveedor los devuelve en el listado.
         return !String(object.key ?? "").endsWith("/");
       }),
       nextToken: response?.nextToken ?? null,
@@ -487,10 +478,6 @@ export function createFilesResource(storage) {
 
     return metadata !== null;
   }
-
-  // ----------------------------------------------------
-  // UPDATE
-  // ----------------------------------------------------
 
   /**
    * Actualiza el contenido o los metadatos de un archivo.
@@ -537,9 +524,6 @@ export function createFilesResource(storage) {
       );
     }
 
-    // Para cambiar únicamente metadatos, el adaptador debe
-    // conservar el contenido original al reemplazar el objeto.
-    // Se pasa body como undefined cuando no se quiere cambiar.
     const result = await storage.putObject({
       key,
       body: body === undefined
@@ -633,10 +617,6 @@ export function createFilesResource(storage) {
     };
   }
 
-  // ----------------------------------------------------
-  // DELETE
-  // ----------------------------------------------------
-
   /**
    * Elimina un archivo.
    */
@@ -668,10 +648,6 @@ export function createFilesResource(storage) {
       key,
     };
   }
-
-  // ----------------------------------------------------
-  // API PÚBLICA DEL RECURSO
-  // ----------------------------------------------------
 
   return Object.freeze({
     createFile,

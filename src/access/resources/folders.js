@@ -58,7 +58,7 @@ function validateSegment(value, fieldName) {
   return segment;
 }
 
-//Normaliza la clave del proyecto.
+/** Normaliza la clave del proyecto. */
 function normalizeProjectKey(projectKey) {
   return validateSegment(projectKey, "projectKey");
 }
@@ -90,7 +90,7 @@ function normalizeFolderPath(folderPath = "") {
     .join("/");
 }
 
-//Valida el adaptador de almacenamiento.
+/** Comprueba que el adaptador de almacenamiento exponga los metodos que este recurso usa. */
 function validateStorage(storage) {
   const requiredMethods = [
     "putObject",
@@ -116,7 +116,7 @@ function validateStorage(storage) {
   }
 }
 
-//Construye el prefijo de un proyecto.
+/** Construye el prefijo bajo el que viven todas las carpetas de un proyecto. */
 export function getProjectFolderPrefix(projectKey) {
   return `${normalizeProjectKey(projectKey)}/`;
 }
@@ -216,7 +216,7 @@ export function getRelativeFolderPath(key) {
   return segments.slice(1).join("/");
 }
 
-//Normaliza los parámetros de paginación.
+/** Normaliza los parámetros de paginación. */
 function normalizePagination({
   limit = 100,
   continuationToken = null,
@@ -285,17 +285,9 @@ function isFolderMarker(key, projectKey) {
   );
 }
 
-/*------------------------------------------------------
-// CRUD CARPETAS
-------------------------------------------------------*/
-
-//Crea el recurso de carpetas.
+/** Crea el recurso de carpetas sobre un adaptador de almacenamiento ya validado. */
 export function createFoldersResource(storage) {
   validateStorage(storage);
-
-  // ----------------------------------------------------
-  // CREATE
-  // ----------------------------------------------------
 
   /**
    * Crea una carpeta dentro de un proyecto.
@@ -339,7 +331,6 @@ export function createFoldersResource(storage) {
       throw error;
     }
 
-    // El cuerpo vacío representa el marcador de la carpeta.
     await storage.putObject({
       key,
       body: new Uint8Array(0),
@@ -355,10 +346,6 @@ export function createFoldersResource(storage) {
       created: true,
     };
   }
-
-  // ----------------------------------------------------
-  // READ
-  // ----------------------------------------------------
 
   /**
    * Consulta una carpeta por su nombre y su ruta padre.
@@ -429,8 +416,6 @@ export function createFoldersResource(storage) {
 
     const folders = new Map();
 
-    // Los prefijos comunes permiten identificar carpetas
-    // que contienen archivos o subcarpetas.
     for (const folderPrefix of response?.prefixes ?? []) {
       if (
         typeof folderPrefix !== "string" ||
@@ -443,8 +428,6 @@ export function createFoldersResource(storage) {
         .slice(prefix.length)
         .replace(/\/+$/, "");
 
-      // Solo se admite un segmento para obtener
-      // las carpetas inmediatas.
       if (relative && !relative.includes("/")) {
         folders.set(folderPrefix, {
           key: folderPrefix,
@@ -456,7 +439,6 @@ export function createFoldersResource(storage) {
       }
     }
 
-    // También se incluyen los marcadores explícitos.
     for (const object of response?.objects ?? []) {
       const key = object.key;
 
@@ -510,7 +492,6 @@ export function createFoldersResource(storage) {
 
       const relative = key.slice(prefix.length);
 
-      // Los marcadores representan carpetas explícitas.
       if (relative.endsWith("/")) {
         const parts = relative
           .replace(/\/+$/, "")
@@ -536,8 +517,6 @@ export function createFoldersResource(storage) {
         continue;
       }
 
-      // Los archivos también permiten inferir las carpetas
-      // que no cuentan con marcador explícito.
       const parts = relative.split("/");
 
       if (parts.length < 2) {
@@ -602,10 +581,6 @@ export function createFoldersResource(storage) {
     );
   }
 
-  // ----------------------------------------------------
-  // UPDATE
-  // ----------------------------------------------------
-
   /**
    * Renombra o mueve una carpeta dentro del mismo proyecto.
    *
@@ -643,7 +618,6 @@ export function createFoldersResource(storage) {
       };
     }
 
-    // Impide mover una carpeta dentro de sí misma.
     if (destinationKey.startsWith(sourceKey)) {
       throw new TypeError(
         "No puedes mover una carpeta dentro de sí misma."
@@ -684,7 +658,6 @@ export function createFoldersResource(storage) {
       throw error;
     }
 
-    // Incluye el marcador de origen si existe.
     const sourceKeys = new Set(
       sourceObjects
         .map((object) => object.key)
@@ -695,7 +668,6 @@ export function createFoldersResource(storage) {
       sourceKeys.add(sourceKey);
     }
 
-    // Primero se copian todos los objetos.
     for (const oldKey of sourceKeys) {
       const newKey =
         destinationKey + oldKey.slice(sourceKey.length);
@@ -706,7 +678,6 @@ export function createFoldersResource(storage) {
       });
     }
 
-    // Solo después de copiar correctamente se elimina el origen.
     for (const oldKey of sourceKeys) {
       await storage.deleteObject({
         key: oldKey,
@@ -724,10 +695,6 @@ export function createFoldersResource(storage) {
       folderPath: normalizeFolderPath(newParentPath),
     };
   }
-
-  // ----------------------------------------------------
-  // DELETE
-  // ----------------------------------------------------
 
   /**
    * Elimina una carpeta.
@@ -767,8 +734,6 @@ export function createFoldersResource(storage) {
       throw error;
     }
 
-    // No permite borrar una carpeta con contenido
-    // accidentalmente cuando recursive está desactivado.
     if (!recursive) {
       const children = objects.filter(
         (object) => object.key !== key
@@ -783,8 +748,6 @@ export function createFoldersResource(storage) {
       }
     }
 
-    // Elimina los objetos del prefijo cuando se solicitó
-    // explícitamente una eliminación recursiva.
     if (recursive) {
       for (const object of objects) {
         if (typeof object.key !== "string") {
@@ -797,7 +760,6 @@ export function createFoldersResource(storage) {
       }
     }
 
-    // Elimina el marcador, si existe.
     if (marker) {
       await storage.deleteObject({ key });
     }
@@ -808,10 +770,6 @@ export function createFoldersResource(storage) {
       recursive,
     };
   }
-
-  // ----------------------------------------------------
-  // API PÚBLICA DEL RECURSO
-  // ----------------------------------------------------
 
   return Object.freeze({
     createFolder,

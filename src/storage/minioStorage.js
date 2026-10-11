@@ -30,25 +30,27 @@ import {
 
 import { minio } from "./minio.js";
 
-// CONFIGURACIÓN
 const DOCUMENTS_BUCKET =
   process.env.MINIO_DOCUMENTS_BUCKET ?? "documentos";
 
-// FUNCIONES AUXILIARES
+/**
+ * Junta en un Buffer el cuerpo que devuelve el SDK. En Node el stream suele traer
+ * transformToByteArray(); el camino del iterador asíncrono queda para los que no.
+ *
+ * @param {unknown} body Cuerpo de la respuesta del SDK, o nada.
+ * @returns {Promise<Buffer>} El contenido, vacío si no hubo cuerpo.
+ */
 async function bodyToBuffer(body) {
   if (!body) {
     return Buffer.alloc(0);
   }
 
-  // En Node.js, el stream devuelto por AWS SDK normalmente
-  // dispone de transformToByteArray().
   if (typeof body.transformToByteArray === "function") {
     const bytes = await body.transformToByteArray();
 
     return Buffer.from(bytes);
   }
 
-  // Compatibilidad con streams async iterables.
   const chunks = [];
 
   for await (const chunk of body) {
@@ -168,10 +170,6 @@ export function getDocumentsBucket() {
   return DOCUMENTS_BUCKET;
 }
 
-// ------------------------------------------------------
-// PUT
-// ------------------------------------------------------
-
 /**
  * Crea o reemplaza un objeto en MinIO.
  *
@@ -205,14 +203,6 @@ export async function putObject({
 
   const bucket = getDocumentsBucket();
 
-  /**
-   * Cuando únicamente se actualizan los metadatos
-   * y no se proporciona un nuevo body,
-   * hacemos un COPY del objeto sobre sí mismo.
-   *
-   * Esto evita descargar y volver a subir archivos
-   * grandes solamente para cambiar sus metadatos.
-   */
   if (
     body === undefined &&
     preserveExistingBody
@@ -224,10 +214,6 @@ export async function putObject({
     });
   }
 
-  /**
-   * Para crear o reemplazar completamente un archivo,
-   * sí necesitamos recibir el contenido.
-   */
   if (body === undefined || body === null) {
     throw new TypeError(
       "body es obligatorio para crear un objeto."
@@ -249,10 +235,6 @@ export async function putObject({
     etag: response.ETag ?? null,
   };
 }
-
-// ------------------------------------------------------
-// GET
-// ------------------------------------------------------
 
 /**
  * Obtiene un objeto completo.
@@ -318,10 +300,6 @@ export async function getObject({
   }
 }
 
-// ------------------------------------------------------
-// HEAD
-// ------------------------------------------------------
-
 /**
  * Obtiene únicamente los metadatos de un objeto.
  *
@@ -351,10 +329,6 @@ export async function headObject({
     return handleNotFound(error);
   }
 }
-
-// ------------------------------------------------------
-// LIST
-// ------------------------------------------------------
 
 /**
  * Lista objetos que comienzan con un prefijo.
@@ -458,10 +432,6 @@ export async function listObjects({
   };
 }
 
-// ------------------------------------------------------
-// DELETE
-// ------------------------------------------------------
-
 /**
  * Elimina un objeto.
  *
@@ -492,10 +462,6 @@ export async function deleteObject({
     return handleNotFound(error);
   }
 }
-
-// ------------------------------------------------------
-// COPY
-// ------------------------------------------------------
 
 /**
  * Copia un objeto dentro del mismo bucket.
@@ -604,10 +570,6 @@ export async function replaceObjectMetadata({
     throw error;
   }
 }
-
-// ------------------------------------------------------
-// UTILIDADES ADICIONALES
-// ------------------------------------------------------
 
 /**
  * Comprueba si un objeto existe.

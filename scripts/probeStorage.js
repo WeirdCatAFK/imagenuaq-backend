@@ -1,4 +1,13 @@
-import "dotenv/config";
+// Exercises the whole folder and file CRUD of the MinIO store against a throwaway project
+// and prints what came back at every step.
+// Usage: npm run storage:probe
+//
+// Why this exists as a script and not a test.
+//
+// It needs a live MinIO and real credentials, so it cannot run in `npm test`, which is
+// offline and deterministic by design. It is the same kind of tool as probeSheet.js: the
+// questions it answers -- does the bucket layout work, does a rename keep the bytes -- are
+// about the real service, not about our code paths.
 
 import { createMinioStorage } from "../src/storage/minioStorage.js";
 import { createFilesResource } from "../src/access/resources/file.js";
@@ -10,6 +19,12 @@ const folders = createFoldersResource(storage);
 
 const projectKey = "TEST-CRUD-0001";
 
+/**
+ * Prints a step heading and, when given one, dumps the value it returned.
+ *
+ * @param {string} title Name of the step.
+ * @param {unknown} [data] Value to dump under the heading.
+ */
 function print(title, data = null) {
   console.log(`\n=== ${title} ===`);
 
@@ -19,9 +34,6 @@ function print(title, data = null) {
 }
 
 try {
-  // ---------------------------------------------------------
-  // 1. CREAR CARPETAS
-  // ---------------------------------------------------------
 
   print("1. CREANDO CARPETAS");
 
@@ -43,27 +55,7 @@ try {
 
   console.log("Carpetas creadas correctamente.");
 
-
-  // ---------------------------------------------------------
-  // 2. CREAR ARCHIVOS
-  // ---------------------------------------------------------
-
   print("2. CREANDO ARCHIVOS");
-    // await files.createFile({
-    //     projectKey,
-    //     folderPath: "Diseño",
-    //     fileName: "vacio.txt",
-    //     body: Buffer.alloc(0),
-    //     contentType: "text/plain", 
-    // });
-
-    // const emptyFile = await files.getFile({
-    //     projectKey,
-    //     folderPath: "Diseño",
-    //     fileName: "vacio.txt",
-    // });
-
-    // console.log("Archivo vacío:", emptyFile.body.length);
 
   await files.createFile({
     projectKey,
@@ -91,11 +83,6 @@ try {
 
   console.log("Archivos creados correctamente.");
 
-
-  // ---------------------------------------------------------
-  // 3. LEER UN ARCHIVO
-  // ---------------------------------------------------------
-
   print("3. LEYENDO ARCHIVO");
 
   const file = await files.getFile({
@@ -110,11 +97,6 @@ try {
   console.log("Metadata:");
   console.dir(file.metadata, { depth: null });
 
-
-  // ---------------------------------------------------------
-  // 4. VERIFICAR EXISTENCIA
-  // ---------------------------------------------------------
-
   print("4. VERIFICANDO EXISTENCIA");
 
   const exists = await files.fileExists({
@@ -125,11 +107,6 @@ try {
 
   console.log("¿Existe propuesta.txt?", exists);
 
-
-  // ---------------------------------------------------------
-  // 5. LISTAR ARCHIVOS DE UNA CARPETA
-  // ---------------------------------------------------------
-
   print("5. LISTANDO ARCHIVOS DE DISEÑO");
 
   const designFiles = await files.listFiles({
@@ -139,11 +116,6 @@ try {
 
   console.dir(designFiles, { depth: null });
 
-
-  // ---------------------------------------------------------
-  // 6. LISTAR TODOS LOS ARCHIVOS DEL PROYECTO
-  // ---------------------------------------------------------
-
   print("6. LISTANDO TODOS LOS ARCHIVOS DEL PROYECTO");
 
   const projectFiles = await files.listProjectFiles({
@@ -152,11 +124,6 @@ try {
 
   console.dir(projectFiles, { depth: null });
 
-
-  // ---------------------------------------------------------
-  // 7. LISTAR CARPETAS
-  // ---------------------------------------------------------
-
   print("7. LISTANDO CARPETAS");
 
   const projectFolders = await folders.listProjectFolders({
@@ -164,11 +131,6 @@ try {
   });
 
   console.dir(projectFolders, { depth: null });
-
-
-  // ---------------------------------------------------------
-  // 8. ACTUALIZAR ARCHIVO
-  // ---------------------------------------------------------
 
   print("8. ACTUALIZANDO ARCHIVO");
 
@@ -189,11 +151,6 @@ try {
   console.log("Nuevo contenido:");
   console.log(updatedFile.body.toString());
 
-
-  // ---------------------------------------------------------
-  // 9. RENOMBRAR ARCHIVO
-  // ---------------------------------------------------------
-
   print("9. RENOMBRANDO ARCHIVO");
 
   await files.renameFile({
@@ -205,11 +162,6 @@ try {
 
   console.log("Archivo renombrado correctamente.");
 
-
-  // ---------------------------------------------------------
-  // 10. RENOMBRAR CARPETA
-  // ---------------------------------------------------------
-
   print("10. RENOMBRANDO CARPETA");
 
   await folders.renameFolder({
@@ -219,11 +171,6 @@ try {
   });
 
   console.log("Carpeta renombrada correctamente.");
-
-
-  // ---------------------------------------------------------
-  // 11. VERIFICAR ESTADO FINAL
-  // ---------------------------------------------------------
 
   print("11. ESTADO FINAL DEL PROYECTO");
 
@@ -241,11 +188,6 @@ try {
   console.log("\nCarpetas:");
   console.dir(finalFolders, { depth: null });
 
-
-  // ---------------------------------------------------------
-  // 12. ELIMINAR TODO EL PROYECTO DE PRUEBA
-  // ---------------------------------------------------------
-
   print("12. LIMPIANDO PROYECTO DE PRUEBA");
 
   await folders.deleteFolder({
@@ -262,11 +204,6 @@ try {
 
   console.log("Proyecto de prueba eliminado.");
 
-
-  // ---------------------------------------------------------
-  // 13. VERIFICAR LIMPIEZA
-  // ---------------------------------------------------------
-
   print("13. VERIFICANDO LIMPIEZA");
 
   const remainingFiles = await files.listProjectFiles({
@@ -282,7 +219,6 @@ try {
 
   console.log("Carpetas restantes:");
   console.dir(remainingFolders, { depth: null });
-
 
   console.log("\n========================================");
   console.log("PRUEBA CRUD COMPLETADA CORRECTAMENTE");
