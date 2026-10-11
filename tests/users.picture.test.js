@@ -1,3 +1,10 @@
+// Profile pictures, stored as bytes on the users row.
+//
+// Two things here are worth more than the round trip. The type travels with the bytes --
+// bytea alone cannot tell a browser whether it is looking at a PNG or a JPEG, and the
+// CHECK constraint keeps the pair from ever being half-set. And the audit trail records
+// only THAT a picture changed: audit.js redacts by column name and `profile_picture`
+// matches none of its patterns, so an unguarded emit would put the image in `logs`.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -11,13 +18,6 @@ import {
   tokenFor,
 } from './helpers/fixtures.js';
 
-// Profile pictures, stored as bytes on the users row.
-//
-// Two things here are worth more than the round trip. The type travels with the bytes --
-// bytea alone cannot tell a browser whether it is looking at a PNG or a JPEG, and the
-// CHECK constraint keeps the pair from ever being half-set. And the audit trail records
-// only THAT a picture changed: audit.js redacts by column name and `profile_picture`
-// matches none of its patterns, so an unguarded emit would put the image in `logs`.
 describe('/api/users/:id/picture', () => {
   let server;
   let adminToken;
@@ -26,8 +26,6 @@ describe('/api/users/:id/picture', () => {
 
   const ACCOUNTS = ['coordinacion@uaq.mx', 'disenador@uaq.mx'];
 
-  // The smallest valid PNG: an 8-bit greyscale 1x1. A real file rather than random bytes,
-  // so a future check that sniffs the magic number does not have to invent one.
   const PNG = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==',
     'base64',
@@ -45,7 +43,6 @@ describe('/api/users/:id/picture', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -55,8 +52,6 @@ describe('/api/users/:id/picture', () => {
     user = await createPending({ email: 'nuevo@uaq.mx', role: 'worker' });
   });
 
-  // `raw`, not `body`: the helper JSON-stringifies `body`, which would turn a Buffer into
-  // {"type":"Buffer","data":[...]} and upload that instead of the image.
   const put = (id, bytes, contentType = 'image/png', token = adminToken) =>
     server.put(`/api/users/${id}/picture`, {
       token,
@@ -173,7 +168,6 @@ describe('/api/users/:id/picture', () => {
       assert.deepEqual(entry.before_data, { profile_picture: false });
       assert.deepEqual(entry.after_data, { profile_picture: true });
 
-      // Belt and braces: the encoded image must not appear anywhere in the trail.
       const serialised = JSON.stringify(rows);
       assert.equal(serialised.includes(PNG.toString('base64').slice(0, 24)), false);
     });

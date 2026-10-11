@@ -1,3 +1,7 @@
+// The role catalogue and the grants each role holds. `role_permissions` is empty in a fresh
+// database by the role-permissions migration's own decision (RF-USR-05: which role gets
+// what is coordination's call), so most of what these cases assert is the endpoint that
+// stops it being empty.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -13,10 +17,6 @@ import {
 } from './helpers/fixtures.js';
 import auth from '../src/access/orchestration/auth.js';
 
-// The role catalogue and the grants each role holds. `role_permissions` is empty in a fresh
-// database by the role-permissions migration's own decision (RF-USR-05: which role gets
-// what is coordination's call), so most of what these cases assert is the endpoint that
-// stops it being empty.
 describe('/api/roles', () => {
   let server;
   let adminToken;
@@ -36,7 +36,6 @@ describe('/api/roles', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -51,8 +50,6 @@ describe('/api/roles', () => {
       assert.equal(res.body.error.message, 'No token provided.');
     });
 
-    // The catalogues are readable by anyone signed in: a form that assigns a role has to
-    // list the roles, and hiding the list would mean hard-coding the four seeded names.
     for (const path of ['/api/roles', '/api/roles/permissions']) {
       test(`a worker may read ${path}`, async () => {
         const res = await server.get(path, { token: workerToken });
@@ -159,9 +156,6 @@ describe('/api/roles', () => {
       assert.equal(res.body.role.id, created.body.role.id);
     });
 
-    // requireRole('admin') compares the name, so renaming or deleting the row is the
-    // lockout scripts/createAdmin.js exists to undo. Refused before the holder count: the
-    // reason is the role, not who has it.
     test('renaming the admin role is 403', async () => {
       const res = await server.patch(`/api/roles/${await roleId('admin')}`, {
         token: adminToken,
@@ -181,8 +175,6 @@ describe('/api/roles', () => {
       assert.equal(res.body.error.message, 'The admin role cannot be deleted.');
     });
 
-    // users.role_id is NOT NULL and there is no defensible default to move holders to, so
-    // this is refused rather than resolved. The count is in the message on purpose.
     test('deleting a role that users still hold is 409 with the count', async () => {
       const res = await server.delete(`/api/roles/${await roleId('worker')}`, {
         token: adminToken,
@@ -211,8 +203,6 @@ describe('/api/roles', () => {
   });
 
   describe('the permission catalogue', () => {
-    // /permissions is declared before /:id in routes/roles.js. With them the other way
-    // round Express reads this URL as an id and refuses it as "Invalid role id."
     test('GET /permissions is not captured by /:id', async () => {
       const res = await server.get('/api/roles/permissions', { token: workerToken });
 
@@ -220,9 +210,6 @@ describe('/api/roles', () => {
       assert.ok(Array.isArray(res.body.permissions));
     });
 
-    // The eleven seeded codes are the requirements made data. These two in particular:
-    // RF-USR-10 says seeing the reason for an absence is a different permission from seeing
-    // that somebody is away, and their being two rows is what stops them collapsing.
     test('availability.read and absence.reason.read are separate rows', async () => {
       const res = await server.get('/api/roles/permissions', { token: workerToken });
 
@@ -241,8 +228,6 @@ describe('/api/roles', () => {
       assert.equal(res.body.permission.code, `${TEST_PERMISSION_PREFIX}write`);
     });
 
-    // requirePermission() compares these strings literally, so a code that is not in the
-    // house form is a permission nobody will ever successfully ask for.
     for (const code of ['nodots', 'Project.Read', 'project write', 'project.', '.read']) {
       test(`the code ${JSON.stringify(code)} is 400`, async () => {
         const res = await server.post('/api/roles/permissions', {
@@ -300,15 +285,6 @@ describe('/api/roles', () => {
       );
     });
 
-    // Section 8 of catalog-bootstrap seeds the grants that are definitions rather than
-    // configuration. They are load-bearing: an `admin` with no permissions is the bootstrap
-    // deadlock that migration was written to avoid, and a `finance` without finance.read is
-    // a role name with no meaning under RF-USR-08.
-    //
-    // The admin case is the one that catches a migration adding a permission and forgetting to
-    // grant it -- which `stage-io-and-finance` did with `finance.request`, fixed forward by
-    // `admin-holds-finance-request`. Compare against the catalogue rather than a number, so the
-    // next permission does not need this file edited.
     test('admin arrives holding every permission', async () => {
       const catalogue = await server.get('/api/roles/permissions', { token: adminToken });
       const held = await server.get(`/api/roles/${await roleId('admin')}/permissions`, {
@@ -318,10 +294,6 @@ describe('/api/roles', () => {
       assert.equal(held.body.permissions.length, catalogue.body.permissions.length);
     });
 
-    // `finance` holds exactly three codes, and the set is the role's definition: finance.read
-    // from catalog-bootstrap, then project.read and finance.request from stage-io-and-finance --
-    // the board it needs to see, plus asking for an invoice. Deliberately NOT project.write,
-    // which would also reach stages, sign-offs and closing (DATAMODEL.md §2.15).
     test('finance arrives holding the board and the ask, and no write', async () => {
       const held = await server.get(`/api/roles/${await roleId('finance')}/permissions`, {
         token: adminToken,
@@ -332,7 +304,6 @@ describe('/api/roles', () => {
       assert.ok(!codes.includes('project.write'), 'finance can ask, not edit');
     });
 
-    // Policy, not definition -- left to coordination on purpose (RF-USR-05).
     for (const seeded of ['worker', 'area_lead']) {
       test(`${seeded} arrives holding nothing`, async () => {
         const held = await server.get(`/api/roles/${await roleId(seeded)}/permissions`, {
@@ -433,9 +404,6 @@ describe('/api/roles', () => {
         );
       });
 
-      // The empty set is not an edge case: it is how a role's last permission is revoked,
-      // and the driver serialises an empty array in a way Postgres rejects unless the query
-      // asks for it back. Nothing else in the suite would catch that.
       test('an empty array revokes everything', async () => {
         await server.put(`/api/roles/${role.id}/permissions`, {
           token: adminToken,
@@ -482,9 +450,6 @@ describe('/api/roles', () => {
       });
     });
 
-    // The whole reason this endpoint exists. requirePermission() reads role_permissions per
-    // request rather than from the token precisely so a grant written now takes effect now,
-    // and permissionsFor() is what it calls.
     test('a grant written here is what permissionsFor() reads back', async () => {
       await server.put(`/api/roles/${role.id}/permissions`, {
         token: adminToken,

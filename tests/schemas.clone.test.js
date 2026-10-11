@@ -1,3 +1,5 @@
+// Templates the RF-SOL-01 way: a format is started from another one by copying its latest
+// fields into a new identity's version 1.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -13,8 +15,6 @@ import {
   TEST_SCHEMA_PREFIX,
 } from './helpers/fixtures.js';
 
-// Templates the RF-SOL-01 way: a format is started from another one by copying its latest
-// fields into a new identity's version 1.
 describe('POST /api/schemas/:id/clone', () => {
   let server;
   let admin;
@@ -35,7 +35,6 @@ describe('POST /api/schemas/:id/clone', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -73,7 +72,6 @@ describe('POST /api/schemas/:id/clone', () => {
     assert.deepEqual(schema.fields.information, []);
     assert.notEqual(schema.id, source.id);
 
-    // The copy is its own identity: a version on it does not touch the source.
     const [row] = await sql('select count(*)::int as n from schema_versions where schema_id = $1', [source.id]);
     assert.equal(row.n, 2);
 

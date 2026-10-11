@@ -24,7 +24,8 @@
     "admin:create": "node --env-file-if-exists=.env scripts/createAdmin.js",
     "sheets:probe": "node --env-file-if-exists=.env scripts/probeSheet.js",
     "pretest": "node --env-file-if-exists=.env scripts/testDb.js",
-    "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --test --test-concurrency=1 \"tests/**/*.test.js\""
+    "test": "node --env-file-if-exists=.env --env-file-if-exists=.env.test --test --test-concurrency=1 \"tests/**/*.test.js\"",
+    "lint": "eslint ."
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -40,6 +41,7 @@
     "@dbml/connector": "^10.1.1",
     "@dbml/core": "^10.1.1",
     "@dbml/core-chartdb": "npm:@dbml/core@^3.14.1",
+    "eslint": "^10.11.0",
     "node-pg-migrate": "^9.0.0",
     "pg": "^8.23.0"
   }

@@ -1,3 +1,6 @@
+// Invites expire in three days and travel by email or chat, so the first one going astray
+// is ordinary. Without this route the only remedy would be deleting and recreating the
+// user, which changes their id and orphans anything already assigned to them.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,9 +15,6 @@ import {
 } from './helpers/fixtures.js';
 import * as tokens from './helpers/tokens.js';
 
-// Invites expire in three days and travel by email or chat, so the first one going astray
-// is ordinary. Without this route the only remedy would be deleting and recreating the
-// user, which changes their id and orphans anything already assigned to them.
 describe('POST /api/users/:id/invite', () => {
   let server;
   let adminToken;
@@ -32,8 +32,6 @@ describe('POST /api/users/:id/invite', () => {
     await server.close();
   });
 
-  // Keeps the admin account: verifyToken() re-reads the user row, so truncating it would
-  // revoke the token minted in before() and answer 401 to every case below.
   beforeEach(() => resetCases(ACCOUNTS));
 
   const reinvite = (id, token = adminToken) =>
@@ -62,8 +60,6 @@ describe('POST /api/users/:id/invite', () => {
     });
   });
 
-  // Number() accepts a good deal that is not an id. The check is Number.isInteger and > 0
-  // rather than a truthiness test, so "1.5" and "-3" are refused before they reach a query.
   describe('the id must be a positive integer', () => {
     for (const [label, id] of [
       ['a word', 'abc'],
@@ -89,8 +85,6 @@ describe('POST /api/users/:id/invite', () => {
       assert.equal(res.body.error.message, 'User not found.');
     });
 
-    // Soft-deleted users are filtered out of the lookup, so a removed account cannot be
-    // handed a fresh way in.
     test('a soft-deleted user is 404', async () => {
       const user = await createPending({ email: 'pendiente@uaq.mx' });
       await softDelete(user.id);
@@ -101,9 +95,6 @@ describe('POST /api/users/:id/invite', () => {
       assert.equal(res.body.error.message, 'User not found.');
     });
 
-    // Re-inviting an active account would be a password reset by another name, and this
-    // flow is not one: it hands whoever holds the link a working session. A real reset
-    // needs a single-use token of its own, which does not exist yet.
     test('an already-activated account is 409', async () => {
       const user = await createActive({ email: 'activa@uaq.mx' });
 
@@ -136,12 +127,6 @@ describe('POST /api/users/:id/invite', () => {
       assert.equal(activated.body.user.id, user.id);
     });
 
-    // Re-issuing does not revoke what came before -- there is no table to record a
-    // revocation in. Every outstanding link stays good until one of them is spent, and
-    // then all of them are dead, because what invalidates them is the password appearing
-    // on the row rather than anything about the token. Pinned because it is the visible
-    // cost of the no-table design: anyone adding real revocation has to change a test that
-    // says so out loud.
     test('an earlier invitation dies only when the account is activated', async () => {
       const user = await createPending({ email: 'pendiente@uaq.mx' });
       const first = (await reinvite(user.id)).body.inviteToken;
@@ -158,12 +143,6 @@ describe('POST /api/users/:id/invite', () => {
       assert.equal(usedFirst.status, 409);
     });
 
-    // A consequence of the claims being fully determined by the subject: purpose, sub, iss
-    // and aud are fixed, and `iat`/`exp` are whole seconds, so two invites minted for the
-    // same user inside one second are the same string. Harmless -- they are equivalent
-    // credentials for the same account, and the single-use rule lives on the row rather
-    // than on the token -- but surprising enough that a reader deserves to find it stated
-    // rather than discover it debugging a test.
     test('two invitations minted in the same second are identical', async () => {
       const user = await createPending({ email: 'pendiente@uaq.mx' });
 

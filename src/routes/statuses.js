@@ -4,9 +4,10 @@ import { Router } from "express";
 
 import statuses from "../access/orchestration/statuses.js";
 import { authenticate, requirePermission } from "../middlewares/auth.js";
-import { ApiError } from "../utils/ApiError.js";
+import { idParam } from "../utils/params.js";
 
 const router = Router();
+const statusId = (req) => idParam(req, "id", "status id");
 
 router.use(authenticate);
 
@@ -44,16 +45,8 @@ router.patch("/:id", async (req, res) => {
   res.json({ status: await statuses.update(statusId(req), { label, sortOrder, isTerminal, isActive }) });
 });
 
-// Deactivates rather than deletes: requests and projects reference these rows.
 router.delete("/:id", async (req, res) => {
   res.json({ status: await statuses.deactivate(statusId(req)) });
 });
 
-function statusId(req) {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) throw ApiError.badRequest("Invalid status id.");
-  return id;
-}
-
 export default router;
-  

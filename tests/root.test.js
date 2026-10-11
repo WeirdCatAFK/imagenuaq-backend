@@ -14,9 +14,6 @@ describe('GET /', () => {
     await server.close();
   });
 
-  // The readiness ping. Deliberately touches no database, so it answers even when Postgres
-  // is gone -- that is the division of labour with /api/health, which answers whether the
-  // database is reachable.
   test('reports the service name and status without touching the database', async () => {
     const res = await server.get('/');
 
@@ -28,7 +25,6 @@ describe('GET /', () => {
     const res = await server.get('/');
 
     assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
-    // helmet removes this one rather than adding it.
     assert.equal(res.headers.get('x-powered-by'), null);
   });
 

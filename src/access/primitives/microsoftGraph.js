@@ -72,8 +72,6 @@ export function authorizeUrl(app, { state }) {
     response_mode: "query",
     scope: SCOPES,
     state,
-    // Always offer the account picker: the person connecting may hold several accounts,
-    // and the one their browser is signed into is not necessarily the one with the files.
     prompt: "select_account",
   });
   return `${AUTHORITY}/${app.tenantId}/oauth2/v2.0/authorize?${params}`;

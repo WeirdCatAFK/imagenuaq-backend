@@ -7,9 +7,10 @@ import {
   resetCases,
   createActive,
   createArea,
+  createSchema,
   tokenFor,
   logsFor,
-  roleId,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
 describe("/api/statuses", () => {
@@ -19,7 +20,6 @@ describe("/api/statuses", () => {
 
   const ACCOUNTS = ["coordinacion@uaq.mx", "disenador@uaq.mx"];
 
-  // Seeded by projects-spine, plus `rechazada` from status-manage.
   const GLOBAL = [
     "recibido",
     "en_proceso",
@@ -44,23 +44,14 @@ describe("/api/statuses", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
 
   beforeEach(() => resetCases(ACCOUNTS));
 
-  async function grantWorker(permissions) {
-    const res = await server.put(
-      `/api/roles/${await roleId("worker")}/permissions`,
-      {
-        token: adminToken,
-        body: { permissions },
-      },
-    );
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   const create = (body, token = adminToken) =>
     server.post("/api/statuses", { token, body });
@@ -75,7 +66,6 @@ describe("/api/statuses", () => {
         GLOBAL,
       );
       assert.ok(res.body.statuses.every((s) => s.isGlobal === true));
-      // RF-EST-05 reads these: the two outcomes that end a project.
       assert.deepEqual(
         res.body.statuses.filter((s) => s.isTerminal).map((s) => s.code),
         ["rechazada", "cerrado"],
@@ -106,7 +96,6 @@ describe("/api/statuses", () => {
       assert.equal(own.areaName, area.name);
       assert.equal(own.isGlobal, false);
 
-      // Another area does not see it.
       const other = await createArea("Otra área");
       const isolated = await server.get(`/api/statuses?areaId=${other.id}`, {
         token: workerToken,
@@ -114,6 +103,45 @@ describe("/api/statuses", () => {
       assert.deepEqual(
         isolated.body.statuses.map((s) => s.code),
         GLOBAL,
+      );
+    });
+
+    test("each row says how many projects and requests hold it", async () => {
+      const schema = await createSchema("papel", {
+        deliverables: [
+          { code: "descripcion", name: "Descripción", type: "text", required: true },
+        ],
+        information: [],
+      });
+
+      const made = await server.post("/api/requests", {
+        token: adminToken,
+        body: { schemaId: schema.id, title: "Un cartel", data: { descripcion: "Algo" } },
+      });
+      assert.equal(made.status, 201);
+
+      const before = await server.get("/api/statuses", { token: workerToken });
+      assert.ok(before.body.statuses.every((s) => s.projectCount === 0));
+      assert.deepEqual(
+        before.body.statuses.filter((s) => s.requestCount > 0).map((s) => s.code),
+        [made.body.request.statusCode],
+      );
+
+      const target = before.body.statuses.find((s) => s.code === "en_proceso");
+      const set = await server.put(`/api/requests/${made.body.request.id}/status`, {
+        token: adminToken,
+        body: { statusId: target.id },
+      });
+      assert.equal(set.status, 200);
+
+      const after = await server.get("/api/statuses", { token: workerToken });
+      assert.equal(
+        after.body.statuses.find((s) => s.code === "en_proceso").requestCount,
+        1,
+      );
+      assert.equal(
+        after.body.statuses.filter((s) => s.requestCount > 0).length,
+        1,
       );
     });
 
@@ -128,7 +156,6 @@ describe("/api/statuses", () => {
 
   describe("POST /", () => {
     test("an area may reuse a global code", async () => {
-      // Two partial unique indexes, not one on the pair: NULL is distinct from NULL.
       const area = await createArea("Diseño de prueba");
       const res = await create({
         areaId: area.id,
@@ -305,7 +332,6 @@ describe("/api/statuses", () => {
       const found = shown.body.statuses.find((s) => s.id === id);
       assert.equal(found.isActive, false);
 
-      // The row is still readable by id: requests and projects reference it.
       assert.equal(
         (await server.get(`/api/statuses/${id}`, { token: adminToken })).status,
         200,

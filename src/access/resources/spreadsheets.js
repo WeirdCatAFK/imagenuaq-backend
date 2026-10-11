@@ -16,17 +16,23 @@
 // Graph documents -- base64url of the URL with a `u!` prefix.
 import { graphGet } from "../primitives/microsoftGraph.js";
 
-// How many body rows a preview carries under the header row: enough to recognise the
-// tracker, few enough that a table of thousands of rows costs one small Graph call.
+/**
+ * How many body rows a preview carries under the header row: enough to recognise the
+ * tracker, few enough that a table of thousands of rows costs one small Graph call.
+ */
 const SAMPLE_ROWS = 5;
 
-// How many table rows one Graph call asks for. A tracker of a few thousand rows is a handful
-// of round trips; asking for everything at once is what gets a 504 from Graph on a big book.
+/**
+ * How many table rows one Graph call asks for. A tracker of a few thousand rows is a handful
+ * of round trips; asking for everything at once is what gets a 504 from Graph on a big book.
+ */
 const PAGE = 500;
 
-// Beyond this the import refuses rather than pulling a corpus into one HTTP request. The
-// interviews describe trackers of hundreds of rows; ten thousand means somebody pointed this
-// at the wrong file, and a job queue is the answer for the day that is real (not this one).
+/**
+ * Beyond this the import refuses rather than pulling a corpus into one HTTP request. The
+ * interviews describe trackers of hundreds of rows; ten thousand means somebody pointed this
+ * at the wrong file, and a job queue is the answer for the day that is real (not this one).
+ */
 const MAX_ROWS = 10_000;
 
 /**
@@ -79,9 +85,6 @@ export async function listTables(accessToken, driveId, itemId) {
  * -- strings, numbers, empty strings for blanks -- untouched; deciding what a blank header
  * means is the mapping's business.
  *
- * A table's body is paged through /rows with $top so a long tracker is never downloaded
- * whole; a worksheet's used range already arrives in one piece and is sliced here.
- *
  * @param {string} accessToken
  * @param {string} driveId
  * @param {string} itemId
@@ -108,10 +111,7 @@ export async function readHeaders(accessToken, driveId, itemId, tableName) {
       kind: "table",
       name: target.name,
       headers: range.values?.[0] ?? [],
-      // Each table row is its own object holding a one-row matrix.
       rows: (body.value ?? []).map((row) => row.values?.[0] ?? []),
-      // A table's rows carry no formatted text, so `from: "text"` falls back to the value --
-      // cellAt() does that, and an empty matrix here is how it learns to.
       texts: [],
     };
   }
@@ -133,17 +133,6 @@ export async function readHeaders(accessToken, driveId, itemId, tableName) {
 
 /**
  * Every row under the header, for an import, in both the shapes Excel offers.
- *
- * **`values` and `texts` are both returned, and that is the point.** A real date in a cell
- * arrives in `values` as a serial number -- days since 1899-12-30 -- while the same date typed
- * as text arrives as a string, and a mapping rule cannot know which a given tracker holds.
- * `texts` is what Excel displays, so a rule may ask for `from: "text"` when the formatted
- * string is the truth. `utils/fieldValues.js` handles both, so the default stays `values`.
- *
- * A table is paged through `/rows` with `$top`/`$skip`, because `graphGet()`'s `@odata.nextLink`
- * following does not apply to the workbook row endpoint. A worksheet's used range arrives whole
- * and is sliced here -- there is no paging to do and asking for one is a second round trip for
- * nothing.
  *
  * @param {string} accessToken
  * @param {string} driveId

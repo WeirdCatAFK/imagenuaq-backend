@@ -10,14 +10,15 @@ import {
   createSchema,
   tokenFor,
   logsFor,
-  roleId,
   sql,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
 describe("/api/projects", () => {
   let server;
   let admin;
   let adminToken;
+  let worker;
   let workerToken;
   let statusId;
   let area;
@@ -29,7 +30,7 @@ describe("/api/projects", () => {
     await reset();
 
     admin = await createActive({ email: ACCOUNTS[0], role: "admin" });
-    await createActive({ email: ACCOUNTS[1], role: "worker" });
+    worker = await createActive({ email: ACCOUNTS[1], role: "worker" });
 
     adminToken = await tokenFor(server, ACCOUNTS[0]);
     workerToken = await tokenFor(server, ACCOUNTS[1]);
@@ -41,7 +42,6 @@ describe("/api/projects", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -51,13 +51,8 @@ describe("/api/projects", () => {
     area = await createArea("Diseño de prueba");
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   const create = (body, token = adminToken) => server.post("/api/projects", { token, body });
 
@@ -118,6 +113,7 @@ describe("/api/projects", () => {
       assert.equal(stages[1].startedAt, null);
       assert.deepEqual(activeStageIds, [stages[0].id]);
       assert.equal(stages[0].attempt, 1);
+      assert.deepEqual(stages.map((s) => s.phaseName), ["Fase 1", "Fase 2"], "seq is the phase");
 
       const logs = await logsFor("project_stages", stages[0].id);
       assert.deepEqual(logs.map((l) => l.action), ["stage_activated"]);
@@ -172,7 +168,6 @@ describe("/api/projects", () => {
       const stolen = await create({ title: "Robo", requestIds: ids });
       assert.equal(stolen.status, 409);
 
-      // The refused call leaves nothing behind.
       const [{ n }] = await sql("select count(*)::int as n from projects where deleted_at is null");
       assert.equal(n, 1);
     });
@@ -247,6 +242,44 @@ describe("/api/projects", () => {
       assert.equal(first.statusLabel, "Recibido");
     });
 
+    test("names the open stages and counts the whole list", async () => {
+      await seed();
+      const res = await server.get("/api/projects", { token: adminToken });
+
+      assert.equal(res.body.total, 2, "total counts what matches the filters, not the page");
+      const [withCost, plain] = res.body.projects;
+      assert.deepEqual(
+        withCost.openStages.map((e) => [e.areaName, e.title, e.status]),
+        [[area.name, "Diseño", "active"]],
+      );
+      assert.deepEqual(plain.openStages, [], "nothing open, nothing named");
+    });
+
+    test("mine is what the caller created or is responsible for", async () => {
+      const { withCost } = await seed();
+      await grantWorker(["project.read"]);
+      const mine = async (token) =>
+        (await server.get("/api/projects?mine=true", { token })).body.projects.map((p) => p.key);
+
+      assert.deepEqual(await mine(adminToken), ["CON-COSTO", "SIN-COSTO"], "the admin created both");
+      assert.deepEqual(await mine(workerToken), [], "a colleague's project is not yours");
+
+      await sql(
+        `update project_stages ps set assigned_to = $2
+          from flow_stages fs, flow_phases fp
+          where fs.id = ps.flow_stage_id and fp.id = fs.phase_id and fp.project_id = $1`,
+        [withCost.id, worker.id],
+      );
+
+      assert.deepEqual(await mine(workerToken), ["CON-COSTO"], "a stage of yours makes it yours");
+      const row = (await server.get("/api/projects", { token: workerToken })).body.projects
+        .find((p) => p.key === "CON-COSTO");
+      assert.equal(row.mineResponsible, true);
+      assert.equal(row.mineCreated, false, "the admin created it");
+
+      await grantWorker([]);
+    });
+
     test("filters by requester, area, cost and produced value", async () => {
       await seed();
       const get = async (qs) => (await server.get(`/api/projects?${qs}`, { token: adminToken })).body.projects;
@@ -257,7 +290,6 @@ describe("/api/projects", () => {
       assert.deepEqual((await get("hasCost=false")).map((p) => p.key), ["SIN-COSTO"]);
       assert.deepEqual((await get("q=sin")).map((p) => p.key), ["SIN-COSTO"]);
       assert.deepEqual((await get("q=CON-")).map((p) => p.key), ["CON-COSTO"]);
-      // RF-IMP-08: find the project by the order number a stage produced.
       assert.deepEqual((await get("fieldKey=numero_orden&fieldValue=A-77")).map((p) => p.key), ["CON-COSTO"]);
       assert.deepEqual(await get("fieldKey=numero_orden&fieldValue=B-00"), []);
     });

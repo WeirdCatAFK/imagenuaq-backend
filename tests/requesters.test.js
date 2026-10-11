@@ -1,3 +1,6 @@
+// The requesting party is a string (RF-SOL-07); this is the autocomplete that keeps it from
+// becoming four spellings of one faculty. Rows are inserted directly: /api/requests does
+// not exist yet.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -8,13 +11,10 @@ import {
   createActive,
   createSchema,
   tokenFor,
-  roleId,
   sql,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// The requesting party is a string (RF-SOL-07); this is the autocomplete that keeps it from
-// becoming four spellings of one faculty. Rows are inserted directly: /api/requests does
-// not exist yet.
 describe("GET /api/requesters", () => {
   let server;
   let statusId;
@@ -41,7 +41,6 @@ describe("GET /api/requesters", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -52,13 +51,8 @@ describe("GET /api/requesters", () => {
     schemaVersionId = schema.schema_version_id;
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(
-      `/api/roles/${await roleId("worker")}/permissions`,
-      { token: adminToken, body: { permissions } },
-    );
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   async function addRequest(requester, title = "Trabajo") {
     await sql(
@@ -124,7 +118,6 @@ describe("GET /api/requesters", () => {
     const res = await server.get("/api/requesters?limit=2", { token: adminToken });
     assert.equal(res.body.requesters.length, 2);
 
-    // Out-of-range limits fall back to the default rather than refusing.
     const bad = await server.get("/api/requesters?limit=0", { token: adminToken });
     assert.equal(bad.status, 200);
     assert.equal(bad.body.requesters.length, 5);

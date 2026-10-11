@@ -84,9 +84,6 @@ function describeCell(value, text) {
   }
 
   const shown = text === undefined || text === null ? "" : String(text);
-  // A date serial displays as a date: slashes or a clock. A number that merely carries a
-  // thousands separator is not one, and saying so would send somebody mapping a quantity as
-  // a date.
   if (shown !== "" && /[/:]/.test(shown)) {
     return `number ${value} displayed as ${JSON.stringify(shown)}  <- a date serial: map to a date or datetime field`;
   }
@@ -186,8 +183,6 @@ try {
   if (sheetId === null) await listBooks();
   else await probe(sheetId, sample);
 } catch (error) {
-  // An ApiError from orchestration says something useful (reconnect the account, no such
-  // book); anything else is a bug or the network, and its stack is what helps.
   console.error(`\nFailed: ${error.message}`);
   if (error.statusCode === undefined) console.error(error);
   process.exitCode = 1;

@@ -37,8 +37,10 @@ const errorSchema = {
   required: ['error'],
 };
 
-// A refusal, as an inline response object. Written as a helper because every path needs
-// three or four of them and the difference between them is one sentence.
+/**
+ * A refusal, as an inline response object. Written as a helper because every path needs
+ * three or four of them and the difference between them is one sentence.
+ */
 const errorResponse = (description, example) => ({
   description,
   content: {
@@ -49,10 +51,12 @@ const errorResponse = (description, example) => ({
   },
 });
 
-// The same trade as errorResponse(), for the three shapes the areas and roles routes repeat
-// two dozen times between them. Written as helpers rather than as more literal objects
-// because the difference between any two of those operations is a sentence, and a document
-// where the boilerplate outweighs the content stops being read.
+/**
+ * The same trade as errorResponse(), for the three shapes the areas and roles routes repeat
+ * two dozen times between them. Written as helpers rather than as more literal objects
+ * because the difference between any two of those operations is a sentence, and a document
+ * where the boilerplate outweighs the content stops being read.
+ */
 const pathId = (name, description) => ({
   name,
   in: 'path',
@@ -75,10 +79,12 @@ const jsonResponse = (description, schema) => ({
   },
 });
 
-// Most responses here are a single named key wrapping the record -- `{ area: {...} }`,
-// `{ roles: [...] }`. The envelope is deliberate: it leaves room to add a sibling field
-// without changing the type of the response body, which is what happened to
-// POST /api/users and its `inviteToken`.
+/**
+ * Most responses here are a single named key wrapping the record -- `{ area: {...} }`,
+ * `{ roles: [...] }`. The envelope is deliberate: it leaves room to add a sibling field
+ * without changing the type of the response body, which is what happened to
+ * POST /api/users and its `inviteToken`.
+ */
 const wrapped = (description, key, schema, isArray = false) => ({
   description,
   content: {
@@ -99,10 +105,12 @@ const wrapped = (description, key, schema, isArray = false) => ({
 const UNAUTHORIZED = { $ref: '#/components/responses/Unauthorized' };
 const FORBIDDEN = { $ref: '#/components/responses/Forbidden' };
 
-// The identity a session carries. Deliberately the same five fields the JWT holds and
-// verifyToken() returns, because that is what `req.user` means everywhere -- see
-// issueToken() in access/orchestration/auth.js. Permissions are not among them: the
-// catalog is editable at runtime (RF-USR-05), so they are read per request instead.
+/**
+ * The identity a session carries. Deliberately the same five fields the JWT holds and
+ * verifyToken() returns, because that is what `req.user` means everywhere -- see
+ * issueToken() in access/orchestration/auth.js. Permissions are not among them: the
+ * catalog is editable at runtime (RF-USR-05), so they are read per request instead.
+ */
 const sessionUserSchema = {
   type: 'object',
   properties: {
@@ -131,9 +139,11 @@ const sessionUserSchema = {
   required: ['id', 'email', 'fullName', 'roleId', 'role', 'areaId'],
 };
 
-// Builds the document. A function rather than a module-level constant so the server URL is
-// read when the API is mounted rather than when this module is first imported -- import
-// order is not something a caller should have to reason about to get the right host.
+/**
+ * Builds the document. A function rather than a module-level constant so the server URL is
+ * read when the API is mounted rather than when this module is first imported -- import
+ * order is not something a caller should have to reason about to get the right host.
+ */
 export function buildOpenApiDocument() {
   return {
     openapi: '3.1.0',
@@ -160,10 +170,6 @@ export function buildOpenApiDocument() {
     },
     servers: [
       {
-        // Relative, and first, on purpose: Swagger UI resolves it against the page it is
-        // being served from, so "Try it out" hits the host the reader actually opened --
-        // the random port a test binds, localhost in development, the tunnel domain in
-        // production -- without this file knowing which of those it is.
         url: '/',
         description: 'This server',
       },
@@ -224,6 +230,13 @@ export function buildOpenApiDocument() {
           'signed-in user; writes require `schema.manage`.',
       },
       {
+        name: 'workflows',
+        description:
+          'Flow templates (RF-FLW-02, RF-PRY-06): ordered phases whose stages run in ' +
+          'parallel, versioned and immutable like request formats. Reads are open to any ' +
+          'signed-in user; writes require `workflow.manage`.',
+      },
+      {
         name: 'requests',
         description:
           'The intake (RF-SOL-03 … RF-SOL-08). A request is not an early project: they are ' +
@@ -262,9 +275,6 @@ export function buildOpenApiDocument() {
     ],
     components: {
       securitySchemes: {
-        // One scheme, for the session token only. The invite token is also a bearer
-        // credential but it never travels in this header -- it arrives in a request body
-        // -- so describing it here would put it in Authorize, where it does not work.
         bearerAuth: {
           type: 'http',
           scheme: 'bearer',
@@ -436,9 +446,6 @@ export function buildOpenApiDocument() {
           properties: { inviteToken: { type: 'string' } },
           required: ['inviteToken'],
         },
-        // The two read shapes. RF-USR-03 lets any colleague see who else is in the
-        // organisation, so `User` is what every signed-in caller gets; `UserAdmin` adds the
-        // fields that are coordination's business and nobody else's.
         UserArea: {
           type: 'object',
           properties: {
@@ -953,8 +960,17 @@ export function buildOpenApiDocument() {
             folio: { type: 'string', example: 'SOL-000004', description: 'From a sequence (RF-SOL-03).' },
             title: { type: 'string' },
             requester: { type: ['string', 'null'], example: 'Facultad de Química' },
-            areaId: { type: ['integer', 'null'], description: 'The inbox it landed in (RF-SOL-02).' },
+            areaId: {
+              type: ['integer', 'null'],
+              description: 'The inbox it was routed to by hand (RF-SOL-02). A request routed by its flow may have none.',
+            },
             areaName: { type: ['string', 'null'] },
+            hasFlow: { type: 'boolean', description: 'Whether it is routed by a flow (DATAMODEL 2.5).' },
+            firstPhaseAreas: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'The areas of its flow\'s first phase: the inboxes it sits in.',
+            },
             statusId: { type: 'integer' },
             statusCode: { type: 'string', example: 'recibido' },
             statusLabel: { type: 'string' },
@@ -987,6 +1003,10 @@ export function buildOpenApiDocument() {
                   description:
                     'The whole capture (RF-SOL-06), keyed by field code and coerced by type. ' +
                     'Keys the format no longer has are kept as captured.',
+                },
+                flow: {
+                  oneOf: [{ $ref: '#/components/schemas/RequestFlow' }, { type: 'null' }],
+                  description: 'The flow it is routed by, owned by the request until it converts.',
                 },
                 schemaVersionId: { type: 'integer' },
                 schemaId: { type: 'integer' },
@@ -1107,10 +1127,49 @@ export function buildOpenApiDocument() {
             },
           },
         },
+        RequestFlow: {
+          type: 'object',
+          properties: {
+            workflowVersionId: {
+              type: ['integer', 'null'],
+              description: 'The template version it was copied from; null when designed for this request.',
+            },
+            workflowId: { type: ['integer', 'null'] },
+            workflowName: { type: ['string', 'null'] },
+            version: { type: ['integer', 'null'] },
+            phases: { type: 'array', items: { $ref: '#/components/schemas/FlowPhase' } },
+          },
+          required: ['phases'],
+        },
+        SetRequestFlowRequest: {
+          type: 'object',
+          description:
+            'Exactly one of the two. The request\'s previous flow, if any, is replaced whole.',
+          properties: {
+            workflowId: {
+              type: 'integer',
+              description: 'Copy this template\'s latest version.',
+            },
+            phases: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 30,
+              description: 'A flow designed for this request, in the template shape.',
+              items: { $ref: '#/components/schemas/FlowPhaseInput' },
+            },
+          },
+        },
         ConvertResponse: {
           type: 'object',
           properties: {
             project: { $ref: '#/components/schemas/Project' },
+            discardedFlows: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Folios of the other requests whose flows were dropped: the project takes the ' +
+                'flow of the first request that has one.',
+            },
             conflicts: {
               type: 'array',
               description:
@@ -1132,12 +1191,28 @@ export function buildOpenApiDocument() {
         ProjectStage: {
           type: 'object',
           properties: {
-            id: { type: 'integer', example: 9 },
+            id: { type: 'integer', description: 'This attempt (`project_stages.id`).', example: 9 },
             projectId: { type: 'integer', example: 4 },
+            flowStageId: {
+              type: 'integer',
+              description:
+                'The definition every attempt of this stage shares (`flow_stages.id`). A rerun ' +
+                'keeps it.',
+              example: 5,
+            },
+            phaseId: { type: 'integer', example: 2 },
+            phaseName: { type: 'string', example: 'Fase 1' },
+            seq: {
+              type: 'integer',
+              description:
+                'The phase. Stages in one phase run in parallel; approving the last open one ' +
+                'starts the next phase.',
+              example: 1,
+            },
+            position: { type: 'integer', description: 'Display order within the phase.', example: 1 },
             areaId: { type: 'integer', example: 3 },
             areaName: { type: ['string', 'null'], example: 'Diseño Gráfico' },
             title: { type: 'string', example: 'Diseño de la propuesta' },
-            seq: { type: 'integer', description: 'Display order only; it decides nothing.', example: 1 },
             attempt: {
               type: 'integer',
               description: 'Rises when a rejected sign-off sends the work back (RF-FLW-03).',
@@ -1176,6 +1251,9 @@ export function buildOpenApiDocument() {
                 'them has no value, which is what makes the next stage find it.',
               example: ['numero_orden'],
             },
+            inputNote: { type: ['string', 'null'], description: 'Free text on what comes in.' },
+            outputNote: { type: ['string', 'null'], description: 'Free text on what goes out.' },
+            estimatedDays: { type: ['integer', 'null'], description: 'Working days expected.' },
             approvals: {
               type: 'array',
               readOnly: true,
@@ -1183,7 +1261,7 @@ export function buildOpenApiDocument() {
               items: { $ref: '#/components/schemas/Approval' },
             },
           },
-          required: ['id', 'projectId', 'areaId', 'title', 'seq', 'attempt', 'status'],
+          required: ['id', 'projectId', 'flowStageId', 'areaId', 'title', 'seq', 'attempt', 'status'],
         },
         Approval: {
           type: 'object',
@@ -1253,6 +1331,10 @@ export function buildOpenApiDocument() {
               properties: {
                 description: { type: ['string', 'null'] },
                 schemaVersionId: { type: ['integer', 'null'] },
+                workflowVersionId: {
+                  type: ['integer', 'null'],
+                  description: 'The template version its flow came from; null when built by hand.',
+                },
                 statusIsTerminal: { type: 'boolean' },
                 folderId: { type: ['integer', 'null'] },
                 eventCollectionId: { type: ['integer', 'null'] },
@@ -1353,10 +1435,16 @@ export function buildOpenApiDocument() {
         },
         CreateStageRequest: {
           type: 'object',
+          description:
+            'Adds a stage at the end of phase `seq`, creating the phase as `Fase <seq>` when ' +
+            'the project has none there. The same area twice in one phase is two stages.',
           properties: {
             areaId: { type: 'integer' },
             title: { type: 'string', maxLength: 300 },
-            seq: { type: 'integer', default: 1 },
+            seq: { type: 'integer', minimum: 1, default: 1, description: 'The phase.' },
+            inputNote: { type: 'string', maxLength: 2000 },
+            outputNote: { type: 'string', maxLength: 2000 },
+            estimatedDays: { type: 'integer', minimum: 1, maximum: 365 },
             status: { type: 'string', enum: ['pending', 'active'], default: 'pending' },
             assignedTo: { type: 'integer' },
             inputs: {
@@ -1376,7 +1464,9 @@ export function buildOpenApiDocument() {
           type: 'object',
           description:
             'At least one key. `done` is refused here: a stage is completed by recording an ' +
-            'approval on it.',
+            'approval on it. `title`, `inputs`, `outputs`, the notes and `estimatedDays` edit ' +
+            'the definition, which every attempt of the stage shares; the rest edits this ' +
+            'attempt. A note or the days are cleared by sending null.',
           properties: {
             title: { type: 'string', maxLength: 300 },
             status: { type: 'string', enum: ['pending', 'active', 'waiting_external', 'cancelled'] },
@@ -1384,6 +1474,9 @@ export function buildOpenApiDocument() {
             assignedTo: { type: 'integer' },
             inputs: { type: 'array', items: { type: 'string' }, description: 'Replaces the list whole.' },
             outputs: { type: 'array', items: { type: 'string' }, description: 'Replaces the list whole.' },
+            inputNote: { type: ['string', 'null'], maxLength: 2000 },
+            outputNote: { type: ['string', 'null'], maxLength: 2000 },
+            estimatedDays: { type: ['integer', 'null'], minimum: 1, maximum: 365 },
           },
         },
         ApprovalRequest: {
@@ -1406,8 +1499,15 @@ export function buildOpenApiDocument() {
               description: 'The fresh attempt a rejection opened; empty on an approval.',
               items: { $ref: '#/components/schemas/ProjectStage' },
             },
+            opened: {
+              type: 'array',
+              description:
+                'The next phase\'s stages, when this approval closed the last open stage of its ' +
+                'phase (RF-FLW-04). Empty otherwise, and always on a rejection.',
+              items: { $ref: '#/components/schemas/ProjectStage' },
+            },
           },
-          required: ['approval', 'stage', 'reopened'],
+          required: ['approval', 'stage', 'reopened', 'opened'],
         },
         FinanceRequestRequest: {
           type: 'object',
@@ -1786,6 +1886,152 @@ export function buildOpenApiDocument() {
         UpdateSchemaRequest: {
           type: 'object',
           description: 'At least one of the two. Fields are never edited here: publish a version.',
+          properties: {
+            name: { type: 'string', maxLength: 300 },
+            isActive: { type: 'boolean' },
+          },
+        },
+        FlowStage: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 14 },
+            seq: { type: 'integer', description: 'Position within the phase.', example: 1 },
+            areaId: { type: 'integer', example: 3 },
+            areaName: { type: 'string', example: 'Diseño Gráfico' },
+            title: { type: 'string', example: 'Propuesta de diseño' },
+            defaultAssigneeId: { type: ['integer', 'null'], example: 7 },
+            defaultAssigneeName: { type: ['string', 'null'], example: 'Daniel Ibarra' },
+            inputs: { type: 'array', items: { type: 'string' }, example: ['cotizacion'] },
+            outputs: { type: 'array', items: { type: 'string' }, example: ['propuesta_pdf'] },
+            inputNote: { type: ['string', 'null'], example: 'Cotización firmada' },
+            outputNote: { type: ['string', 'null'], example: 'PDF de propuesta' },
+            estimatedDays: { type: 'integer', example: 4 },
+          },
+          required: ['id', 'seq', 'areaId', 'title', 'inputs', 'outputs', 'estimatedDays'],
+        },
+        FlowPhase: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 6 },
+            seq: { type: 'integer', example: 1 },
+            name: { type: 'string', example: 'Diseño' },
+            stages: { type: 'array', items: { $ref: '#/components/schemas/FlowStage' } },
+          },
+          required: ['id', 'seq', 'name', 'stages'],
+        },
+        Workflow: {
+          type: 'object',
+          description:
+            'A template with its latest version. A single read carries `phases`; the list ' +
+            'carries `phaseCount` and `stageCount` instead.',
+          properties: {
+            id: { type: 'integer', example: 1 },
+            code: { type: 'string', example: 'manual_identidad' },
+            name: { type: 'string', example: 'Manual de identidad' },
+            isActive: { type: 'boolean' },
+            createdAt: { type: 'string', format: 'date-time' },
+            workflowVersionId: { type: ['integer', 'null'], example: 3 },
+            version: { type: ['integer', 'null'], example: 2 },
+            publishedAt: { type: ['string', 'null'], format: 'date-time' },
+            publishedBy: { type: ['integer', 'null'] },
+            publishedByName: { type: ['string', 'null'] },
+            phases: { type: 'array', items: { $ref: '#/components/schemas/FlowPhase' } },
+            phaseCount: { type: 'integer' },
+            stageCount: { type: 'integer' },
+          },
+          required: ['id', 'code', 'name', 'isActive', 'createdAt'],
+        },
+        WorkflowVersion: {
+          type: 'object',
+          description:
+            'One published version. Read by its own id it carries its template\'s `code`, ' +
+            '`name`, `isActive` and `phases`; in a version list, the counts instead.',
+          properties: {
+            id: { type: 'integer', example: 3 },
+            workflowId: { type: 'integer', example: 1 },
+            version: { type: 'integer', example: 2 },
+            publishedAt: { type: 'string', format: 'date-time' },
+            publishedBy: { type: ['integer', 'null'] },
+            publishedByName: { type: ['string', 'null'] },
+            code: { type: 'string' },
+            name: { type: 'string' },
+            isActive: { type: 'boolean' },
+            phases: { type: 'array', items: { $ref: '#/components/schemas/FlowPhase' } },
+            phaseCount: { type: 'integer' },
+            stageCount: { type: 'integer' },
+          },
+          required: ['id', 'workflowId', 'version', 'publishedAt'],
+        },
+        FlowStageInput: {
+          type: 'object',
+          properties: {
+            areaId: { type: 'integer' },
+            title: { type: 'string', maxLength: 300 },
+            defaultAssigneeId: {
+              type: ['integer', 'null'],
+              description: 'Must be an active member of the area when the version is published.',
+            },
+            inputs: { type: 'array', items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' } },
+            outputs: { type: 'array', items: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,99}$' } },
+            inputNote: { type: ['string', 'null'], maxLength: 2000 },
+            outputNote: { type: ['string', 'null'], maxLength: 2000 },
+            estimatedDays: { type: 'integer', minimum: 1, maximum: 365 },
+          },
+          required: ['areaId', 'title', 'estimatedDays'],
+        },
+        FlowPhaseInput: {
+          type: 'object',
+          description: 'Phases and their stages take their order from their position in the arrays.',
+          properties: {
+            name: { type: 'string', maxLength: 100 },
+            stages: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 30,
+              items: { $ref: '#/components/schemas/FlowStageInput' },
+            },
+          },
+          required: ['name', 'stages'],
+        },
+        CreateWorkflowRequest: {
+          type: 'object',
+          description: 'The publisher is the session; a `publishedBy` in the body is ignored.',
+          properties: {
+            code: { type: 'string', maxLength: 50, example: 'manual_identidad' },
+            name: { type: 'string', maxLength: 300, example: 'Manual de identidad' },
+            phases: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 30,
+              items: { $ref: '#/components/schemas/FlowPhaseInput' },
+            },
+          },
+          required: ['code', 'name', 'phases'],
+        },
+        PublishWorkflowVersionRequest: {
+          type: 'object',
+          description: 'The whole content of the new version; nothing is merged with the previous one.',
+          properties: {
+            phases: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 30,
+              items: { $ref: '#/components/schemas/FlowPhaseInput' },
+            },
+          },
+          required: ['phases'],
+        },
+        CloneWorkflowRequest: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', maxLength: 50, example: 'manual_identidad_fcq' },
+            name: { type: 'string', maxLength: 300, example: 'Manual de identidad FCQ' },
+          },
+          required: ['code', 'name'],
+        },
+        UpdateWorkflowRequest: {
+          type: 'object',
+          description: 'At least one of the two. The content is never edited here: publish a version.',
           properties: {
             name: { type: 'string', maxLength: 300 },
             isActive: { type: 'boolean' },
@@ -2332,12 +2578,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- areas ---
-      //
-      // Reads need only a session (RF-USR-03); writes need the `area.manage` permission,
-      // which catalog-bootstrap grants `admin` and PUT /api/roles/{id}/permissions can grant
-      // anyone else. The first router on the permission model -- see routes/areas.js.
-
       '/api/areas': {
         get: {
           tags: ['areas'],
@@ -2585,13 +2825,6 @@ export function buildOpenApiDocument() {
           },
         },
       },
-
-      // --- roles ---
-      //
-      // The catalogues are readable by anyone signed in; editing them is editing the
-      // authorisation model, so it is admin-only. Deliberately NOT requirePermission():
-      // the grants these endpoints write are what requirePermission() reads, so gating them
-      // on one would make an empty role_permissions unrecoverable over HTTP.
 
       '/api/contract-types': {
         get: {
@@ -2860,12 +3093,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- microsoft ---
-      //
-      // Reads need spreadsheet.read, writes spreadsheet.write -- the same two codes as
-      // /api/spreadsheets, because the accounts exist only to read the books. Which account
-      // somebody may touch is a record rule (owner or admin), applied in orchestration.
-
       '/api/microsoft/callback': {
         get: {
           tags: ['microsoft'],
@@ -2998,8 +3225,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- spreadsheets ---
-
       '/api/spreadsheets': {
         get: {
           tags: ['spreadsheets'],
@@ -3126,8 +3351,6 @@ export function buildOpenApiDocument() {
         },
       },
       
-      // --- requests ---
-
       '/api/requests': {
         get: {
           tags: ['requests'],
@@ -3143,8 +3366,9 @@ export function buildOpenApiDocument() {
               required: false,
               schema: { oneOf: [{ type: 'integer', minimum: 1 }, { type: 'string', enum: ['none'] }] },
               description:
-                '`none` asks for the requests with no area at all -- what an import leaves ' +
-                'behind, since imported rows are routed by hand from here.',
+                'An area matches what was routed to it by hand and what has it in the first ' +
+                'phase of its flow. `none` asks for the requests with no area and no flow -- ' +
+                'what an import leaves behind, since imported rows are routed from here.',
             },
             { name: 'statusId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
             { name: 'assigneeId', in: 'query', required: false, schema: { type: 'integer', minimum: 1 } },
@@ -3159,6 +3383,7 @@ export function buildOpenApiDocument() {
               description: 'Omitted: everything. `false`: still unconverted, which is the working inbox.',
             },
             { name: 'duplicates', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: only rows flagged as a probable correction.' },
+            { name: 'routed', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: some area already has it, by its flow or by an assigned area. `false`: nobody has it yet, which is what the inbox triages.' },
             { name: 'source', in: 'query', required: false, schema: { type: 'string', enum: ['manual', 'form', 'email', 'sheet'] } },
             { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'created'], default: 'priority' } },
             { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
@@ -3292,7 +3517,9 @@ export function buildOpenApiDocument() {
             'every captured value becomes a project field value keyed by its field code, so ' +
             'the print order and the billing read it without re-capture (RF-FLW-06). The ' +
             'linking happens in the same statement as the project, so a request that somebody ' +
-            'else converted first fails the whole call.',
+            'else converted first fails the whole call. The project takes the flow of the first ' +
+            'request that has one: the same phases, each stage with its first attempt and the ' +
+            'first phase active. Sending `stages` for a request with a flow is refused.',
           parameters: [pathId('id', 'requests.id')],
           requestBody: jsonBody('ConvertRequestRequest'),
           responses: {
@@ -3308,8 +3535,43 @@ export function buildOpenApiDocument() {
           },
         },
       },
-
-      // --- projects ---
+      '/api/requests/{id}/flow': {
+        put: {
+          tags: ['requests'],
+          summary: 'Route the request by giving it a flow',
+          description:
+            'Needs request.write. DATAMODEL 2.5: `workflowId` copies a template\'s latest ' +
+            'version, `phases` is a flow designed for this request; either replaces what it had. ' +
+            'The request then sits in the inbox of every area in the first phase, and ' +
+            'converting hands the same phases to the project.',
+          parameters: [pathId('id', 'requests.id')],
+          requestBody: jsonBody('SetRequestFlowRequest'),
+          responses: {
+            200: wrapped('The request with its flow.', 'request', 'Request'),
+            400: errorResponse('Neither or both, or a bad flow.', 'Send either workflowId, to copy a template, or phases.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request or template.', 'Workflow not found.'),
+            409: errorResponse(
+              'Converted already, or the template is inactive.',
+              'That request is already a project; its flow belongs to it now.',
+            ),
+          },
+        },
+        delete: {
+          tags: ['requests'],
+          summary: 'Take the request\'s flow away',
+          description: 'Needs request.write. It goes back to unrouted unless it has an area.',
+          parameters: [pathId('id', 'requests.id')],
+          responses: {
+            200: wrapped('The request without a flow.', 'request', 'Request'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
+            409: errorResponse('Converted already.', 'That request is already a project; its flow belongs to it now.'),
+          },
+        },
+      },
 
       '/api/projects': {
         get: {
@@ -3325,6 +3587,7 @@ export function buildOpenApiDocument() {
             { name: 'requester', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact match, case-insensitive.' },
             { name: 'hasCost', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-07.' },
             { name: 'carriedOver', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: 'RF-PRY-08.' },
+            { name: 'mine', in: 'query', required: false, schema: { type: 'string', enum: ['true', 'false'] }, description: '`true`: only what the caller has a part in -- a project they created or one where a stage is assigned to them. Every row carries `mineCreated` and `mineResponsible` either way.' },
             { name: 'fieldKey', in: 'query', required: false, schema: { type: 'string' }, description: 'RF-IMP-08: look a project up by a value a stage produced.' },
             { name: 'fieldValue', in: 'query', required: false, schema: { type: 'string' }, description: 'Exact value; needs fieldKey.' },
             { name: 'sort', in: 'query', required: false, schema: { type: 'string', enum: ['priority', 'due'], default: 'priority' } },
@@ -3520,8 +3783,9 @@ export function buildOpenApiDocument() {
           tags: ['projects'],
           summary: 'Add a stage by hand',
           description:
-            'Needs project.write. Until the node editor exists (RF-FLW-02) stages are created ' +
-            'here. Adding the same area and seq again reruns it as the next attempt.',
+            'Needs project.write. Adds the stage at the end of phase `seq`, creating the phase ' +
+            'when the project has none there. The same area and seq again is another stage in ' +
+            'that phase; a rerun only comes from a rejected sign-off.',
           parameters: [pathId('id', 'projects.id')],
           requestBody: jsonBody('CreateStageRequest'),
           responses: {
@@ -3536,10 +3800,11 @@ export function buildOpenApiDocument() {
       '/api/projects/{id}/stages/{stageId}': {
         patch: {
           tags: ['projects'],
-          summary: 'Start, block, unblock or cancel a stage',
+          summary: 'Start, block, unblock or cancel a stage, or edit its definition',
           description:
             'Needs project.write. `waiting_external` needs a `blockedReason` (RF-FLW-07) and ' +
-            'leaving it clears the reason. `done` is not reachable here.',
+            'leaving it clears the reason. `done` is not reachable here. Title, keys, notes ' +
+            'and days edit the definition that every attempt shares.',
           parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
           requestBody: jsonBody('UpdateStageRequest'),
           responses: {
@@ -3561,13 +3826,16 @@ export function buildOpenApiDocument() {
             'decision to be recorded with its author, not for a second authorisation model. ' +
             'The approver is the session. `approved` completes the stage; `rejected` completes ' +
             'it and opens the same stage again at attempt + 1, so the returned work stays ' +
-            'visible. Which stage follows is the flow\'s business and the flow does not exist ' +
-            'yet, so the next stage is started by hand.',
+            'visible. An approval that leaves nothing pending, active or waiting in the ' +
+            'stage\'s phase starts the next phase: its pending stages become active and come ' +
+            'back in `opened` (RF-FLW-04).',
           parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
           requestBody: jsonBody('ApprovalRequest'),
           responses: {
             201: {
-              description: 'The approval, the stage it closed and any attempt it reopened.',
+              description:
+                'The approval, the stage it closed, any attempt it reopened and any stage of the ' +
+                'next phase it opened.',
               content: { 'application/json': { schema: { $ref: '#/components/schemas/ApprovalResponse' } } },
             },
             400: errorResponse('A bad decision or unknown evidence file.', 'decision must be "approved" or "rejected".'),
@@ -3854,8 +4122,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- requesters ---
-
       '/api/requesters': {
         get: {
           tags: ['requesters'],
@@ -3874,8 +4140,6 @@ export function buildOpenApiDocument() {
           },
         },
       },
-
-      // --- statuses ---
 
       '/api/statuses': {
         get: {
@@ -3957,8 +4221,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- data types ---
-
       '/api/data-types': {
         get: {
           tags: ['data-types'],
@@ -3984,8 +4246,6 @@ export function buildOpenApiDocument() {
         },
       },
 
-      // --- schemas ---
-      
       '/api/schemas': {
         get: {
           tags: ['schemas'],
@@ -4140,10 +4400,145 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/workflows': {
+        get: {
+          tags: ['workflows'],
+          summary: 'List every flow template with a summary of its latest version',
+          description: 'Reads are open to any signed-in user. Inactive templates are included.',
+          responses: {
+            200: wrapped('Every template.', 'workflows', 'Workflow', true),
+            401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['workflows'],
+          summary: 'Create a flow template and publish its version 1',
+          description:
+            'Needs workflow.manage. Template, version, phases and stages are written in one ' +
+            'statement. A default person must be an active member of the stage\'s area.',
+          requestBody: jsonBody('CreateWorkflowRequest'),
+          responses: {
+            201: wrapped('The template with its version 1.', 'workflow', 'Workflow'),
+            400: errorResponse(
+              'A bad payload, an unknown area or a default person outside the area.',
+              'Phase 2, stage 1: user 7 is not an active member of Diseño Gráfico.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The code is taken.', 'A workflow with that code already exists.'),
+          },
+        },
+      },
+      '/api/workflows/{id}': {
+        get: {
+          tags: ['workflows'],
+          summary: 'One flow template with its latest version\'s phases and stages',
+          parameters: [pathId('id', 'workflows.id')],
+          responses: {
+            200: wrapped('The template.', 'workflow', 'Workflow'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid workflow id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such template.', 'Workflow not found.'),
+          },
+        },
+        patch: {
+          tags: ['workflows'],
+          summary: 'Rename a flow template or flip its active flag',
+          description: 'Needs workflow.manage. Reactivation goes through here with `isActive: true`.',
+          parameters: [pathId('id', 'workflows.id')],
+          requestBody: jsonBody('UpdateWorkflowRequest'),
+          responses: {
+            200: wrapped('The template after the change.', 'workflow', 'Workflow'),
+            400: errorResponse('Nothing valid to update.', 'Nothing to update: send name or isActive.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such template.', 'Workflow not found.'),
+          },
+        },
+        delete: {
+          tags: ['workflows'],
+          summary: 'Deactivate a flow template',
+          description: 'Needs workflow.manage. Its versions stay readable.',
+          parameters: [pathId('id', 'workflows.id')],
+          responses: {
+            200: wrapped('The deactivated template.', 'workflow', 'Workflow'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid workflow id.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such template.', 'Workflow not found.'),
+            409: errorResponse('The template is already inactive.', 'Workflow is already inactive.'),
+          },
+        },
+      },
+      '/api/workflows/{id}/versions': {
+        get: {
+          tags: ['workflows'],
+          summary: 'Every version of a flow template, newest first',
+          parameters: [pathId('id', 'workflows.id')],
+          responses: {
+            200: wrapped('The versions, without content.', 'versions', 'WorkflowVersion', true),
+            400: errorResponse('The id is not a positive integer.', 'Invalid workflow id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such template.', 'Workflow not found.'),
+          },
+        },
+        post: {
+          tags: ['workflows'],
+          summary: 'Publish the next version of a flow template',
+          description:
+            'Needs workflow.manage. The body is the whole new content. Earlier versions are ' +
+            'immutable (triggers reject any edit), so a project that started from one keeps ' +
+            'reading it. Refused on an inactive template.',
+          parameters: [pathId('id', 'workflows.id')],
+          requestBody: jsonBody('PublishWorkflowVersionRequest'),
+          responses: {
+            201: wrapped('The new version with its content.', 'version', 'WorkflowVersion'),
+            400: errorResponse('A bad payload.', 'Phase 1 has no stages; a phase needs at least one.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such template.', 'Workflow not found.'),
+            409: errorResponse(
+              'The template is inactive, or another version was published meanwhile.',
+              'Cannot publish a version of an inactive workflow.',
+            ),
+          },
+        },
+      },
+      '/api/workflows/versions/{versionId}': {
+        get: {
+          tags: ['workflows'],
+          summary: 'One version of a flow template by its own id',
+          description: "Carries the template's code, name and active flag beside the content.",
+          parameters: [pathId('versionId', 'workflow_versions.id')],
+          responses: {
+            200: wrapped('The version.', 'version', 'WorkflowVersion'),
+            400: errorResponse('The id is not a positive integer.', 'Invalid version id.'),
+            401: UNAUTHORIZED,
+            404: errorResponse('No such version.', 'Workflow version not found.'),
+          },
+        },
+      },
+      '/api/workflows/{id}/clone': {
+        post: {
+          tags: ['workflows'],
+          summary: 'Start a new flow template from an existing one',
+          description:
+            'Needs workflow.manage. A new template whose version 1 copies the source\'s ' +
+            'latest version. A default person who is no longer an active member of the ' +
+            'stage\'s area is dropped from the copy.',
+          parameters: [pathId('id', 'workflows.id')],
+          requestBody: jsonBody('CloneWorkflowRequest'),
+          responses: {
+            201: wrapped('The new template with its version 1.', 'workflow', 'Workflow'),
+            400: errorResponse('Missing code or name.', 'code is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such source template.', 'Workflow not found.'),
+            409: errorResponse('The code is taken.', 'A workflow with that code already exists.'),
+          },
+        },
+      },
     },
-    // Applied to every operation that does not override it. The public ones say
-    // `security: []` explicitly rather than relying on this being absent, so a route added
-    // later without a thought about auth is documented as locked rather than as open.
     security: [{ bearerAuth: [] }],
   };
 }
