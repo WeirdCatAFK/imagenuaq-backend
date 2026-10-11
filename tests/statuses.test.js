@@ -7,6 +7,7 @@ import {
   resetCases,
   createActive,
   createArea,
+  createSchema,
   tokenFor,
   logsFor,
   grantPermissions,
@@ -102,6 +103,45 @@ describe("/api/statuses", () => {
       assert.deepEqual(
         isolated.body.statuses.map((s) => s.code),
         GLOBAL,
+      );
+    });
+
+    test("each row says how many projects and requests hold it", async () => {
+      const schema = await createSchema("papel", {
+        deliverables: [
+          { code: "descripcion", name: "Descripción", type: "text", required: true },
+        ],
+        information: [],
+      });
+
+      const made = await server.post("/api/requests", {
+        token: adminToken,
+        body: { schemaId: schema.id, title: "Un cartel", data: { descripcion: "Algo" } },
+      });
+      assert.equal(made.status, 201);
+
+      const before = await server.get("/api/statuses", { token: workerToken });
+      assert.ok(before.body.statuses.every((s) => s.projectCount === 0));
+      assert.deepEqual(
+        before.body.statuses.filter((s) => s.requestCount > 0).map((s) => s.code),
+        [made.body.request.statusCode],
+      );
+
+      const target = before.body.statuses.find((s) => s.code === "en_proceso");
+      const set = await server.put(`/api/requests/${made.body.request.id}/status`, {
+        token: adminToken,
+        body: { statusId: target.id },
+      });
+      assert.equal(set.status, 200);
+
+      const after = await server.get("/api/statuses", { token: workerToken });
+      assert.equal(
+        after.body.statuses.find((s) => s.code === "en_proceso").requestCount,
+        1,
+      );
+      assert.equal(
+        after.body.statuses.filter((s) => s.requestCount > 0).length,
+        1,
       );
     });
 

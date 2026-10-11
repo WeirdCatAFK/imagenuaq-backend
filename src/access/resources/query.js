@@ -2033,7 +2033,9 @@ class Query {
     return this.#rows(
       `select
         s.id, s.area_id, s.code, s.label, s.sort_order, s.is_terminal, s.is_active,
-        a.name as area_name
+        a.name as area_name,
+        (select count(*)::int from projects p where p.status_id = s.id) as project_count,
+        (select count(*)::int from requests r where r.status_id = s.id) as request_count
       from statuses s
       left join areas a on a.id = s.area_id
       where (s.area_id is null or s.area_id = $1::bigint)
