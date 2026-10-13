@@ -2,7 +2,7 @@
 //
 // This module knows URLs, form encodings and status codes. It does not know what a user
 // is, which account a token belongs to, or where a token is stored: those are
-// orchestration/microsoft.js. Like database.js and storage.js, an error thrown from here
+// orchestration/microsoft.js. Like database.js and minioStorage.js, an error thrown from here
 // means the connection or the remote service failed, not that the caller asked for
 // something wrong -- GraphError carries the status and Microsoft's own error code so the
 // tier above can decide which of those it was.

@@ -134,48 +134,40 @@ emitting something else 3.14 cannot read, the error names the line and points at
 
 ## File storage
 
-`access/primitives/storage.js` is a content-addressed store spread over several
-mounted disks. The arrangement is inverted from the obvious one: **Postgres is the
-filesystem, and the disks are a dumb bag of bytes keyed by SHA-256.** Identity is the
-content; the path is metadata on a row. The two axes then move independently — renaming a
-folder is one row update and nothing on disk moves, and draining a dying disk copies bytes
-without changing any path.
+`access/primitives/minioStorage.js` is a content-addressed store in one MinIO bucket. The
+arrangement is inverted from the obvious one: **Postgres is the filesystem, and MinIO is a
+dumb bag of bytes keyed by SHA-256.** Identity is the content; the name and folder are
+metadata on a row. Renaming or moving a folder is one row update and nothing in the bucket
+moves. The `/api/documents` routes (`orchestration/documents.js`) are the tree on top of it, and
+`/api/shared/:token` opens a read-only, expiring share link to one folder without a session.
 
 ```
-<mount>/.imagenuaq-volume   {"label":"main"} — verified at startup
-<mount>/tmp/                in-flight uploads; same filesystem, so rename(2) is atomic
-<mount>/content/ab/cd/<hash>  64 hex chars. No extension. No filename.
+tmp/<uuid>              in-flight uploads, removed once the hash is known
+content/ab/cd/<hash>    64 hex chars. No extension. No filename.
 ```
 
-Two levels of fanout because a flat directory reaches millions of entries, where
-`readdir`, rsync and backup tools all degrade. No filename on disk because one piece of content has many
-names — that is what dedup means — so writing one here would pick an arbitrary winner and
-create a second, disagreeing source of truth. The name belongs to the `files` row and comes
-back as `Content-Disposition`.
+No filename in the key because one piece of content has many names — that is what dedup
+means — so writing one here would pick an arbitrary winner and create a second, disagreeing
+source of truth. The name belongs to the `files` row and comes back as
+`Content-Disposition`.
 
-Four things worth knowing before building on it:
+Things worth knowing before building on it:
 
-- **Bytes first, row second.** `putContent` writes and returns where the bytes landed; it
-  never touches the database. Commit the `files` and `file_locations` rows only after it resolves. A crash in
-  between leaves orphaned content for a sweeper to reclaim, whereas the reverse order leaves
-  a `files` row pointing at bytes that do not exist — a permanent 500.
-- **There is no update.** Different content is a different hash and therefore a different
-  content. Renames and moves happen on the `files` row, never here.
-- **Placement is recorded, not derived.** Content goes to whichever writable volume has the
-  most free space, and the database remembers which. Deriving it from the hash (`hash % n`)
-  would reshuffle everything already stored the moment a disk is added.
-- **The marker file is load-bearing.** A disk that fails to mount leaves an empty directory
-  on the root filesystem, and the service would otherwise write into it while recording
-  that content as living on a disk that is not there. `openVolumes()` refuses to start
-  without a matching `.imagenuaq-volume`. Initialise a genuinely new disk once, by hand,
-  with `initVolume()` — it is deliberately not automatic.
+- **Bytes first, row second.** `putContent` streams the upload into the bucket, hashing it
+  on the way, and returns the hash; it never touches the database. Insert the `files` row
+  only after it resolves. A crash in between leaves orphaned content for a sweeper to
+  reclaim, whereas the reverse order leaves a `files` row pointing at bytes that do not
+  exist — a permanent 500.
+- **There is no update.** Different content is a different hash. Renames and moves happen
+  on the `files` row, never here.
+- **Placement is MinIO's.** The bucket is erasure-coded across four disks
+  (`MINIO_DISK1..4`), so the database records no placement.
+- **The bucket is checked at startup.** `openStorage()` refuses to start when the bucket is
+  missing; `compose.yaml`'s `minio-init` creates it. The server image is MinIO AIStor and
+  needs `minio.license` (git-ignored) in this directory, or wherever `MINIO_LICENSE` points.
 
-Two costs this design has, stated plainly. **The database is now as critical as the
-disks**: lose it and the disks hold correctly-named but meaningless bytes. And **multi-disk
-is not redundancy** — one disk failing permanently loses that fraction of the corpus with
-no partial recovery, so either ZFS/SnapRAID sits underneath or `file_locations` grows a
-second row per hash. The schema supports the second without change; nothing implements it
-yet.
+The cost this design has, stated plainly: **the database is now as critical as the
+bucket** — lose it and MinIO holds correctly-hashed but meaningless bytes. Back up both.
 
 ## Endpoints
 
@@ -183,7 +175,7 @@ yet.
 | ------ | ------------------------- | ------------ | --------------------------------------------------------- |
 | GET    | `/`                     | —           | Readiness ping, no database involved                      |
 | GET    | `/api/docs`             | —           | Swagger UI;`/api/docs/openapi.json` is the raw document |
-| GET    | `/api/health`           | —           | 200 while Postgres answers, 503 once it stops             |
+| GET    | `/api/health`           | —           | 200 while Postgres and MinIO answer, 503 once either stops |
 | POST   | `/api/auth/login`       | —           | `{ email, password }` → `{ token, user }`            |
 | GET    | `/api/auth/me`          | session      | The subject of the presented token                        |
 | POST   | `/api/auth/activate`    | invite token | `{ token, password }` → `{ token, user }`            |

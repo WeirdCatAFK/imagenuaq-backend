@@ -267,6 +267,17 @@ export function buildOpenApiDocument() {
           '`status.manage`.',
       },
       {
+        name: 'documents',
+        description:
+          'The folder tree and its files (RF-ARC-01, RF-ARC-02). Names and folders live in ' +
+          'Postgres, bytes in MinIO keyed by SHA-256, so renames and moves never touch the ' +
+          'bytes. Reads need `document.read`, writes `document.write`, and deleting or resharing ' +
+          'other people’s work `document.manage`, issuing share links `document.share`. Names need not be unique: items are told ' +
+          'apart by id. Which folders a person may ' +
+          'touch comes from owning the folder or an ancestor, or from the nearest ancestor ' +
+          'shared with one of their areas. A folder you cannot read is a 404.',
+      },
+      {
         name: 'data-types',
         description:
           'The catalogue of field types a format may use. Read-only: a type is a coercion ' +
@@ -307,6 +318,16 @@ export function buildOpenApiDocument() {
                   description: 'Present when not reachable.',
                   example: 'ECONNREFUSED',
                 },
+              },
+              required: ['reachable'],
+            },
+            storage: {
+              type: 'object',
+              description: 'The MinIO bucket file content lives in. Same shape as `database`.',
+              properties: {
+                reachable: { type: 'boolean' },
+                latencyMs: { type: 'integer', example: 4 },
+                error: { type: 'string', example: 'Storage is not open. Call openStorage() first.' },
               },
               required: ['reachable'],
             },
@@ -1699,6 +1720,108 @@ export function buildOpenApiDocument() {
           },
           required: ['name', 'uses'],
         },
+        Folder: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 12 },
+            parentId: { type: ['integer', 'null'], description: 'Null: a root.' },
+            name: { type: 'string', example: 'Diseño' },
+            ownerId: { type: 'integer' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'parentId', 'name', 'ownerId'],
+        },
+        FolderDetail: {
+          allOf: [
+            { $ref: '#/components/schemas/Folder' },
+            {
+              type: 'object',
+              properties: {
+                access: {
+                  type: 'string',
+                  enum: ['owner', 'write', 'read'],
+                  description: 'What the caller may do here. `owner` includes deleting and sharing.',
+                },
+                folders: { type: 'array', items: { $ref: '#/components/schemas/Folder' } },
+                files: { type: 'array', items: { $ref: '#/components/schemas/FileEntry' } },
+                areas: { type: 'array', items: { $ref: '#/components/schemas/FolderGrant' } },
+              },
+            },
+          ],
+        },
+        FileEntry: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 40 },
+            folderId: { type: 'integer' },
+            authorId: { type: 'integer' },
+            name: { type: 'string', example: 'propuesta final.pdf' },
+            size: { type: 'integer', description: 'Bytes.', example: 204800 },
+            mime: { type: ['string', 'null'], example: 'application/pdf' },
+            hash: {
+              type: 'string',
+              description: 'SHA-256 of the content. Two files with the same bytes share it.',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'folderId', 'name', 'size', 'hash'],
+        },
+        ShareLink: {
+          type: 'object',
+          description: 'A read-only link to a folder. The token is never listed; only creation returns it.',
+          properties: {
+            id: { type: 'integer' },
+            folderId: { type: 'integer' },
+            authorizer: { type: 'integer', description: 'users.id of who issued it.' },
+            expiresAt: { type: 'string', format: 'date-time' },
+            revokedAt: { type: ['string', 'null'], format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'folderId', 'authorizer', 'expiresAt'],
+        },
+        SharedFolder: {
+          type: 'object',
+          description: 'What a share link shows: names, sizes and types; no owners, authors or hashes.',
+          properties: {
+            expiresAt: { type: 'string', format: 'date-time' },
+            folder: {
+              type: 'object',
+              properties: {
+                id: { type: 'integer' },
+                name: { type: 'string' },
+                folders: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { id: { type: 'integer' }, name: { type: 'string' } },
+                  },
+                },
+                files: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'integer' },
+                      name: { type: 'string' },
+                      size: { type: 'integer' },
+                      mime: { type: ['string', 'null'] },
+                      createdAt: { type: 'string', format: 'date-time' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        FolderGrant: {
+          type: 'object',
+          properties: {
+            areaId: { type: 'integer' },
+            areaName: { type: 'string', readOnly: true },
+            level: { type: 'string', enum: ['read', 'write'] },
+          },
+          required: ['areaId', 'level'],
+        },
         Status: {
           type: 'object',
           properties: {
@@ -2086,17 +2209,18 @@ export function buildOpenApiDocument() {
       '/api/health': {
         get: {
           tags: ['service'],
-          summary: 'Database reachability',
+          summary: 'Database and file-store reachability',
           security: [],
           responses: {
             200: {
-              description: 'Postgres answered.',
+              description: 'Postgres and MinIO answered.',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/HealthReport' },
                   example: {
                     status: 'ok',
                     database: { reachable: true, latencyMs: 3 },
+                    storage: { reachable: true, latencyMs: 4 },
                     uptime: 412.7,
                   },
                 },
@@ -2104,7 +2228,7 @@ export function buildOpenApiDocument() {
             },
             503: {
               description:
-                'Postgres did not answer. The body is the same shape as the 200 -- the ' +
+                'Postgres or MinIO did not answer. The body is the same shape as the 200 -- the ' +
                 'report is the response, not an error.',
               content: {
                 'application/json': {
@@ -2112,6 +2236,7 @@ export function buildOpenApiDocument() {
                   example: {
                     status: 'degraded',
                     database: { reachable: false, error: 'ECONNREFUSED' },
+                    storage: { reachable: true, latencyMs: 4 },
                     uptime: 412.7,
                   },
                 },
@@ -4141,6 +4266,392 @@ export function buildOpenApiDocument() {
         },
       },
 
+      '/api/documents/folders': {
+        get: {
+          tags: ['documents'],
+          summary: 'Where browsing starts',
+          description:
+            'The roots the caller owns plus every folder shared with one of their areas. ' +
+            'An admin gets every root.',
+          responses: {
+            200: wrapped('The folders.', 'folders', 'Folder', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['documents'],
+          summary: 'Create a folder',
+          description:
+            'Without `parentId`, a root owned by the caller. With it, a subfolder, which needs ' +
+            'write access to the parent.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', maxLength: 255, example: 'Diseño' },
+                    parentId: { type: ['integer', 'null'] },
+                  },
+                  required: ['name'],
+                },
+              },
+            },
+          },
+          responses: {
+            201: wrapped('The folder.', 'folder', 'Folder'),
+            400: errorResponse('A bad name or parentId.', 'name is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('The parent does not exist or is not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}': {
+        get: {
+          tags: ['documents'],
+          summary: 'A folder with its subfolders, files and area grants',
+          parameters: [pathId('id', 'folders.id')],
+          responses: {
+            200: wrapped('The folder.', 'folder', 'FolderDetail'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing, deleted or not visible.', 'Folder not found.'),
+          },
+        },
+        patch: {
+          tags: ['documents'],
+          summary: 'Rename and/or move a folder',
+          description:
+            'Only the rows change. `parentId: null` makes it a root, which only its owner may ' +
+            'do; moving under another folder needs write access there too.',
+          parameters: [pathId('id', 'folders.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', maxLength: 255 },
+                    parentId: { type: ['integer', 'null'] },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The folder.', 'folder', 'Folder'),
+            400: errorResponse('A bad name, or a move into its own subtree.', 'A folder cannot be moved inside itself.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+        delete: {
+          tags: ['documents'],
+          summary: 'Delete a folder, its subtree and their files',
+          description:
+            'Soft delete. Needs ownership of the folder or an ancestor, or write access plus ' +
+            'the `document.manage` permission (RF-USR-05).',
+          parameters: [pathId('id', 'folders.id')],
+          responses: {
+            200: {
+              description: 'The folder as it was, with counts of what went with it.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      folder: {
+                        allOf: [
+                          { $ref: '#/components/schemas/Folder' },
+                          {
+                            type: 'object',
+                            properties: {
+                              foldersDeleted: { type: 'integer' },
+                              filesDeleted: { type: 'integer' },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}/areas': {
+        put: {
+          tags: ['documents'],
+          summary: 'Replace the areas a folder is shared with',
+          description:
+            'Inherited by everything beneath it until a folder further down carries grants of ' +
+            'its own. Needs ownership, or write access plus `document.manage`.',
+          parameters: [pathId('id', 'folders.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    areas: { type: 'array', items: { $ref: '#/components/schemas/FolderGrant' } },
+                  },
+                  required: ['areas'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The grants now.', 'areas', 'FolderGrant', true),
+            400: errorResponse('A bad grant or an unknown area.', "level must be 'read' or 'write'."),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}/files': {
+        post: {
+          tags: ['documents'],
+          summary: 'Upload a file',
+          description:
+            'The request body is the file itself, streamed, not multipart. Its name goes in ' +
+            '`name`, its type in Content-Type. Needs write access to the folder.',
+          parameters: [
+            pathId('id', 'folders.id'),
+            { name: 'name', in: 'query', required: true, schema: { type: 'string', maxLength: 255 } },
+          ],
+          requestBody: {
+            required: true,
+            content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+          },
+          responses: {
+            201: wrapped('The file.', 'file', 'FileEntry'),
+            400: errorResponse('A bad name.', 'name cannot contain slashes or control characters, or be . or ..'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            413: errorResponse('Larger than MAX_UPLOAD_BYTES.', 'Upload exceeds 536870912 bytes.'),
+            503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/documents/{id}': {
+        get: {
+          tags: ['documents'],
+          summary: "A file's metadata",
+          parameters: [pathId('id', 'files.id')],
+          responses: {
+            200: wrapped('The file.', 'file', 'FileEntry'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+          },
+        },
+        patch: {
+          tags: ['documents'],
+          summary: 'Rename and/or move a file',
+          description: 'Only the row changes. Needs write where it is and where it goes.',
+          parameters: [pathId('id', 'files.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', maxLength: 255 },
+                    folderId: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The file.', 'file', 'FileEntry'),
+            400: errorResponse('A bad name or folderId.', 'name is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+          },
+        },
+        delete: {
+          tags: ['documents'],
+          summary: 'Delete a file',
+          description:
+            'Soft delete; the bytes stay in MinIO. Needs to be the author of the file, own the ' +
+            'folder, or have write access plus `document.manage`.',
+          parameters: [pathId('id', 'files.id')],
+          responses: {
+            200: wrapped('The file as it was.', 'file', 'FileEntry'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+          },
+        },
+      },
+      '/api/documents/{id}/content': {
+        get: {
+          tags: ['documents'],
+          summary: 'Download a file',
+          description: 'Streamed, with Content-Disposition: attachment and the stored type.',
+          parameters: [pathId('id', 'files.id')],
+          responses: {
+            200: {
+              description: 'The bytes.',
+              content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+            503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}/links': {
+        get: {
+          tags: ['documents'],
+          summary: 'Working share links on a folder',
+          description:
+            'Not revoked and not expired, newest first. Needs `document.share` and read access.',
+          parameters: [pathId('id', 'folders.id')],
+          responses: {
+            200: wrapped('The links, without tokens.', 'links', 'ShareLink', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+        post: {
+          tags: ['documents'],
+          summary: 'Issue a read-only share link to a folder',
+          description:
+            'Anyone holding the token can browse the folder and everything beneath it and ' +
+            'download its files, without an account, until `expiresAt` (RF-EXT-03). Needs ' +
+            '`document.share` and read access to the folder. The token is in this response ' +
+            'only: it is stored hashed and cannot be shown again.',
+          parameters: [pathId('id', 'folders.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { expiresAt: { type: 'string', format: 'date-time' } },
+                  required: ['expiresAt'],
+                },
+                example: { expiresAt: '2026-11-01T00:00:00-06:00' },
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'The link and its token. Open it at /api/shared/{token}.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      link: {
+                        allOf: [
+                          { $ref: '#/components/schemas/ShareLink' },
+                          { type: 'object', properties: { token: { type: 'string' } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            400: errorResponse('expiresAt missing, malformed or past.', 'expiresAt must be in the future.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/links/{id}': {
+        delete: {
+          tags: ['documents'],
+          summary: 'Revoke a share link',
+          description:
+            'Stops it at once instead of waiting for its expiry. Needs `document.share` and ' +
+            'read access to its folder.',
+          parameters: [pathId('id', 'access_tokens.id')],
+          responses: {
+            200: wrapped('The link, revoked.', 'link', 'ShareLink'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Unknown, already revoked, or its folder not visible.', 'Link not found.'),
+          },
+        },
+      },
+      '/api/shared/{token}': {
+        get: {
+          tags: ['documents'],
+          summary: 'Open a share link',
+          description: 'No session: the token is the credential. Read-only; there are no write routes.',
+          security: [],
+          parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'The linked folder.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/SharedFolder' } } },
+            },
+            404: errorResponse(
+              'Unknown, revoked or expired, or its folder was deleted.',
+              'This link does not exist or has expired.',
+            ),
+          },
+        },
+      },
+      '/api/shared/{token}/folders/{id}': {
+        get: {
+          tags: ['documents'],
+          summary: 'A folder beneath a share link',
+          security: [],
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } },
+            pathId('id', 'folders.id'),
+          ],
+          responses: {
+            200: {
+              description: 'The folder.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/SharedFolder' } } },
+            },
+            404: errorResponse('The link does not work, or the folder is not beneath it.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/shared/{token}/files/{id}/content': {
+        get: {
+          tags: ['documents'],
+          summary: 'Download a file through a share link',
+          description: 'Logged as file_downloaded with no user and the link id.',
+          security: [],
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } },
+            pathId('id', 'files.id'),
+          ],
+          responses: {
+            200: {
+              description: 'The bytes.',
+              content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+            },
+            404: errorResponse('The link does not work, or the file is not beneath it.', 'File not found.'),
+            503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
       '/api/statuses': {
         get: {
           tags: ['statuses'],

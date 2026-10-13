@@ -164,17 +164,6 @@ Table "logs" {
   Note: 'CHECK logs_target_complete: num_nonnulls(target_table, target_id) = ANY (ARRAY[0, 2])'
 }
 
-Table "storage_volumes" {
-  "id" int8 [pk, not null, increment]
-  "label" varchar(100) [unique, not null]
-  "location" varchar(500)
-  "is_writable" bool [not null, default: true]
-  "max_storage" int8
-  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  Note: '''One row per mounted disk, identified by label. The mount path is not authoritative here: it comes from STORAGE_VOLUMES in the environment, because the same disk mounts at a different path inside the container than on the host.
-CHECK storage_volumes_max_storage_positive: (max_storage IS NULL) OR (max_storage > 0)'''
-}
-
 Table "folders" {
   "id" int8 [pk, not null, increment]
   "parent_id" int8
@@ -184,8 +173,6 @@ Table "folders" {
   "deleted_at" timestamptz
 
   Indexes {
-    (parent_id, name) [type: btree, unique, name: "uq_folders_parent_name"]
-    (owner_id, name) [type: btree, unique, name: "uq_folders_root_name"]
     owner_id [type: btree, name: "idx_folders_owner_id"]
     parent_id [type: btree, name: "idx_folders_parent_id"]
   }
@@ -205,28 +192,13 @@ Table "files" {
   "deleted_at" timestamptz
 
   Indexes {
-    (folder_id, name) [type: btree, unique, name: "uq_files_folder_name"]
     author_id [type: btree, name: "idx_files_author_id"]
     folder_id [type: btree, name: "idx_files_folder_id"]
     hash [type: btree, name: "idx_files_hash"]
   }
-  Note: '''One row per appearance of content in the tree. hash is deliberately not unique: two rows sharing it share one physical file on disk, which is what deduplication means.
+  Note: '''One row per appearance of content in the tree. hash is deliberately not unique: two rows sharing it share one object in MinIO (content/ab/cd/<hash>), which is what deduplication means. name is not unique within a folder either: the id is the identity.
 CHECK files_hash_is_hex: hash ~ \'^[0-9a-f]{64}$\'::text
 CHECK files_size_nonneg: size >= 0'''
-}
-
-Table "file_locations" {
-  "hash" bpchar(64) [not null]
-  "storage_volume_id" int8 [not null]
-  "verified_at" timestamptz
-  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-
-  Indexes {
-    (hash, storage_volume_id) [pk, type: btree, name: "file_locations_pkey"]
-    storage_volume_id [type: btree, name: "idx_file_locations_volume"]
-  }
-  Note: '''Which volumes hold a given piece of content, keyed by hash rather than file id because the bytes are shared. Placement is recorded here and never derived from the hash: deriving it would reshuffle every existing file the moment a disk is added.
-CHECK file_locations_hash_is_hex: hash ~ \'^[0-9a-f]{64}$\'::text'''
 }
 
 Table "folder_areas" {
@@ -747,8 +719,6 @@ Ref "fk_event_participants_user_id_users_id":"users"."id" < "event_participants"
 Ref "fk_events_created_by_users_id":"users"."id" < "events"."created_by"
 
 Ref "fk_events_event_type_id_event_types_id":"event_types"."id" < "events"."event_type_id"
-
-Ref "file_locations_storage_volume_id_fkey":"storage_volumes"."id" < "file_locations"."storage_volume_id"
 
 Ref "files_author_id_fkey":"users"."id" < "files"."author_id"
 

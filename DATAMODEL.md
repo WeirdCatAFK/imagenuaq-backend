@@ -15,7 +15,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | USR                               | `users`, `roles`, `areas`, `area_hierarchy`, `area_members`, `contract_types`, `permissions`, `role_permissions`                                                                                                         | Implementado                                                                         |
 | CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
-| ARC                               | `folders`, `files`, `file_locations`, `storage_volumes`, `folder_areas`, `access_tokens`                                                                                                                                     | Implementado                                                                         |
+| ARC                               | `folders`, `files`, `folder_areas`, `access_tokens`                                                                                                                                                                             | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`, **todas con API**: `schemas` (§2.2), `statuses` (`RF-EST-02`), `requests` con su conversión (§2.13), `projects` con etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11) |
 | MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`, `sheet_imports`                                                                                                                                  | Completo: registro de libros por`microsoft-accounts` y `microsoft-app`, mapeo de columnas e importación por `sheet-imports` (§2.10, §2.16) |
@@ -979,8 +979,7 @@ frontend.
 un hecho del área, es consecuencia de dónde cuelga hoy, y mover un subárbol obligaría a
 reescribir `level` en todos sus descendientes —una operación que nadie va a recordar hacer,
 y que deja una gráfica que se dibuja con seguridad a la profundidad equivocada. Se calcula
-con un CTE recursivo al leer. Contrasta con `file_locations`, donde la ubicación **sí** se
-guarda: en qué disco están los bytes es una decisión que nada puede volver a derivar.
+con un CTE recursivo al leer.
 
 **Los ciclos de más de un salto no son restricción de tabla.** `CHECK (parent <> child)`
 cubre el salto directo; A bajo B bajo A necesitaría un trigger o una cerradura transitiva
@@ -1122,8 +1121,8 @@ ejecución (`RF-USR-05`).
 
 `schema-proofing` §6 cambió `avatar_url text` por `avatar_file_id bigint REFERENCES
 files (id)`, para que la foto fuera un objeto más del almacén direccionado por contenido.
-Es el mejor modelo y no se revierte por sus méritos: `storage.js` está escrito pero **no
-conectado** —nadie llama a `openVolumes()`— y conectarlo es I8. Mientras tanto,
+Es el mejor modelo y no se revierte por sus méritos: `storage.js` estaba escrito pero **no
+conectado**, y conectarlo era I8. Mientras tanto,
 `query.js` traía dos métodos, `updateProfilePicture` y `getUserProfilePicture`, que leían y
 escribían una columna `profile_picture` que **nunca existió**: código muerto con forma de
 función.
@@ -1135,7 +1134,8 @@ no es nada. Se elimina `avatar_file_id` en la misma migración: dos columnas par
 hecho es exactamente la falla que `schema-proofing` existía para corregir, y nada la
 escribía nunca, así que no se pierde dato alguno.
 
-**Es deuda declarada, no una decisión de arquitectura.** Cuando I8 conecte el almacén, el
+**Es deuda declarada, no una decisión de arquitectura.** El almacén ya está conectado
+(`file-store-minio`, MinIO detrás de `/api/documents`), así que la deuda se puede pagar: el
 camino de vuelta es el Down de esta migración: reponer `avatar_file_id`, migrar los bytes a
 `files` y soltar la columna. Ningún `RF-*` pide la foto de perfil; conviene saberlo antes de
 defenderla.
@@ -1505,9 +1505,29 @@ expone solo fechas, persona y área. Todo lo que calcule disponibilidad (`RF-TSK
 
 ### 7.3 ARC — carpetas, archivos y almacenamiento
 
-El almacén invierte lo habitual: **Postgres es el sistema de archivos y los discos son una
-bolsa de bytes indexada por SHA-256**. La identidad es el contenido; el nombre, la ruta y el
-dueño son columnas. No hay actualización de un archivo: otros bytes son otro hash.
+El almacén invierte lo habitual: **Postgres es el sistema de archivos y MinIO es una bolsa de
+bytes indexada por SHA-256** (`content/ab/cd/<hash>` en un solo bucket). La identidad es el
+contenido; el nombre, la ruta y el dueño son columnas. No hay actualización de un archivo:
+otros bytes son otro hash, y renombrar o mover es actualizar una fila sin tocar el bucket.
+
+`file-store-minio` soltó `file_locations` y `storage_volumes`: MinIO reparte cada objeto
+entre sus cuatro discos con código de borrado, así que ya no hay disco que elegir ni
+colocación que recordar. Se descartó también guardar el objeto bajo su ruta legible
+(`PRY-000001/Diseño/x.pdf`), que fue lo que trajo la primera integración con MinIO:
+renombrar una carpeta se volvía copiar cada objeto debajo de ella, y `folder_areas` y
+`access_tokens` no tenían dónde colgarse.
+
+**Quién toca qué carpeta** (`RF-USR-05`) se resuelve en `orchestration/documents.js`, no con
+el código de permiso: `document.read` / `document.write` abren el router; ser dueño de la carpeta o de
+una ancestra es control total; si no, decide la ancestra más cercana con filas en
+`folder_areas`, con el mejor nivel entre las áreas de quien pregunta. Borrar o recompartir
+el trabajo ajeno no basta con escribir, porque es lo que `RF-USR-05` quiere evitar: lo hace
+el dueño de la carpeta, el autor del archivo, o quien además de escribir tenga el permiso
+`document.manage`.
+
+**Los nombres no son llave.** Dos archivos o dos carpetas hermanas pueden llamarse igual; los
+distingue su id, y el objeto en MinIO se llama por su hash. `file-store-minio` quitó los
+índices únicos de nombre que traía `file-sharing`. Una carpeta que no se puede leer responde 404.
 
 #### `folders`
 
@@ -1517,7 +1537,7 @@ Carpeta. El árbol es propio del sistema, no de Drive (`RF-ARC-02`).
 | --- | --- | --- | --- | --- |
 | `id` | bigint | no | identidad | Llave primaria |
 | `parent_id` | bigint | sí | | Carpeta padre; `NULL` = raíz → `folders.id` |
-| `name` | varchar(255) | no | | Nombre. Único entre hermanas vivas; en la raíz, único por dueño |
+| `name` | varchar(255) | no | | Nombre. Puede repetirse entre hermanas |
 | `owner_id` | bigint | no | | Dueño → `users.id` |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 | `deleted_at` | timestamptz | sí | | Baja lógica |
@@ -1536,37 +1556,11 @@ Un archivo dentro de una carpeta. La fila es el nombre y el lugar; los bytes se 
 | `folder_id` | bigint | no | | Carpeta contenedora → `folders.id` |
 | `author_id` | bigint | no | | Quién lo subió → `users.id` |
 | `hash` | char(64) | no | | SHA-256 del contenido, hex minúsculas. **No** es único: dos filas con el mismo hash es justo lo que significa deduplicar |
-| `name` | varchar(255) | no | | Nombre visible. Único dentro de la carpeta |
+| `name` | varchar(255) | no | | Nombre visible. Puede repetirse dentro de la carpeta |
 | `size` | bigint | no | | Tamaño en bytes |
 | `mime` | varchar(255) | sí | | Tipo MIME |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 | `deleted_at` | timestamptz | sí | | Baja lógica |
-
-#### `file_locations`
-
-En qué disco están unos bytes. La colocación se **registra**, no se deriva: `hash % n`
-rebarajaría todo el acervo al agregar un disco.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `hash` | char(64) | no | | Parte de la llave primaria; el contenido |
-| `storage_volume_id` | bigint | no | | Parte de la llave primaria → `storage_volumes.id` |
-| `verified_at` | timestamptz | sí | | Última verificación de que los bytes siguen ahí |
-| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Cuándo se escribieron |
-
-#### `storage_volumes`
-
-Un disco montado. La base guarda **la etiqueta**, no la ruta: el mismo disco se monta en
-rutas distintas en el host y en el contenedor.
-
-| Columna | Tipo | Nulo | Predet. | Descripción |
-| --- | --- | --- | --- | --- |
-| `id` | bigint | no | identidad | Llave primaria |
-| `label` | varchar(100) | no | | Único. La mitad izquierda de `STORAGE_VOLUMES` (`etiqueta:ruta`) |
-| `location` | varchar(500) | sí | | Ruta de referencia; informativa |
-| `is_writable` | boolean | no | `true` | Si admite escrituras nuevas |
-| `max_storage` | bigint | sí | | Tope en bytes; `NULL` = sin tope |
-| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 
 #### `folder_areas`
 
@@ -1583,6 +1577,13 @@ Qué área ve qué carpeta y con qué nivel. Es lo que da `RF-USR-03` sobre arch
 
 Enlace de compartición. Es lo que cumple `RF-ARC-03` y `RF-EXT-03`: el externo ve y nunca
 edita, sustituye ni borra. Apunta a una carpeta **o** a un archivo, no a ambos.
+
+Hoy sólo se emiten enlaces a carpetas, siempre `read` y siempre con vencimiento
+(`/api/documents/folders/:id/links`); se abren sin sesión en `/api/shared/:token` y alcanzan
+la carpeta y todo lo que tiene debajo. Emitir y revocar pide el permiso de rol
+`document.share` más poder ver la carpeta: sacar trabajo del sistema es decisión de
+coordinación, no de quien creó la carpeta. Una descarga por enlace queda en la bitácora sin
+usuario y con el id del enlace.
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |

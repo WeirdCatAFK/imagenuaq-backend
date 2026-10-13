@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Creates the test database and brings it up to the current schema. Run by `pretest`, so
+// Creates the test database and the test bucket, and brings the database up to the current
+// schema. Run by `pretest`, so
 // `npm test` is the only command anyone has to remember.
 //
 // Idempotent: the CREATE is skipped when the database already exists and node-pg-migrate
@@ -13,8 +14,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import pg from 'pg';
+import { S3Client, CreateBucketCommand } from '@aws-sdk/client-s3';
 
-import { testDatabaseUrl } from '../tests/helpers/env.js';
+import { testDatabaseUrl, useTestBucket } from '../tests/helpers/env.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
@@ -76,4 +78,34 @@ const result = spawnSync(
 if (result.status !== 0) {
   console.error('\n  Migrations failed against the test database.\n');
   process.exit(result.status ?? 1);
+}
+
+/**
+ * The test bucket, on the MinIO in .env, created if missing. The file cases store real bytes
+ * there; nothing empties it, since content is keyed by hash and a rerun reuses it.
+ */
+const bucket = useTestBucket();
+const s3 = new S3Client({
+  endpoint: process.env.MINIO_ENDPOINT,
+  region: 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.MINIO_ROOT_USER ?? '',
+    secretAccessKey: process.env.MINIO_ROOT_PASSWORD ?? '',
+  },
+  forcePathStyle: true,
+});
+
+try {
+  await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+  console.log(`  Created bucket ${bucket}.`);
+} catch (err) {
+  if (err.name !== 'BucketAlreadyOwnedByYou' && err.name !== 'BucketAlreadyExists') {
+    console.error(
+      `\n  Cannot create bucket ${bucket} at ${process.env.MINIO_ENDPOINT}: ${err.message}\n` +
+        '  Is MinIO up? `docker compose up -d minio`\n',
+    );
+    process.exit(1);
+  }
+} finally {
+  s3.destroy();
 }

@@ -3070,6 +3070,286 @@ class Query {
     );
     return row ?? null;
   }
+
+  /**
+   * What `userId` may do in a folder. Owning the folder or any ancestor is full control;
+   * otherwise the nearest ancestor carrying `folder_areas` rows decides, and the user's best
+   * level among their areas there is the answer (DATAMODEL.md, `folder_areas`).
+   *
+   * @returns {Promise<{found: boolean, owns: boolean, level: 'read'|'write'|null}>}
+   */
+  async folderAccess(folderId, userId) {
+    const [row] = await this.#rows(
+      `with recursive chain as (
+         select id, parent_id, owner_id, 0 as depth
+           from folders
+          where id = $1 and deleted_at is null
+         union all
+         select f.id, f.parent_id, f.owner_id, c.depth + 1
+           from folders f
+           join chain c on f.id = c.parent_id
+          where c.depth < 100
+       ),
+       granted as (
+         select c.depth, fa.area_id, fa.level
+           from chain c
+           join folder_areas fa on fa.folder_id = c.id
+       )
+       select
+         exists (select 1 from chain) as found,
+         exists (select 1 from chain where owner_id = $2::bigint) as owns,
+         (select case when bool_or(g.level = 'write') then 'write'
+                      when count(*) > 0 then 'read' end
+            from granted g
+            join area_members am on am.area_id = g.area_id and am.user_id = $2::bigint
+           where g.depth = (select min(depth) from granted)) as level`,
+      [folderId, userId],
+    );
+    return row;
+  }
+
+  async createFolder({ parentId, name, ownerId }) {
+    const [row] = await this.#rows(
+      `insert into folders (parent_id, name, owner_id)
+       values ($1::bigint, $2, $3)
+       returning *`,
+      [parentId, name, ownerId],
+    );
+    return row;
+  }
+
+  async getFolder(folderId) {
+    const [row] = await this.#rows(
+      `select * from folders where id = $1 and deleted_at is null`,
+      [folderId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The folders a user starts browsing from: every live root for an admin (`userId` null);
+   * otherwise the roots they own plus any folder shared with one of their areas.
+   */
+  async listTopFolders(userId) {
+    return this.#rows(
+      `select f.*
+         from folders f
+        where f.deleted_at is null
+          and (($1::bigint is null and f.parent_id is null)
+               or ($1::bigint is not null and f.parent_id is null and f.owner_id = $1::bigint)
+               or exists (select 1
+                            from folder_areas fa
+                            join area_members am on am.area_id = fa.area_id
+                           where fa.folder_id = f.id and am.user_id = $1::bigint))
+        order by f.name, f.id`,
+      [userId],
+    );
+  }
+
+  async listChildFolders(folderId) {
+    return this.#rows(
+      `select * from folders
+        where parent_id = $1 and deleted_at is null
+        order by name, id`,
+      [folderId],
+    );
+  }
+
+  async listFolderFiles(folderId) {
+    return this.#rows(
+      `select * from files
+        where folder_id = $1 and deleted_at is null
+        order by name, id`,
+      [folderId],
+    );
+  }
+
+  /**
+   * Renames and/or moves. `parentId` undefined leaves the parent alone; null makes the
+   * folder a root. Nothing in storage moves -- the tree is only these rows.
+   */
+  async updateFolder(folderId, { name = null, parentId }) {
+    const [row] = await this.#rows(
+      `update folders
+          set name = coalesce($2, name),
+              parent_id = case when $3 then $4::bigint else parent_id end
+        where id = $1 and deleted_at is null
+        returning *`,
+      [folderId, name, parentId !== undefined, parentId ?? null],
+    );
+    return row ?? null;
+  }
+
+  /** Soft-deletes a folder, everything beneath it and every file in that subtree, at once. */
+  async deleteFolder(folderId) {
+    const [row] = await this.#rows(
+      `with recursive subtree as (
+         select id from folders where id = $1 and deleted_at is null
+         union all
+         select f.id from folders f join subtree s on f.parent_id = s.id
+          where f.deleted_at is null
+       ),
+       gone_files as (
+         update files set deleted_at = current_timestamp
+          where folder_id in (select id from subtree) and deleted_at is null
+         returning id
+       ),
+       gone as (
+         update folders set deleted_at = current_timestamp
+          where id in (select id from subtree)
+         returning *
+       )
+       select g.*, (select count(*)::int from gone_files) as files_deleted,
+              (select count(*)::int from gone) - 1 as folders_deleted
+         from gone g
+        where g.id = $1`,
+      [folderId],
+    );
+    return row ?? null;
+  }
+
+  async listFolderAreas(folderId) {
+    return this.#rows(
+      `select fa.folder_id, fa.area_id, fa.level, a.name as area_name
+         from folder_areas fa
+         join areas a on a.id = fa.area_id
+        where fa.folder_id = $1
+        order by a.name`,
+      [folderId],
+    );
+  }
+
+  /**
+   * Replaces a folder's area grants with `grants` ([{areaId, level}]). Rows not in the new
+   * set are deleted and the rest upserted, so no key is both deleted and inserted in the
+   * one statement.
+   */
+  async setFolderAreas(folderId, grants) {
+    return this.#rows(
+      `with wanted as (
+         select (g->>'areaId')::bigint as area_id, g->>'level' as level
+           from jsonb_array_elements($2::jsonb) g
+       ),
+       dropped as (
+         delete from folder_areas
+          where folder_id = $1 and area_id not in (select area_id from wanted)
+       )
+       insert into folder_areas (folder_id, area_id, level)
+       select $1, area_id, level from wanted
+       on conflict (folder_id, area_id) do update set level = excluded.level
+       returning *`,
+      [folderId, JSON.stringify(grants)],
+    );
+  }
+
+  async createFile({ folderId, authorId, hash, name, size, mime }) {
+    const [row] = await this.#rows(
+      `insert into files (folder_id, author_id, hash, name, size, mime)
+       values ($1, $2, $3, $4, $5, $6)
+       returning *`,
+      [folderId, authorId, hash, name, size, mime],
+    );
+    return row;
+  }
+
+  async getFile(fileId) {
+    const [row] = await this.#rows(
+      `select * from files where id = $1 and deleted_at is null`,
+      [fileId],
+    );
+    return row ?? null;
+  }
+
+  /** Renames and/or moves a file. Null leaves that column alone. */
+  async updateFile(fileId, { name = null, folderId = null }) {
+    const [row] = await this.#rows(
+      `update files
+          set name = coalesce($2, name),
+              folder_id = coalesce($3::bigint, folder_id)
+        where id = $1 and deleted_at is null
+        returning *`,
+      [fileId, name, folderId],
+    );
+    return row ?? null;
+  }
+
+  async deleteFile(fileId) {
+    const [row] = await this.#rows(
+      `update files set deleted_at = current_timestamp
+        where id = $1 and deleted_at is null
+        returning *`,
+      [fileId],
+    );
+    return row ?? null;
+  }
+
+  async createFolderLink({ tokenHash, folderId, authorizer, expiresAt }) {
+    const [row] = await this.#rows(
+      `insert into access_tokens (token_hash, folder_id, level, authorizer, expires_at)
+       values ($1, $2, 'read', $3, $4::timestamptz)
+       returning *`,
+      [tokenHash, folderId, authorizer, expiresAt],
+    );
+    return row;
+  }
+
+  /** Links on a folder that still work: not revoked and not expired. */
+  async listFolderLinks(folderId) {
+    return this.#rows(
+      `select * from access_tokens
+        where folder_id = $1 and revoked_at is null and expires_at > current_timestamp
+        order by created_at desc, id desc`,
+      [folderId],
+    );
+  }
+
+  async getLink(linkId) {
+    const [row] = await this.#rows(`select * from access_tokens where id = $1`, [linkId]);
+    return row ?? null;
+  }
+
+  async revokeLink(linkId) {
+    const [row] = await this.#rows(
+      `update access_tokens set revoked_at = current_timestamp
+        where id = $1 and revoked_at is null
+        returning *`,
+      [linkId],
+    );
+    return row ?? null;
+  }
+
+  /** The live folder a working link points at, or null when unknown, revoked, expired or deleted. */
+  async resolveFolderLink(tokenHash) {
+    const [row] = await this.#rows(
+      `select t.id as link_id, t.expires_at, f.*
+         from access_tokens t
+         join folders f on f.id = t.folder_id and f.deleted_at is null
+        where t.token_hash = $1
+          and t.revoked_at is null
+          and t.expires_at > current_timestamp`,
+      [tokenHash],
+    );
+    return row ?? null;
+  }
+
+  /** Whether `folderId` is `rootId` or a live folder somewhere beneath it. */
+  async isWithinFolder(folderId, rootId) {
+    const [row] = await this.#rows(
+      `with recursive chain as (
+         select id, parent_id, 0 as depth
+           from folders
+          where id = $1 and deleted_at is null
+         union all
+         select f.id, f.parent_id, c.depth + 1
+           from folders f
+           join chain c on f.id = c.parent_id
+          where c.depth < 100 and f.deleted_at is null
+       )
+       select exists (select 1 from chain where id = $2::bigint) as within`,
+      [folderId, rootId],
+    );
+    return row.within;
+  }
 }
 
 export default new Query();

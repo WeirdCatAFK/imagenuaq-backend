@@ -71,3 +71,24 @@ export function useTestDatabase() {
   process.env.DATABASE_URL = url;
   return url;
 }
+
+/**
+ * The bucket the suite stores content in. Fixed rather than configured, and suffixed like
+ * the database, so a case can never write into the bucket real uploads live in.
+ */
+export const TEST_BUCKET = 'imagenuaq-test';
+
+/**
+ * Point the process at the test bucket before storage is opened. `localhost` becomes
+ * 127.0.0.1 for the same IPv6-loopback reason as the database.
+ */
+export function useTestBucket() {
+  if (!TEST_BUCKET.endsWith('-test')) throw new Error(`Refusing to use bucket ${TEST_BUCKET}.`);
+  process.env.MINIO_DOCUMENTS_BUCKET = TEST_BUCKET;
+  if (process.env.MINIO_ENDPOINT) {
+    const url = new URL(process.env.MINIO_ENDPOINT);
+    if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+    process.env.MINIO_ENDPOINT = url.origin;
+  }
+  return TEST_BUCKET;
+}

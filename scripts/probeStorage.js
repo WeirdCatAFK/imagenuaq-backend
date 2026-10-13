@@ -1,235 +1,52 @@
-// Exercises the whole folder and file CRUD of the MinIO store against a throwaway project
-// and prints what came back at every step.
+#!/usr/bin/env node
+// Round-trips content through the real MinIO bucket and prints what came back at each step.
 // Usage: npm run storage:probe
 //
-// Why this exists as a script and not a test.
-//
-// It needs a live MinIO and real credentials, so it cannot run in `npm test`, which is
-// offline and deterministic by design. It is the same kind of tool as probeSheet.js: the
-// questions it answers -- does the bucket layout work, does a rename keep the bytes -- are
-// about the real service, not about our code paths.
+// A script and not a test because it answers questions about the live service -- is the
+// bucket there, do the credentials work, does a second upload of the same bytes dedupe --
+// against whatever bucket .env names, which the suite must never touch. The API-level cases
+// in tests/documents.test.js run against their own bucket.
+import { randomBytes } from 'node:crypto';
+import { buffer } from 'node:stream/consumers';
 
-import { createMinioStorage } from "../src/storage/minioStorage.js";
-import { createFilesResource } from "../src/access/resources/file.js";
-import { createFoldersResource } from "../src/access/resources/folders.js";
+import {
+  openStorage,
+  closeStorage,
+  putContent,
+  statContent,
+  readContent,
+  deleteContent,
+} from '../src/access/primitives/minioStorage.js';
 
-const storage = createMinioStorage();
-const files = createFilesResource(storage);
-const folders = createFoldersResource(storage);
-
-const projectKey = "TEST-CRUD-0001";
-
-/**
- * Prints a step heading and, when given one, dumps the value it returned.
- *
- * @param {string} title Name of the step.
- * @param {unknown} [data] Value to dump under the heading.
- */
-function print(title, data = null) {
-  console.log(`\n=== ${title} ===`);
-
-  if (data !== null) {
-    console.dir(data, { depth: null });
-  }
+/** Prints a step and what it returned. */
+function step(title, value) {
+  console.log(`\n== ${title}`);
+  console.dir(value, { depth: null });
 }
 
 try {
+  await openStorage();
+  step('bucket', process.env.MINIO_DOCUMENTS_BUCKET);
 
-  print("1. CREANDO CARPETAS");
+  const bytes = randomBytes(64 * 1024);
+  const first = await putContent(bytes);
+  step('put', first);
 
-  await folders.createFolder({
-    projectKey,
-    folderName: "Diseño",
-  });
+  const second = await putContent(bytes);
+  step('put again (should say existed: true)', second);
 
-  await folders.createFolder({
-    projectKey,
-    folderName: "Propuestas",
-    folderPath: "Diseño",
-  });
+  step('stat', await statContent(first.hash));
 
-  await folders.createFolder({
-    projectKey,
-    folderName: "Producción",
-  });
+  const read = await readContent(first.hash);
+  const back = await buffer(read.stream);
+  step('read back matches', back.equals(bytes));
 
-  console.log("Carpetas creadas correctamente.");
-
-  print("2. CREANDO ARCHIVOS");
-
-  await files.createFile({
-    projectKey,
-    folderPath: "Diseño",
-    fileName: "propuesta.txt",
-    body: Buffer.from("Primera versión de la propuesta."),
-    contentType: "text/plain",
-  });
-
-  await files.createFile({
-    projectKey,
-    folderPath: "Diseño/Propuestas",
-    fileName: "logo.txt",
-    body: Buffer.from("Archivo del logo."),
-    contentType: "text/plain",
-  });
-
-  await files.createFile({
-    projectKey,
-    folderPath: "Producción",
-    fileName: "impresion.txt",
-    body: Buffer.from("Archivo de producción."),
-    contentType: "text/plain",
-  });
-
-  console.log("Archivos creados correctamente.");
-
-  print("3. LEYENDO ARCHIVO");
-
-  const file = await files.getFile({
-    projectKey,
-    folderPath: "Diseño",
-    fileName: "propuesta.txt",
-  });
-
-  console.log("Contenido:");
-  console.log(file.body.toString());
-
-  console.log("Metadata:");
-  console.dir(file.metadata, { depth: null });
-
-  print("4. VERIFICANDO EXISTENCIA");
-
-  const exists = await files.fileExists({
-    projectKey,
-    folderPath: "Diseño",
-    fileName: "propuesta.txt",
-  });
-
-  console.log("¿Existe propuesta.txt?", exists);
-
-  print("5. LISTANDO ARCHIVOS DE DISEÑO");
-
-  const designFiles = await files.listFiles({
-    projectKey,
-    folderPath: "Diseño",
-  });
-
-  console.dir(designFiles, { depth: null });
-
-  print("6. LISTANDO TODOS LOS ARCHIVOS DEL PROYECTO");
-
-  const projectFiles = await files.listProjectFiles({
-    projectKey,
-  });
-
-  console.dir(projectFiles, { depth: null });
-
-  print("7. LISTANDO CARPETAS");
-
-  const projectFolders = await folders.listProjectFolders({
-    projectKey,
-  });
-
-  console.dir(projectFolders, { depth: null });
-
-  print("8. ACTUALIZANDO ARCHIVO");
-
-  await files.updateFile({
-    projectKey,
-    folderPath: "Diseño",
-    fileName: "propuesta.txt",
-    body: Buffer.from("SEGUNDA VERSIÓN DE LA PROPUESTA."),
-    contentType: "text/plain",
-  });
-
-  const updatedFile = await files.getFile({
-    projectKey,
-    folderPath: "Diseño",
-    fileName: "propuesta.txt",
-  });
-
-  console.log("Nuevo contenido:");
-  console.log(updatedFile.body.toString());
-
-  print("9. RENOMBRANDO ARCHIVO");
-
-  await files.renameFile({
-    projectKey,
-    folderPath: "Diseño",
-    fileName: "propuesta.txt",
-    newFileName: "propuesta-final.txt",
-  });
-
-  console.log("Archivo renombrado correctamente.");
-
-  print("10. RENOMBRANDO CARPETA");
-
-  await folders.renameFolder({
-    projectKey,
-    folderName: "Producción",
-    newFolderName: "Entrega",
-  });
-
-  console.log("Carpeta renombrada correctamente.");
-
-  print("11. ESTADO FINAL DEL PROYECTO");
-
-  const finalFiles = await files.listProjectFiles({
-    projectKey,
-  });
-
-  const finalFolders = await folders.listProjectFolders({
-    projectKey,
-  });
-
-  console.log("Archivos:");
-  console.dir(finalFiles, { depth: null });
-
-  console.log("\nCarpetas:");
-  console.dir(finalFolders, { depth: null });
-
-  print("12. LIMPIANDO PROYECTO DE PRUEBA");
-
-  await folders.deleteFolder({
-    projectKey,
-    folderName: "Diseño",
-    recursive: true,
-  });
-
-  await folders.deleteFolder({
-    projectKey,
-    folderName: "Entrega",
-    recursive: true,
-  });
-
-  console.log("Proyecto de prueba eliminado.");
-
-  print("13. VERIFICANDO LIMPIEZA");
-
-  const remainingFiles = await files.listProjectFiles({
-    projectKey,
-  });
-
-  const remainingFolders = await folders.listProjectFolders({
-    projectKey,
-  });
-
-  console.log("Archivos restantes:");
-  console.dir(remainingFiles, { depth: null });
-
-  console.log("Carpetas restantes:");
-  console.dir(remainingFolders, { depth: null });
-
-  console.log("\n========================================");
-  console.log("PRUEBA CRUD COMPLETADA CORRECTAMENTE");
-  console.log("========================================");
-
+  step('delete', await deleteContent(first.hash));
+  step('delete again (should be false)', await deleteContent(first.hash));
+  step('stat after delete (should be null)', await statContent(first.hash));
 } catch (error) {
-  console.error("\n========================================");
-  console.error("ERROR EN LA PRUEBA");
-  console.error("========================================");
-
-  console.error(error);
-
+  console.error(`\n${error.name} ${error.code ?? ''}: ${error.message}`);
   process.exitCode = 1;
+} finally {
+  closeStorage();
 }
