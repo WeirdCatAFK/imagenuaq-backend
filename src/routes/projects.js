@@ -25,6 +25,10 @@ router.get("/:id/stages", async (req, res) => {
   res.json({ stages: await projects.listStages(projectId(req)) });
 });
 
+router.get("/:id/folder", async (req, res) => {
+  res.json({ folder: await projects.getFolder(projectId(req)) });
+});
+
 router.get("/:id/field-values", async (req, res) => {
   res.json({ fieldValues: await projects.listFieldValues(projectId(req)) });
 });

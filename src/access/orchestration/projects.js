@@ -3,6 +3,7 @@
 // only once every output it declared has a value.
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
+import documents from "./documents.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -69,7 +70,7 @@ class Projects {
   async create({
     key, title, description = null, requester = null, schemaVersionId = null, statusId = null,
     priority = 0, hasCost = false, carriedOver = false, startsOn = null, dueOn = null,
-    folderId = null, eventCollectionId = null, fieldValues = [], stages = [], requestIds = [],
+    eventCollectionId = null, fieldValues = [], stages = [], requestIds = [],
     requestFlow = null,
   }) {
     const normalisedStages = normaliseStages(stages);
@@ -87,7 +88,6 @@ class Projects {
       carriedOver: requireBoolean(carriedOver, "carriedOver"),
       startsOn: optionalDate(startsOn, "startsOn"),
       dueOn: optionalDate(dueOn, "dueOn"),
-      folderId: optionalId(folderId, "folderId"),
       eventCollectionId: optionalId(eventCollectionId, "eventCollectionId"),
       statusId: await this.#resolveStatus(statusId, areaSources),
       fieldValues: normaliseFieldValues(fieldValues),
@@ -123,7 +123,25 @@ class Projects {
       if (stage.status === "active") await emitStage("stage_activated", stage);
     }
 
+    await documents.ensureProjectFolder({ id: row.id, key: row.key, folderId: null });
     return this.getById(row.id);
+  }
+
+  /**
+   * The project's folder with its contents, created on first use (RF-ARC-01). Folder access
+   * is decided by documents.js, so a project reader outside the project's areas gets a 404.
+   *
+   * @throws {ApiError} 404
+   */
+  async getFolder(projectId) {
+    const row = await query.getProject(requireId(projectId, "projectId"));
+    if (!row) throw ApiError.notFound("Project not found.");
+    const folderId = await documents.ensureProjectFolder({
+      id: row.id,
+      key: row.key,
+      folderId: row.folder_id,
+    });
+    return documents.getFolder(folderId);
   }
 
   /** @throws {ApiError} 404 */
@@ -375,7 +393,8 @@ class Projects {
     inputNote = null, outputNote = null, estimatedDays = null,
   }) {
     const id = requireId(projectId, "projectId");
-    if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    const project = await query.getProject(id);
+    if (!project) throw ApiError.notFound("Project not found.");
 
     const state = requireStageStatus(status);
     if (state === "waiting_external") {
@@ -419,6 +438,7 @@ class Projects {
       });
       if (stage.status === "active") await emitStage("stage_activated", stage);
 
+      await documents.ensureProjectFolder({ id, key: project.key, folderId: project.folder_id });
       return shapeStage(await query.getProjectStage(stage.id));
     } catch (err) {
       throw translate(err);

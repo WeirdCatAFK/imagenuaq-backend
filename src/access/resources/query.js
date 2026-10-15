@@ -3341,6 +3341,98 @@ class Query {
     );
     return row.within;
   }
+
+  /**
+   * Points a project at `folderId` unless it already has one; returns the project's folder id
+   * either way, so two callers racing to create it agree on the winner.
+   */
+  async setProjectFolder(projectId, folderId) {
+    const [row] = await this.#rows(
+      `update projects set folder_id = coalesce(folder_id, $2::bigint)
+        where id = $1
+        returning folder_id`,
+      [projectId, folderId],
+    );
+    return row?.folder_id ?? null;
+  }
+
+  /**
+   * Grants `write` on a project's folder to every area with a stage in the project that has no
+   * grant there yet. Existing grants, including a deliberate downgrade to `read`, are kept.
+   */
+  async addProjectFolderAreas(projectId) {
+    return this.#rows(
+      `insert into folder_areas (folder_id, area_id, level)
+       select distinct p.folder_id, fs.area_id, 'write'
+         from projects p
+         join flow_phases fp on fp.project_id = p.id
+         join flow_stages fs on fs.phase_id = fp.id
+        where p.id = $1 and p.folder_id is not null
+       on conflict (folder_id, area_id) do nothing
+       returning *`,
+      [projectId],
+    );
+  }
+
+  async getRetention() {
+    const [row] = await this.#rows(`select * from file_retention`);
+    return row;
+  }
+
+  async setRetention(months, updatedBy) {
+    const [row] = await this.#rows(
+      `update file_retention
+          set months = $1, updated_by = $2::bigint, updated_at = current_timestamp
+        returning *`,
+      [months, updatedBy],
+    );
+    return row;
+  }
+
+  /**
+   * Soft-deletes every live file past retention as of `now`, and returns the rows. A file under
+   * a project's folder counts from the project's close or archive, so an open project never
+   * loses one; a file under no project counts from its upload.
+   */
+  async expireFiles(now) {
+    return this.#rows(
+      `with recursive months as (
+         select make_interval(months => months) as span from file_retention
+       ),
+       project_tree as (
+         select f.id, coalesce(p.closed_at, p.archived_at) as ended_at, 0 as depth
+           from projects p
+           join folders f on f.id = p.folder_id
+          where p.deleted_at is null
+         union all
+         select f.id, t.ended_at, t.depth + 1
+           from folders f
+           join project_tree t on f.parent_id = t.id
+          where t.depth < 100
+       ),
+       expired as (
+         select fi.id
+           from files fi
+           left join project_tree t on t.id = fi.folder_id
+          where fi.deleted_at is null
+            and case when t.id is null then fi.created_at
+                     else t.ended_at end + (select span from months) < $1::timestamptz
+       )
+       update files set deleted_at = $1::timestamptz
+        where id in (select id from expired)
+       returning *`,
+      [now],
+    );
+  }
+
+  /** Whether any live file row still points at `hash`. */
+  async hashInUse(hash) {
+    const [row] = await this.#rows(
+      `select exists (select 1 from files where hash = $1 and deleted_at is null) as used`,
+      [hash],
+    );
+    return row.used;
+  }
 }
 
 export default new Query();

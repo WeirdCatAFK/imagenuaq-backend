@@ -32,8 +32,8 @@ router.post('/activate', async (req, res) => {
 
 router.use(authenticate);
 
-router.get('/me', (req, res) => {
-  res.json({ user: req.user });
+router.get('/me', async (req, res) => {
+  res.json({ user: req.user, permissions: await auth.permissionsFor(req.user.roleId) });
 });
 
 router.get('/me/profile', async (req, res) => {

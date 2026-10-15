@@ -48,7 +48,6 @@ const UNSEEDED_TABLES = [
   'access_tokens',
   'folder_areas',
   'files',
-  'folders',
   'area_members',
   'logs',
   'approvals',
@@ -58,6 +57,7 @@ const UNSEEDED_TABLES = [
   'flow_phases',
   'requests',
   'projects',
+  'folders',
   'workflow_versions',
   'workflows',
   'sheet_imports',
@@ -80,6 +80,7 @@ export async function resetCases(keepEmails = []) {
     [`${TEST_PREFIX}%`],
   );
   for (const table of UNSEEDED_TABLES) await sql(`delete from ${table}`);
+  await sql('update file_retention set months = 6, updated_by = null');
   await sql('delete from statuses where area_id is not null or code like $1', [
     `${TEST_STATUS_PREFIX}%`,
   ]);

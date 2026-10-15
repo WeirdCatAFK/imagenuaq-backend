@@ -6,7 +6,7 @@ import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { putContent, readContent, StorageError } from "../primitives/minioStorage.js";
+import { putContent, readContent, deleteContent, StorageError } from "../primitives/minioStorage.js";
 import {
   FOREIGN_KEY_VIOLATION,
   CHECK_VIOLATION,
@@ -27,7 +27,8 @@ class Documents {
   /** The folders the caller starts browsing from. */
   async listTop() {
     const actor = currentActor();
-    const rows = await query.listTopFolders(isAdmin(actor) ? null : actor.id);
+    const all = isAdmin(actor) || (await browses(actor));
+    const rows = await query.listTopFolders(all ? null : actor.id);
     return rows.map(shapeFolder);
   }
 
@@ -371,6 +372,96 @@ class Documents {
     return { file: shapeSharedFile(file), stream: content.stream, size: content.size };
   }
 
+  /**
+   * Gives a project its folder, named by its key and owned by the caller, the first time it is
+   * asked, then grants `write` to each area with a stage in the project that has no grant yet
+   * (RF-ARC-01, RF-ARC-02). Safe to call again.
+   *
+   * @param {{id: number, key: string, folderId: number|null}} project
+   * @returns {Promise<number>} The project's folder id.
+   */
+  async ensureProjectFolder(project) {
+    let folderId = project.folderId;
+    if (folderId == null) {
+      const folder = await query.createFolder({
+        parentId: null,
+        name: project.key,
+        ownerId: currentActor().id,
+      });
+      folderId = await query.setProjectFolder(project.id, folder.id);
+      if (String(folderId) !== String(folder.id)) {
+        await query.deleteFolder(folder.id);
+      } else {
+        await events.emit({
+          action: "record_created",
+          target: { table: "folders", id: folder.id },
+          after: folder,
+        });
+      }
+    }
+
+    const added = await query.addProjectFolderAreas(project.id);
+    if (added.length > 0) {
+      await events.emit({
+        action: "record_updated",
+        target: { table: "folders", id: folderId },
+        after: { areas: added },
+      });
+    }
+    return folderId;
+  }
+
+  /** How many months a file lives once its project ends, or since upload outside any project. */
+  async getRetention() {
+    return shapeRetention(await query.getRetention());
+  }
+
+  /**
+   * Changes the retention. The route requires `document.manage`.
+   *
+   * @throws {ApiError} 400 unless `months` is a positive integer.
+   */
+  async setRetention(months) {
+    if (!Number.isInteger(months) || months < 1) {
+      throw ApiError.badRequest("months must be a positive integer.");
+    }
+    const before = await query.getRetention();
+    const row = await query.setRetention(months, currentActor().id);
+    await events.emit({
+      action: "record_updated",
+      target: { table: "file_retention", id: 1 },
+      before,
+      after: row,
+    });
+    return shapeRetention(row);
+  }
+
+  /**
+   * Expires every file past retention as of `now`: the row is soft-deleted and logged as
+   * `file_expired`, and the bytes go once no live row shares the hash. The log is kept.
+   * shortcut: an upload of the same bytes landing between the check and the delete loses its
+   * content; acceptable while the sweep runs daily at low concurrency, revisit with I6's scheduler.
+   *
+   * @returns {Promise<{expired: number, reclaimed: number}>}
+   */
+  async expire(now = new Date()) {
+    const rows = await query.expireFiles(now.toISOString());
+    for (const row of rows) {
+      await events.emit({ action: "file_expired", target: { table: "files", id: row.id }, before: row });
+    }
+
+    let reclaimed = 0;
+    for (const hash of new Set(rows.map((row) => row.hash))) {
+      if (await query.hashInUse(hash)) continue;
+      try {
+        if (await deleteContent(hash)) reclaimed += 1;
+      } catch (err) {
+        console.error(`Could not delete expired content ${hash}:`, err);
+      }
+    }
+    return { expired: rows.length, reclaimed };
+  }
+
   /** @throws {ApiError} 404 when the token is unknown, revoked, expired or its folder deleted. */
   async #link(token) {
     const link = typeof token === "string" && token ? await query.resolveFolderLink(hashToken(token)) : null;
@@ -391,7 +482,8 @@ class Documents {
       query.folderAccess(folderId, actor.id),
     ]);
     if (!folder) throw ApiError.notFound("Folder not found.");
-    const access = isAdmin(actor) || grant.owns ? "owner" : grant.level;
+    let access = isAdmin(actor) || grant.owns ? "owner" : grant.level;
+    if (!access && (await browses(actor))) access = "read";
     return { folder, access };
   }
 
@@ -448,6 +540,15 @@ class Documents {
 
 function isAdmin(actor) {
   return actor?.role === "admin";
+}
+
+/** Whether the actor's role holds `document.browse`: read on every folder. */
+async function browses(actor) {
+  return (await query.getRolePermissionCodes(actor.roleId)).includes("document.browse");
+}
+
+function shapeRetention(row) {
+  return { months: row.months, updatedBy: row.updated_by, updatedAt: row.updated_at };
 }
 
 /** MAX_UPLOAD_BYTES, or no limit when unset. */

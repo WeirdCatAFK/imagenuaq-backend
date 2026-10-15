@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 
 import { startServer } from "./helpers/server.js";
+import documents from "../src/access/orchestration/documents.js";
+import { statContent } from "../src/access/primitives/minioStorage.js";
 import {
   reset,
   resetCases,
@@ -476,6 +478,156 @@ describe("/api/documents", () => {
 
     test("an unknown token is a 404", async () => {
       assert.equal((await server.get(`/api/shared/${"x".repeat(43)}`)).status, 404);
+    });
+  });
+  describe("project folders", () => {
+    const createProject = async (stages = []) => {
+      const res = await server.post("/api/projects", {
+        token: tokens.admin,
+        body: { title: "Proyecto", stages },
+      });
+      assert.equal(res.status, 201);
+      return res.body.project;
+    };
+    const projectFolder = (projectId, token = tokens.owner) =>
+      server.get(`/api/projects/${projectId}/folder`, { token });
+
+    test("a new project gets a folder named by its key, writable by its areas", async () => {
+      await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write", "project.read"]);
+      try {
+        const project = await createProject([{ areaId: areaX.id, title: "Diseño" }]);
+        assert.ok(project.folderId);
+
+        const res = await projectFolder(project.id);
+        assert.equal(res.status, 200);
+        assert.equal(res.body.folder.id, project.folderId);
+        assert.equal(res.body.folder.name, project.key);
+        assert.equal(res.body.folder.access, "write");
+        assert.equal((await upload(project.folderId, "a.bin", randomBytes(16))).status, 201);
+
+        assert.equal((await projectFolder(project.id, tokens.outsider)).status, 404);
+      } finally {
+        await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write"]);
+      }
+    });
+
+    test("adding a stage for a new area grants it write, and keeps a manual downgrade", async () => {
+      const project = await createProject([{ areaId: areaX.id, title: "Diseño" }]);
+      await share(project.folderId, [{ areaId: areaX.id, level: "read" }], tokens.admin);
+
+      const added = await server.post(`/api/projects/${project.id}/stages`, {
+        token: tokens.admin,
+        body: { areaId: areaY.id, title: "Web" },
+      });
+      assert.equal(added.status, 201);
+
+      const grants = await sql(
+        "select area_id, level from folder_areas where folder_id = $1 order by area_id",
+        [project.folderId],
+      );
+      const byArea = Object.fromEntries(grants.map((g) => [String(g.area_id), g.level]));
+      assert.equal(byArea[String(areaX.id)], "read");
+      assert.equal(byArea[String(areaY.id)], "write");
+    });
+
+    test("a project without a folder gets one the first time it is opened", async () => {
+      const project = await createProject();
+      await sql("update projects set folder_id = null where id = $1", [project.id]);
+
+      const res = await projectFolder(project.id, tokens.admin);
+      assert.equal(res.status, 200);
+      const [row] = await sql("select folder_id from projects where id = $1", [project.id]);
+      assert.equal(String(row.folder_id), String(res.body.folder.id));
+    });
+  });
+
+  describe("document.browse", () => {
+    test("reads every folder and lists every root, but cannot write", async () => {
+      const folder = await root("Privada");
+      const file = (await upload(folder.id, "a.bin", randomBytes(16))).body.file;
+
+      await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write", "document.browse"]);
+      try {
+        const top = await server.get("/api/documents/folders", { token: tokens.outsider });
+        assert.ok(top.body.folders.some((f) => f.id === folder.id));
+
+        const res = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.outsider });
+        assert.equal(res.status, 200);
+        assert.equal(res.body.folder.access, "read");
+        assert.equal((await download(file.id, tokens.outsider)).status, 200);
+        assert.equal((await upload(folder.id, "b.bin", randomBytes(16), { token: tokens.outsider })).status, 403);
+      } finally {
+        await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write"]);
+      }
+    });
+  });
+
+  describe("retention", () => {
+    test("defaults to six months", async () => {
+      const res = await server.get("/api/documents/retention", { token: tokens.owner });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.retention.months, 6);
+    });
+
+    test("changing it needs document.manage and a positive integer", async () => {
+      const put = (months, token = tokens.admin) =>
+        server.put("/api/documents/retention", { token, body: { months } });
+
+      assert.equal((await put(3, tokens.owner)).status, 403);
+      for (const bad of [0, -1, 1.5, "3", true, null]) assert.equal((await put(bad)).status, 400);
+
+      const res = await put(3);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.retention.months, 3);
+      assert.equal(String(res.body.retention.updatedBy), String(users.admin.id));
+    });
+  });
+
+  describe("expiry", () => {
+    const MONTH_MS = 31 * 24 * 60 * 60 * 1000;
+    const later = (months) => new Date(Date.now() + months * MONTH_MS);
+
+    const projectWithFile = async (bytes) => {
+      const project = (await server.post("/api/projects", {
+        token: tokens.admin,
+        body: { title: "Proyecto" },
+      })).body.project;
+      const file = (await upload(project.folderId, "p.bin", bytes, { token: tokens.admin })).body.file;
+      return { project, file };
+    };
+
+    test("an open project's files never expire", async () => {
+      const { file } = await projectWithFile(randomBytes(32));
+      await documents.expire(later(24));
+      assert.equal((await sql("select deleted_at from files where id = $1", [file.id]))[0].deleted_at, null);
+    });
+
+    test("a closed project's files expire after retention counted from the close", async () => {
+      const { project, file } = await projectWithFile(randomBytes(32));
+      await sql("update projects set closed_at = current_timestamp where id = $1", [project.id]);
+
+      assert.equal((await documents.expire(later(5))).expired, 0);
+      const result = await documents.expire(later(7));
+
+      assert.equal(result.expired, 1);
+      assert.equal(result.reclaimed, 1);
+      assert.notEqual((await sql("select deleted_at from files where id = $1", [file.id]))[0].deleted_at, null);
+      assert.equal(await statContent(file.hash), null);
+      const logs = await logsFor("files", file.id);
+      assert.ok(logs.some((log) => log.action === "file_expired"));
+    });
+
+    test("a loose file counts from its upload, and shared bytes stay while a live row uses them", async () => {
+      const bytes = randomBytes(32);
+      const loose = (await upload((await root()).id, "a.bin", bytes)).body.file;
+      const { file: kept } = await projectWithFile(bytes);
+
+      const result = await documents.expire(later(7));
+
+      assert.equal(result.expired, 1);
+      assert.equal(result.reclaimed, 0);
+      assert.notEqual((await sql("select deleted_at from files where id = $1", [loose.id]))[0].deleted_at, null);
+      assert.ok(await statContent(kept.hash));
     });
   });
 });

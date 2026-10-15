@@ -1765,6 +1765,15 @@ export function buildOpenApiDocument() {
           },
           required: ['id', 'folderId', 'authorizer', 'expiresAt'],
         },
+        Retention: {
+          type: 'object',
+          properties: {
+            months: { type: 'integer', minimum: 1, default: 6 },
+            updatedBy: { type: ['integer', 'null'], readOnly: true },
+            updatedAt: { type: 'string', format: 'date-time', readOnly: true },
+          },
+          required: ['months'],
+        },
         SharedFolder: {
           type: 'object',
           description: 'What a share link shows: names, sizes and types; no owners, authors or hashes.',
@@ -2274,8 +2283,15 @@ export function buildOpenApiDocument() {
                 'application/json': {
                   schema: {
                     type: 'object',
-                    properties: { user: { $ref: '#/components/schemas/SessionUser' } },
-                    required: ['user'],
+                    properties: {
+                      user: { $ref: '#/components/schemas/SessionUser' },
+                      permissions: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: "The role's live permission codes, for the client to show what it may use.",
+                      },
+                    },
+                    required: ['user', 'permissions'],
                   },
                 },
               },
@@ -3878,6 +3894,23 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/projects/{id}/folder': {
+        get: {
+          tags: ['projects'],
+          summary: "The project's folder, created on first use",
+          description:
+            'Every project gets a folder named by its key, and each area with a stage in the ' +
+            'project gets write access to it (RF-ARC-01, RF-ARC-02). Folder access is checked as ' +
+            'in /api/documents, so a project reader outside those areas gets a 404.',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The folder.', 'folder', 'FolderDetail'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project, or its folder is not visible.', 'Folder not found.'),
+          },
+        },
+      },
       '/api/projects/{id}/stages': {
         get: {
           tags: ['projects'],
@@ -4428,6 +4461,33 @@ export function buildOpenApiDocument() {
             404: errorResponse('Missing or not visible.', 'Folder not found.'),
             413: errorResponse('Larger than MAX_UPLOAD_BYTES.', 'Upload exceeds 536870912 bytes.'),
             503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/documents/retention': {
+        get: {
+          tags: ['documents'],
+          summary: 'How long files live',
+          description:
+            'Months a file lives once its project is closed or archived, or since upload when ' +
+            'it is under no project. Files of open projects never expire. A daily sweep ' +
+            'soft-deletes what is past it, logs `file_expired` and reclaims the bytes.',
+          responses: {
+            200: wrapped('The retention.', 'retention', 'Retention'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        put: {
+          tags: ['documents'],
+          summary: 'Change how long files live',
+          description: 'Needs `document.manage`.',
+          requestBody: jsonBody('Retention'),
+          responses: {
+            200: wrapped('The retention now.', 'retention', 'Retention'),
+            400: errorResponse('Not a positive integer.', 'months must be a positive integer.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
           },
         },
       },

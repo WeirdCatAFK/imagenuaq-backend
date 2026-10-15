@@ -1597,6 +1597,28 @@ usuario y con el id del enlace.
 | `revoked_at` | timestamptz | sí | | Revocación anticipada |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Emisión |
 
+#### `file_retention`
+
+Cuánto vive un archivo, en una sola fila que la coordinación cambia sin desplegar
+(`/api/documents/retention`; leer pide `document.read`, cambiar `document.manage`). Dentro de
+la carpeta de un proyecto el plazo corre desde que el proyecto se concluye o se archiva, así que
+un proyecto abierto nunca pierde archivos; fuera de todo proyecto, desde la carga. Un barrido
+diario en el proceso del API (`main.js`, mientras no exista el programador de I6) marca la fila
+como borrada, registra `file_expired` y elimina el objeto de MinIO cuando ninguna fila viva
+comparte su hash. La bitácora se conserva.
+
+Cada proyecto recibe su carpeta raíz, nombrada con su clave, al crearse (o al abrirla por
+primera vez, `/api/projects/:id/folder`), y cada área con una etapa en él obtiene `write`
+sobre ella; una concesión puesta a mano no se pisa. El permiso `document.browse` da lectura
+sobre todo el árbol; quien no lo tiene llega a los archivos por el proyecto (`RF-ARC-02`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | boolean | no | `true` | Llave primaria; `CHECK (id)` deja una sola fila |
+| `months` | integer | no | `6` | Meses de vida; mayor que cero |
+| `updated_by` | bigint | sí | | Quién lo cambió → `users.id` |
+| `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Último cambio |
+
 ### 7.4 Bitácora
 
 #### `logs`

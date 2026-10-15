@@ -22,6 +22,14 @@ router.get("/folders/:id", async (req, res) => {
   res.json({ folder: await documents.getFolder(folderId(req)) });
 });
 
+router.get("/retention", async (_req, res) => {
+  res.json({ retention: await documents.getRetention() });
+});
+
+router.put("/retention", requirePermission("document.manage"), async (req, res) => {
+  res.json({ retention: await documents.setRetention(req.body?.months) });
+});
+
 router.get("/:id", async (req, res) => {
   res.json({ file: await documents.getFile(fileId(req)) });
 });

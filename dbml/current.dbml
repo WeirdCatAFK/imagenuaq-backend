@@ -668,6 +668,15 @@ CHECK flow_stages_output_keys_is_array: jsonb_typeof(output_keys) = \'array\'::t
 CHECK flow_stages_estimated_days_positive: (estimated_days IS NULL) OR (estimated_days > 0)'''
 }
 
+Table "file_retention" {
+  "id" bool [pk, not null, default: true]
+  "months" int4 [not null, default: 6]
+  "updated_by" int8
+  "updated_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: '''One row: how many months a file lives once its project is closed or archived, or since upload outside any project.
+CHECK file_retention_months_positive: months > 0'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -719,6 +728,8 @@ Ref "fk_event_participants_user_id_users_id":"users"."id" < "event_participants"
 Ref "fk_events_created_by_users_id":"users"."id" < "events"."created_by"
 
 Ref "fk_events_event_type_id_event_types_id":"event_types"."id" < "events"."event_type_id"
+
+Ref "file_retention_updated_by_fkey":"users"."id" < "file_retention"."updated_by" [delete: set null]
 
 Ref "files_author_id_fkey":"users"."id" < "files"."author_id"
 
