@@ -1,7 +1,5 @@
-// A person editing their own record through /api/auth/me. The write half of /api/users is
-// admin-only and these cases exist to show that the self-service block is not a way round
-// it: the keys coordination owns are dropped, the id comes from the session and nowhere
-// else, and a password change demands the current one first.
+// A person editing their own record through /api/auth/me: admin-only keys are dropped, the id
+// comes from the session, and a password change needs the current password.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

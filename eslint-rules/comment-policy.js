@@ -1,13 +1,6 @@
-// The comment policy (CLAUDE.md, Conventions): a file may carry two kinds of comment.
-//
-//   - Its opening block: any comments before the first token of the file. This is where the
-//     module's purpose, the alternatives rejected and the RF-* that forced it are written.
-//   - JSDoc (`/** */`) directly above a declaration: a function, class, method, class field,
-//     variable, export or object property.
-//
-// Everything else is reported: `//` and `/* */` comments in bodies, trailing comments, JSX
-// comments, section dividers, and a JSDoc block that documents a statement rather than a
-// declaration. ESLint's own directives (`eslint-disable`, `global`) are exempt.
+// Allows two kinds of comment: a short header before any code (what the file does and its
+// one gotcha, 1-3 lines) and JSDoc right above a declaration. Everything else is reported;
+// eslint directives (`eslint-disable`, `global`) are exempt.
 
 const DOCUMENTABLE = new Set([
   "FunctionDeclaration",

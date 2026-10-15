@@ -1,41 +1,7 @@
 #!/usr/bin/env node
-// Creates an admin, or restores one that can no longer log in.
-// Usage: npm run admin:create -- --email a@uaq.mx --name "Nombre Apellido"
-//                               [--contract <id|name>] [--area <id|name>]
-// Password: read from the ADMIN_PASSWORD environment variable, or prompted for when this
-// runs on a terminal. Never pass it as an argument -- argv is readable through `ps` on a
-// shared host and lands in shell history.
-// Area: --area, or without it the area DEFAULT_AREA names in .env, or none when that is
-// unset or matches nothing. A named --area that matches nothing is refused; the default
-// falling through to "none" is not, by decision -- see Areas.defaultArea().
-//
-// Why this is a script and not an endpoint.
-//
-// Accounts are created by coordination through POST /api/users, which requires an admin
-// session. That is a closed loop, and it jams in two ways: nobody has been created yet, or
-// every admin has lost their credentials or left. The second case is why this cannot be an
-// HTTP route gated on "no admins exist" -- in a lockout the admin rows are still there,
-// perfectly valid and simply unusable, so such a route would refuse to help in exactly the
-// situation it was built for.
-//
-// The gate is therefore not a claim made over the network but possession of DATABASE_URL.
-// Whoever can reach the database can already do all of this with psql; this only makes it
-// correct -- the same bcrypt cost as the running server, and no chance of writing a hash
-// the API cannot verify. It grants nothing that database access did not already carry, and
-// it is unreachable from outside the host.
-//
-// Run against an address that already exists, it PROMOTES that user to admin and resets
-// their password. That is the lockout path, and it is deliberately something the API
-// cannot do: raising somebody to coordination is the one operation whose only safe gate is
-// access to the server itself.
-//
-// Either way, the admin role leaves holding EVERY permission in the catalogue. The seed
-// grants it all of them, but grants are edited at runtime (RF-USR-05): an admin can strip
-// their own role through PUT /api/roles/:id/permissions, and a code added later through
-// POST /api/roles/permissions is granted to nobody. An "admin" without area.manage is the
-// lockout in a different coat, so the grant set is repaired here, through
-// Roles.setPermissions() so that what was restored lands in the audit trail with no actor
-// -- which is the honest record of a change made from the terminal.
+// Creates an admin, or restores one: an existing address is promoted and its password reset, and
+// `admin` gets every permission back. npm run admin:create -- --email a@uaq.mx --name "Nombre"
+// [--contract <id|name>] [--area <id|name>]. Password from ADMIN_PASSWORD or a prompt, never argv.
 
 import { openStore, closeStore } from '../src/access/primitives/database.js';
 import query from '../src/access/resources/query.js';

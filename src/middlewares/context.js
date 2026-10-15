@@ -1,13 +1,5 @@
-// Seeds the per-request context that utils/context.js hands to anything downstream.
-//
-// Mounted BEFORE the routers. `req.user` is filled in later, by authenticate(), so the
-// context holds a getter rather than a copy of a value that does not exist yet: by the
-// time an orchestration method emits an event, authenticate() has run and written it.
-//
-// That indirection is the whole trick. Reading `req.user` here would capture undefined
-// forever, and moving this middleware after authenticate() would leave the public routes
-// -- login, activate -- with no context at all, which is exactly where the user_login and
-// user_login_failed rows come from.
+// Starts the per-request context that utils/context.js reads. Must run before the routers, and
+// keeps a getter for `req.user` (set later by authenticate()), never a copy of it.
 import { runWithContext } from "../utils/context.js";
 
 /**

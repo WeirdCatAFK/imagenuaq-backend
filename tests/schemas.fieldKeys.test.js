@@ -1,6 +1,5 @@
-// El vocabulario de claves. Una clave no es una etiqueta local de un formato: es lo que nombra
-// al valor en `requests.data` y en `project_field_values`, así que tiene que significar una sola
-// cosa en todo el sistema.
+// Field keys are shared vocabulary: a key names the same value in `requests.data` and
+// `project_field_values` in every format.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 

@@ -1,15 +1,5 @@
-// Works out which database the suite is allowed to touch, and refuses to hand back
-// anything else.
-//
-// The fixtures TRUNCATE users and area_members at the start of every file. That is fine
-// against a scratch database and unforgivable against the one someone has been entering
-// real staff into, and the difference between the two is a single environment variable.
-// So the name is not taken on trust from the environment: it is derived, then checked,
-// and the check throws before anything opens a connection.
-//
-// Deriving rather than configuring is also why there is no DATABASE_URL in .env.test.
-// A second URL there would need the local Postgres password in a committed file, and
-// would drift from .env the first time anyone changed a port.
+// Picks the database and bucket the tests may use, and refuses anything else: the name must end
+// in `_test`, because the tests delete data. Derived from DATABASE_URL, so .env.test holds no URL.
 
 const TEST_DB_NAME = 'imagenuaq_test';
 

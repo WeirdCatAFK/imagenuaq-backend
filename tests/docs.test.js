@@ -1,6 +1,4 @@
-// The docs describe the API; they do not read it. Nothing here touches Postgres, so this
-// file boots the server with no pool at all -- if a case in here ever needs a database,
-// something has gone wrong in routes/docs.js rather than in the test.
+// The API description matches the routes. Boots the server with no database at all.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

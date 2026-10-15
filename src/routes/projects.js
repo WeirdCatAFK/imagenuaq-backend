@@ -1,9 +1,5 @@
-// Projects, their stages, sign-offs and the values that cross stages (RF-PRY-02, RF-FLW-01,
-// RF-FLW-03, RF-FLW-06).
-//
-// Two blocks: `project.read` for everything that reads, `project.write` for everything that
-// writes, so a route appended at the bottom is write-gated by omission. Linking a request also
-// needs `request.write` -- it edits a request.
+// Projects, stages, sign-offs and stage values (RF-PRY-02, RF-FLW-01, RF-FLW-03, RF-FLW-06).
+// Reads need `project.read` and writes `project.write`; linking a request also needs `request.write`.
 import { Router } from "express";
 
 import projects from "../access/orchestration/projects.js";

@@ -1,39 +1,6 @@
-// Tier 3: projects, their stages, the sign-offs that move them and the values they carry
-// (RF-PRY-02, RF-FLW-01, RF-FLW-03, RF-FLW-06).
-//
-// **A stage is a definition plus its executions** (`flow-templates`, DATAMODEL.md §2.17). The
-// definition -- area, title, what it needs and owes -- is a `flow_stages` row inside one of the
-// project's `flow_phases`; each attempt at it is a `project_stages` row. `query.js` joins the
-// two and hands them up under the old column names, so a stage here still reads as one row
-// with `project_id`, `area_id`, `title` and `seq` (the phase). Editing the title, the keys or
-// the notes changes the definition, and so every attempt; status, assignee and dates belong
-// to one attempt.
-//
-// Four rules from DATAMODEL.md hold here and are easy to break:
-//
-//   - **A project has no current stage.** The active stage is the set of `project_stages`
-//     rows with `status = 'active'` (§2.1). Stages in one phase run in parallel.
-//   - **`status_id` and `status_since` move together**, in the same UPDATE (§2.7). The
-//     history goes to `logs`, not to a table of its own.
-//   - **A stage repeats by `attempt`** (§2.6): a rejected sign-off closes the row and opens
-//     the same definition again, so what happened stays readable.
-//   - **Approving the last open stage of a phase opens the next phase** (RF-FLW-04, §2.12):
-//     its pending stages become active in the statement that closes this one.
-//
-// **A stage declares what it needs and what it owes.** `inputs` are the field keys whoever
-// works it needs to have at hand; `outputs` are the keys it is expected to produce. Only the
-// outputs are enforced, and only on an approval: a stage cannot be signed off while a key it
-// declared has no value (RF-FLW-06). That is what makes the print shop find the order number --
-// design could not close without capturing it. Inputs are informational, because a value that
-// never arrived is why a stage waits on a third party (RF-FLW-07), not a capture error.
-//
-// Stages are created by hand here, each phase as `Fase <seq>` the first time a stage names
-// that seq. Starting a project from a flow template (`orchestration/workflows.js`) is the next
-// increment; it copies the template's definitions into the project's own phases.
-//
-// A sign-off needs `project.write` and nothing more: the permission is the policy. Gating it
-// on membership of the stage's area was considered and declined -- RF-FLW-03 asks for the
-// decision to be recorded with its author, not for a second authorisation model.
+// Projects, their stages, sign-offs and the values passed between stages (RF-PRY-02, RF-FLW-01,
+// RF-FLW-03, RF-FLW-06). A stage is never marked done by hand: only an approval closes it, and
+// only once every output it declared has a value.
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import events from "../../utils/events.js";
@@ -540,7 +507,9 @@ class Projects {
   /**
    * Records a sign-off and moves the stage. `approved` completes it; `rejected` completes it
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
-   * work stays visible instead of overwriting what happened (§2.6).
+   * work stays visible instead of overwriting what happened (§2.6). Needs only `project.write`,
+   * with no check that the signer belongs to the stage's area (RF-FLW-03 asks for the author to
+   * be recorded, not for a second permission model).
    *
    * @param {{decision: 'approved'|'rejected', comment?: string, evidenceFileId?: number}} input
    * @throws {ApiError} 400 on a bad decision or unknown evidence file, 404, 409 when the
@@ -1050,7 +1019,7 @@ function shapeFieldValue(row) {
   };
 }
 
-/** A constraint violation into the refusal the caller earned; anything else untouched. */
+/** A constraint violation into the matching 4xx error; anything else untouched. */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     if (err.constraint === "uq_projects_key") {

@@ -1,15 +1,5 @@
-// Tier 3: the status catalogue, configurable per area (RF-EST-02).
-//
-// `area_id` NULL is the global catalogue every area starts from; a row with an area belongs
-// to that area alone. An area may reuse a global code -- two partial unique indexes, not one
-// on the pair, because NULL is distinct from NULL in an index.
-//
-// Nothing is deleted: requests and projects reference these rows, so a status leaves the
-// catalogue by going inactive, which hides it from the pickers without rewriting history.
-//
-// Each row carries how many projects and requests hold it. That is what makes deactivating a
-// status a concrete decision rather than a blind one -- the screen can say what keeps naming it
-// after it leaves the pickers.
+// The status list, global or per area (RF-EST-02). Statuses are never deleted, only
+// deactivated, because requests and projects still point at them.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";

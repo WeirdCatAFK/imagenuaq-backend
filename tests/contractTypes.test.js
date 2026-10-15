@@ -1,8 +1,4 @@
-// The contract-scheme catalogue. Small surface, but the reason it exists is worth pinning:
-// users.contract_type_id is NOT NULL, so POST /api/users cannot be filled in without this
-// list, and the ids come from a sequence rather than from the requirement -- a client that
-// hard-coded them would work on one database and quietly assign the wrong scheme on the
-// next. So the cases below assert on NAMES and never on an id.
+// The contract types list. Cases match on names, never ids: ids differ between databases.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

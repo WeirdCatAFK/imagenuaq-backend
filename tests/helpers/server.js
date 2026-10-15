@@ -1,8 +1,5 @@
-// Boots a real API on a real socket for a test file, and tears it down again.
-//
-// Requests go over HTTP rather than through an in-process shim, so helmet, cors and
-// express.json() run as they do in production -- the 400 for malformed JSON and the 413 for
-// an oversized body are the body parser's, not ours.
+// Starts the real API on a real port for a test file, so helmet, CORS and the JSON parser run
+// as in production.
 import Api from '../../src/api.js';
 import { openStore, closeStore } from '../../src/access/primitives/database.js';
 import { openStorage, closeStorage } from '../../src/access/primitives/minioStorage.js';

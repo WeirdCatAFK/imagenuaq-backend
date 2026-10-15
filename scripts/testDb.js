@@ -1,14 +1,6 @@
 #!/usr/bin/env node
-// Creates the test database and the test bucket, and brings the database up to the current
-// schema. Run by `pretest`, so
-// `npm test` is the only command anyone has to remember.
-//
-// Idempotent: the CREATE is skipped when the database already exists and node-pg-migrate
-// applies only what `pgmigrations` says is pending, so a second run is nearly free. The
-// database is never dropped between runs -- migrating eight files costs a second or two
-// and the suite truncates what it dirties anyway.
-//
-// Two things here are easy to get wrong, and both are silent when you do.
+// Creates the test database and bucket and migrates the database; `pretest` runs it. Safe to
+// run again: it only applies pending migrations.
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';

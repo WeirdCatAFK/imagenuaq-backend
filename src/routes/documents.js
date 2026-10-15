@@ -1,11 +1,6 @@
-// Folders and files (RF-ARC-01, RF-ARC-02). Reads on `document.read`, writes on
-// `document.write`; which folders a person may touch, and who may delete or reshare, is
-// decided in orchestration/documents.js, not here. Issuing and revoking share links also
-// needs `document.share`; opening one is routes/shared.js.
-//
-// An upload is the raw request body, streamed straight into storage: the file name in the
-// query string, its type in Content-Type. No multipart parser, and api.js keeps
-// express.json() off this route so a .json upload arrives intact.
+// Folders and files (RF-ARC-01, RF-ARC-02). Who may touch which folder is decided in
+// orchestration/documents.js. Uploads are the raw request body (no multipart), with the file
+// name in the query string; api.js keeps express.json() off this route.
 import { Router } from "express";
 
 import documents from "../access/orchestration/documents.js";

@@ -1,48 +1,5 @@
-// How a spreadsheet row becomes a request. Pure: no database, no Graph, no HTTP.
-//
-// A column map is the declarative half of RF-MIG-02, stored in `sheets.column_map` and edited by
-// coordination without a deploy. It names, per target, which column feeds it and how:
-//
-//   { "version": 1,
-//     "title":     { "op": "concat", "columns": ["Nombre", "Entidad que solicita"], "separator": " — " },
-//     "requester": { "op": "column", "column": "Entidad que solicita" },
-//     "priority":  { "op": "constant", "value": 0 },
-//     "status":    { "op": "column", "column": "ESTATUS",
-//                    "map": { "VoBo": "esperando_vb", "Enviado en digital": "entregado" },
-//                    "default": "recibido" },   // a status CODE, not a cell value
-//     "hashColumns": ["Id"],
-//     "fields": {
-//       "tiraje":        { "op": "column", "column": "Si eligió material impreso, ..." },
-//       "fecha_entrega": { "op": "column", "column": "Hora de inicio" },
-//       "contacto_correo": { "op": "column", "column": "Correo Institucional de quien solicita" } } }
-//
-// **Columns are named by their header text, not by position.** A tracker gets columns inserted
-// and reordered constantly; renaming one is rarer and is a deliberate act. The cost, stated: a
-// renamed header makes the import refuse and say which column disappeared, rather than quietly
-// importing the wrong column's values.
-//
-// **The target's type decides the coercion, never the rule.** A rule may say what order a date
-// is written in (`format`) or which words mean yes (`truthy`), because only the sheet knows that.
-// It may not say that a `quantity` should be read as a date: `utils/fieldValues.js` takes the
-// field's `data_types.code` and the rule's options, in that order of authority.
-//
-// **`texts` exists because Excel has two answers.** A real date in a cell arrives as a serial
-// number and the same date typed by hand arrives as a string; `from: "text"` asks for what Excel
-// displays. The probe script prints both so a person can see which a column holds.
-//
-// **A required field the sheet left empty does not reject the row.** The request comes in
-// incomplete, with the field named in `missingRequired`; the inbox says so and conversion to a
-// project is what refuses until somebody fills it. A tracker always carries rows that were
-// started and never finished, and leaving them outside the system is how they get lost. A cell
-// that *has* a value the field's type cannot read is a different thing and still rejects the row:
-// there the sheet says something, and importing it wrong would be worse than not importing it.
-//
-// **`hashColumns` is the row's identity, and an Id column is better than content.** The papel
-// institucional tracker carries a Forms `Id`, so hashing that alone means correcting a typo in
-// the sheet does not look like a new row. The consequence, accepted: an edit after the import is
-// then invisible, because the row is recognised and skipped -- the state lives in the app from
-// the import onwards. With no such column the hash falls back to every referenced cell, and then
-// an edit does read as a new row and is flagged as a probable duplicate.
+// Turns a spreadsheet row into a request using a column map (RF-MIG-02). No database, no network.
+// Columns are found by header text, and the target field's type decides how a value is converted.
 import { createHash } from "node:crypto";
 
 import { coerce } from "./fieldValues.js";
@@ -77,7 +34,19 @@ const SLOTS = [
 const RULE_OPTIONS = ["from", "default", "format", "truthy", "falsy", "map", "separator", "index", "columns", "column", "value", "op"];
 
 /**
- * Checks a column map and returns it normalised.
+ * Checks a column map and returns it normalised. A map names, per target, the op that fills it
+ * (`column`, `constant`, `concat`, `split`):
+ *
+ *   { "version": 1,
+ *     "title":     { "op": "concat", "columns": ["Nombre", "Entidad"], "separator": " — " },
+ *     "requester": { "op": "column", "column": "Entidad" },
+ *     "status":    { "op": "column", "column": "ESTATUS", "map": { "VoBo": "esperando_vb" },
+ *                    "default": "recibido" },
+ *     "hashColumns": ["Id"],
+ *     "fields": { "fecha_entrega": { "op": "column", "column": "Hora de inicio" } } }
+ *
+ * `status.default` is a status code, not a cell value. A rule may say how the sheet writes a
+ * value (`format`, `truthy`) but never which type it is: the target field's type decides.
  *
  * @param {object} map The document as the client sent it.
  * @param {object[]} fields The target version's fields, flattened (`fieldList()`).
@@ -248,7 +217,9 @@ export function applyMapping(map, fields, headers, row, texts = []) {
 
 /**
  * The row's identity: a sha256 over the cells `hashColumns` names, normalised so that a
- * whitespace or casing change is not a different row.
+ * whitespace or casing change is not a different row. Prefer an Id column (a Forms `Id`): then
+ * fixing a typo in the sheet is not a new row. Without one, every referenced cell is hashed and
+ * an edit shows up as a probable duplicate.
  *
  * @param {object} map A validated map.
  * @param {unknown[]} headers

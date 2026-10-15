@@ -1,7 +1,5 @@
-// The account half of the spreadsheet feature: starting a sign-in, what the callback does
-// with a state it did not mint, listing and revoking. The code exchange itself is not here
-// -- it is the one call that needs Microsoft -- so the accounts these cases read are
-// written by the fixture exactly as completeConnect() would write them.
+// Connecting a Microsoft account, the callback, listing and revoking. The code exchange needs
+// Microsoft, so the fixture writes accounts the way completeConnect() would.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

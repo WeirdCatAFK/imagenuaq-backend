@@ -1,18 +1,6 @@
-// Tier 2: the ONLY module in the codebase that writes SQL.
-//
-// Everything above it -- orchestration, routes -- composes these methods; nothing below it
-// knows what a table is. Two things bite anybody adding a method here:
-//
-//   - **Parameters are positional.** `$1, $2` in an array, never `:named` in an object:
-//     postgrejs calls .map() on options.params, so an object throws
-//     "params?.map is not a function" at runtime rather than at parse time.
-//   - **Casts are load-bearing.** Postgres infers a parameter's type from its first use,
-//     and a bare null or an `is not null` test gives it nothing, so it fails the statement
-//     with "could not determine data type of parameter $n" rather than the row.
-//
-// Multi-step writes are data-modifying CTEs, not transactions. A CTE is atomic on its own
-// and keeps the tier boundary intact -- opening a transaction would mean handing a
-// connection up to orchestration, which is what this module exists to prevent.
+// The only module that writes SQL. Parameters are positional (`$1` with an array), and a
+// parameter that may be null needs a cast (`$1::bigint`). Multi-step writes are one SQL
+// statement (a CTE), not a transaction.
 import { getStore } from "../primitives/database.js";
 
 /**
@@ -1798,7 +1786,10 @@ class Query {
   }
 
   /**
-   * Closes a stage and opens what follows it, in one statement.
+   * Closes a stage and opens what follows it, in one statement. A rerun inserts the same
+   * definition at `attempt = max + 1`, so a race collides on `uq_project_stages_attempt`.
+   * The next-phase check reads the statement's snapshot, where the stage being closed is
+   * still open, so it excludes that stage by id.
    *
    * @param {number} stageId
    * @param {{ status?: string, rerun?: boolean }} input

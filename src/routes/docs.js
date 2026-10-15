@@ -1,14 +1,5 @@
-// Serves the OpenAPI document from src/swagger.js: the raw JSON, and Swagger UI over it.
-//
-// A router in routes/ like any other, so it is mounted by the one line in the `ROUTERS`
-// map that every other resource is mounted by, and the URL stays in a single place. It has
-// no orchestration layer beneath it because it reads nothing -- the document is a
-// constant, and there is no tier boundary to respect when there is no data.
-//
-// Left on in production deliberately. This is an internal system of dozens of users behind
-// a tunnel, every route it describes already refuses unauthenticated callers on its own,
-// and a spec that is only reachable in development is the one nobody remembers to update.
-// If that ever needs to change, gate the ROUTERS entry, not this file.
+// Serves the API description from src/swagger.js, as JSON and as Swagger UI. On in production
+// on purpose; to turn it off, remove the `docs` entry from ROUTERS.
 import { Router } from 'express';
 import helmet from 'helmet';
 import swaggerUi from 'swagger-ui-express';

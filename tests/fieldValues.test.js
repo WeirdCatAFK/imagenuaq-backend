@@ -1,6 +1,5 @@
-// Pure: no server, no database. The three callers -- the request API, the project API and the
-// sheet import -- share this, so a value typed into a form and the same value read out of a cell
-// have to land identically.
+// No server, no database. A value typed into a form and the same value read from a cell must
+// be stored identically.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 

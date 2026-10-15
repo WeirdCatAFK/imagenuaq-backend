@@ -1,6 +1,4 @@
-// Invites expire in three days and travel by email or chat, so the first one going astray
-// is ordinary. Without this route the only remedy would be deleting and recreating the
-// user, which changes their id and orphans anything already assigned to them.
+// Re-sending an invite. Without it, a lost invite would mean deleting and recreating the user.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

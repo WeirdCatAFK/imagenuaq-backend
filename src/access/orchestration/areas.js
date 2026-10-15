@@ -1,31 +1,6 @@
-// Tier 3: areas, who is in them, and how they hang off each other.
-//
-// RF-USR-09 is the whole reason this module exists as data rather than a constant: new
-// areas *and coordinations* are created without a deploy, "dado que la estructura
-// organizacional crece". A coordination is not a different kind of record from an area --
-// it is an area with areas under it -- so there is one table and one endpoint set, and the
-// difference between the two is a row in `area_hierarchy`.
-//
-// The hierarchy is what makes RF-USR-04 answerable at all: an area lead or coordination
-// consults the work of "todos los usuarios a su cargo", which is a subtree of areas, not
-// one area. getOrgChart() below is the read side of that, and the shape the frontend's
-// react-organizational-chart consumes.
-//
-// New areas are not roots by default. An area created without naming a parent hangs under
-// the area DEFAULT_AREA names in .env -- coordination, in the seeded organisation -- so
-// the chart stays one tree as it grows (RF-USR-09) and RF-USR-04's "todos los usuarios a su
-// cargo" keeps meaning everybody. The request distinguishes *omitted* from *null*: omitted
-// takes the default, an explicit null asks for a root. When the variable is unset or names
-// no area there is no default and the area is a root; that fallback is silent by decision.
-//
-// Three conventions hold throughout:
-//
-//   - **Membership arguments are (userId, areaId)**, matching query.js. Reversing them is
-//     not an error at any layer -- it writes the wrong row and returns successfully.
-//   - **Constraint violations are translated, not pre-flighted.** The constraint is the
-//     authority; a SELECT-then-write loses to two callers racing on the same name.
-//   - **Pure reads carry no try/catch.** translate() maps only 23505 and 23503, and a
-//     SELECT raises neither.
+// Areas, who belongs to them and how they nest (RF-USR-09, RF-USR-04). A new area with no
+// parent goes under DEFAULT_AREA from .env; an explicit null parent makes it a top-level area.
+// Membership arguments are always (userId, areaId): swapped, they write the wrong row silently.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -448,8 +423,9 @@ function shapeMember(row) {
 }
 
 /**
- * Turns a constraint violation into the refusal the caller earned. An unrecognised error
- * is returned untouched, for errorHandler to log in full behind a 500.
+ * Turns a constraint violation into the matching 4xx error. An unrecognised error
+ * is returned untouched, for errorHandler to log in full behind a 500. Writes rely on the
+ * constraint rather than checking first, since a check-then-write loses when two callers race.
  *
  * @returns {ApiError | Error}
  */

@@ -1,10 +1,5 @@
-// Adversarial tokens.
-//
-// Every one of these is a token the server must refuse, and each corresponds to a specific
-// line in orchestration/auth.js: the issuer and audience checks that stop a token minted by
-// another deployment being accepted here, the expiry, and above all the `purpose` claim
-// that keeps an invite from working as a login. Minting them by hand is the only way to
-// test those -- the API will never hand one out.
+// Tokens the server must refuse: wrong secret, issuer or audience, expired, or missing
+// `purpose`. Built by hand because the API never issues them.
 import * as jose from 'jose';
 
 const encode = (secret) => new TextEncoder().encode(secret);

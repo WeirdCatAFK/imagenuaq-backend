@@ -1,19 +1,5 @@
-// Symmetric encryption for credentials the database has to hold and hand back.
-//
-// The only such credential today is a Microsoft refresh token (microsoft_accounts,
-// RF-MIG-01). A hash will not do -- the token has to be presented to Microsoft again, not
-// merely recognised -- so it is sealed with AES-256-GCM under a key that lives in .env and
-// never in the database. Stealing a database dump then yields ciphertext; stealing the
-// dump AND the server's environment yields the tokens, which is the honest limit of
-// encrypting at rest.
-//
-// GCM rather than CBC because it authenticates: a flipped byte in the column is detected
-// as tampering instead of being decrypted into garbage that is then sent to Microsoft. A
-// fresh random IV per call is what makes sealing the same token twice give different
-// bytes, so the column reveals nothing about which accounts share a credential.
-//
-// Layout of the stored buffer: iv (12 bytes) || auth tag (16 bytes) || ciphertext. Fixed
-// widths, so no framing is needed and open() cannot be confused by a delimiter in the data.
+// Encrypts secrets the database must hand back (Microsoft refresh tokens, the app secret) with
+// AES-256-GCM, under MS_TOKEN_KEY from .env. Stored as IV (12 bytes) + auth tag (16) + ciphertext.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 const ALGORITHM = "aes-256-gcm";

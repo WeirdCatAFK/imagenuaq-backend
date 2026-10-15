@@ -1,10 +1,5 @@
-// Flow templates (RF-FLW-02, RF-PRY-06): a workflow is the identity, its versions are the
-// immutable phase-and-stage content, and a clone is how a new flow starts from an existing
-// one ("Partir de una plantilla").
-//
-// Reads are open to any session -- the designer and, next, a project picking its template
-// have to list them. Writes are `workflow.manage`, coordination's grant. The publisher of a
-// version is the session, never a body field (orchestration/workflows.js).
+// Flow templates (RF-FLW-02, RF-PRY-06): the template, its unchangeable versions, and cloning.
+// Reads need a session; writes need `workflow.manage`. The publisher is the session.
 import { Router } from "express";
 
 import workflows from "../access/orchestration/workflows.js";

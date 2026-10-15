@@ -1,6 +1,5 @@
-// The registry half: registering a table under a connected account, listing, removing.
-// Registration takes the ids `resolve` returned and does not call Microsoft, which is what
-// makes these cases possible offline (orchestration/spreadsheets.js on the trade).
+// Registering, listing and removing workbooks. Registering does not call Microsoft, so these
+// run offline.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

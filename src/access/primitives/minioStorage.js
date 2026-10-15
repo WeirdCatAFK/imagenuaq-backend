@@ -1,36 +1,6 @@
-// Tier 1. File content, as a content-addressed key-value store in a MinIO bucket.
-//
-// The tree lives in Postgres; this file knows nothing about folders, names or owners. It
-// maps a SHA-256 to bytes in one bucket and back. Errors from here mean "the store failed",
-// the way database.js's mean "the connection failed".
-//
-// "Content", not "file", throughout: a `files` row is one appearance of content in the
-// tree, and several of them share one object whenever their hashes match. What this module
-// stores is the thing they share.
-//
-// Layout inside the bucket:
-//
-//   tmp/<uuid>                in-flight uploads, deleted once the hash is known
-//   content/ab/cd/<hash>      64 hex chars. No extension. No filename.
-//
-// No filename in the key because one piece of content has many names - that is what
-// deduplication means - so writing one of them here would pick an arbitrary winner and
-// create a second, disagreeing source of truth. The name belongs to the files row. The
-// path-keyed layout this replaced (`PRY-000001/Diseño/x.pdf`) made a folder rename a copy
-// of every object under it; here it is one row update.
-//
-// Placement is MinIO's: it erasure-codes the bucket across its disks, so there is no
-// volume to choose and nothing about placement in the database.
-//
-// Three invariants, each of which is easy to break from the outside:
-//
-//   - **Bytes first, rows second.** putContent() never touches the database. A crash
-//     between the two leaves orphaned content for a sweeper to reclaim; the reverse order
-//     leaves a files row pointing at bytes that do not exist, a permanent 500.
-//   - **There is no updateContent, and never will be.** Different bytes are a different
-//     hash. Renames and moves happen on the files row.
-//   - **The bucket is checked at startup.** openStorage() refuses when the bucket is not
-//     there, rather than letting the first upload discover it.
+// Stores file bytes in one MinIO bucket under `content/ab/cd/<sha256>`; it knows nothing about
+// names or folders. Stored bytes are never changed (new bytes, new key), and it never touches
+// the database: callers store the bytes first, then insert their `files` row.
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable, Transform, pipeline } from 'node:stream';
 import {

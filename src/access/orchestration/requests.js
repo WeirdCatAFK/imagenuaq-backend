@@ -1,24 +1,5 @@
-// Tier 3: the request — what arrives before there is a project (RF-SOL-03 … RF-SOL-08).
-//
-// **A request is not an early project** (DATAMODEL §2.8). Squash the two and a rejected request
-// has nowhere to live, and a project born of three requests keeps only one of them. So they are
-// separate tables, `requests.project_id` is the link, and `convert()` is the one crossing.
-//
-// The folio comes from a database sequence, not from here: `SELECT max()+1` in application code
-// hands the same folio to two callers.
-//
-// `source` says how it arrived — `form`, `email`, `manual`. Never `sheet` through this module:
-// a row from a book is inserted by the import, which is the only caller that has the hash and
-// the raw row to go with it, and the CHECK on the table backs that up.
-//
-// `data` is the whole capture, coerced by `utils/fieldValues.js` against the format's fields, so
-// a value typed here and the same value read out of Excel land identically. Unknown keys are
-// kept: RF-SOL-06 says nothing the requester sent is dropped.
-//
-// **A request is routed by giving it a flow** (`request-flows`, DATAMODEL.md §2.5): a copy of a
-// template or one designed for it, owned by the request until it converts. Every area in the
-// flow's first phase finds it in its inbox, and converting hands the same phases to the
-// project. `area_id` stays for what was routed by hand before flows existed.
+// Requests: what comes in before there is a project (RF-SOL-03 to RF-SOL-08). convert() is the
+// only way a request becomes a project. Only the spreadsheet import creates rows with source 'sheet'.
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import projects from "./projects.js";

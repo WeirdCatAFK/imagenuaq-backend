@@ -1,6 +1,5 @@
-// A published version is sealed by triggers, not by the API's good manners (flow-templates,
-// DATAMODEL.md §2.2). These go around the API on purpose: the point is what the database
-// refuses when something does.
+// Published flow versions are protected by database triggers, so these cases bypass the API
+// and check what the database refuses.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 

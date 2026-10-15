@@ -1,17 +1,5 @@
-// Tier 3: the folder tree and the files in it 
-//
-// Postgres is the filesystem and MinIO a bag of bytes keyed by SHA-256
-// (primitives/minioStorage.js), so every rename, move and delete here is a row update and
-// nothing in the bucket moves. Uploads are the one place both are touched, and they go
-// bytes first, row second: a crash between the two leaves orphaned content for a sweeper,
-// never a row pointing at nothing.
-//
-// Share links (`access_tokens`) open one folder and everything beneath it to someone
-// without an account, read-only and until a fixed expiry (RF-ARC-03, RF-EXT-03). Only the
-// SHA-256 of the token is stored; the token itself is returned once, at creation.
-//
-// Names are labels, not keys: two files or folders side by side may share one, and the id
-// tells them apart.
+// Folders, files and share links. Names and folders live in Postgres and bytes in MinIO under
+// their SHA-256, so renames and moves never touch MinIO. Upload the bytes first, then insert the row.
 import { createHash, randomBytes } from "node:crypto";
 
 import query from "../resources/query.js";

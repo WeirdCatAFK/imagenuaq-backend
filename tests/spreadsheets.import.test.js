@@ -1,10 +1,5 @@
-// The import, fed rows instead of Graph.
-//
-// `importRows()` is separated from `import()` for exactly this: the part worth testing is what
-// happens to a row -- created, skipped, refused, flagged -- and not that Microsoft answered. The
-// headers and the first row below are the real tracker's, read with `npm run sheets:probe -- 1`,
-// which is why the shapes are awkward: a date arrives as the serial 46030.41, the quantity column
-// is often empty, and the status column holds the area's own vocabulary.
+// The import, fed rows directly instead of from Microsoft. The rows come from a real tracker
+// (`npm run sheets:probe -- 1`), so dates arrive as Excel serials and some cells are empty.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 

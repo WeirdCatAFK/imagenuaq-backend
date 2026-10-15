@@ -1,11 +1,6 @@
 #!/usr/bin/env node
-// Round-trips content through the real MinIO bucket and prints what came back at each step.
-// Usage: npm run storage:probe
-//
-// A script and not a test because it answers questions about the live service -- is the
-// bucket there, do the credentials work, does a second upload of the same bytes dedupe --
-// against whatever bucket .env names, which the suite must never touch. The API-level cases
-// in tests/documents.test.js run against their own bucket.
+// Round-trips bytes through the real MinIO bucket .env names and prints each step.
+// Usage: npm run storage:probe. The tests use their own bucket and never this one.
 import { randomBytes } from 'node:crypto';
 import { buffer } from 'node:stream/consumers';
 

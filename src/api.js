@@ -1,5 +1,5 @@
-// Mounts the API. Separate from main.js so it can be started on its own, embedded in a
-// larger backend, or built by a test that never binds a port.
+// Builds the Express app and mounts every router in ROUTERS. Separate from main.js so tests can
+// start it without the rest.
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';

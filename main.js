@@ -1,5 +1,5 @@
-// Entry point. Opens the pool and the file store, starts the API, closes all three on a
-// signal. Environment comes from .env via the --env-file flag in the npm scripts.
+// Entry point: opens the database pool and the file store, starts the API, and closes all
+// three on shutdown. Settings come from .env through the --env-file flag in the npm scripts.
 import Api from './src/api.js';
 import { openStore, closeStore } from './src/access/primitives/database.js';
 import { openStorage, closeStorage } from './src/access/primitives/minioStorage.js';

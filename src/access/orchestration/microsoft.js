@@ -1,40 +1,6 @@
-// Tier 3: Microsoft accounts -- the delegated grants the spreadsheet registry reads with.
-//
-// RF-MIG-01 keeps the areas' Excel trackers alive while their contents land here, which
-// means the system has to read workbooks that live in people's OneDrive and in SharePoint
-// libraries. Whose access? Not the application's own: an app-only registration would read
-// every drive in the tenant under one identity, which is more than a departmental tool
-// will be granted and more than it needs. So the access is delegated -- a staff member
-// signs in with their Microsoft account once, consents, and the books they register are
-// read as them. Any number of people may connect, and adding one is a row
-// (microsoft-accounts migration), which is what "sin desarrollo" asks of the whole
-// system.
-//
-// The sign-in leaves this server and comes back. The browser goes to Microsoft, consents,
-// and is redirected to a public GET on this API with a code -- no session header, because
-// Microsoft is the one redirecting. The `state` parameter is how that callback knows who
-// was connecting: a ten-minute JWT naming the user, signed with the session key and
-// carrying its own `purpose` so it is accepted nowhere else (auth.js). Without it, a code
-// arriving at the callback could be attached to whoever the attacker chose.
-//
-// accessTokenFor() is the ONE door to Graph. It owns the refresh -- decrypt, refresh,
-// re-encrypt the rotated token, cache the access token for its lifetime -- and it owns
-// the one failure that matters: a refresh Microsoft refuses with invalid_grant is a grant
-// that is gone (revoked by the person, expired, password changed), and the row is marked
-// revoked on the spot so the next caller is told to reconnect instead of retrying a token
-// that will never work again. Anything that wants to read a book goes through here, so
-// that logic exists once.
-//
-// Ownership is a record rule, applied here as CLAUDE.md prescribes: a person may use and
-// revoke the accounts they connected; an admin may use and revoke anyone's. The
-// permission codes (spreadsheet.read / .write) say whether someone may touch the feature
-// at all; this says which rows.
-//
-// The app registration those grants are made to is data too (microsoft_app, one row,
-// secret sealed), saved by an admin from the settings screen; MS_* in .env is the fallback
-// when the row is absent, so tests and deployments that prefer the environment still work.
-// app() below is the one place that choice is made, read per call rather than cached so a
-// saved registration is used by the very next sign-in.
+// Microsoft accounts that people connect so the spreadsheet import can read their workbooks
+// (RF-MIG-01). accessTokenFor() is the only way to get a Graph token. People use their own
+// accounts; admins can use anyone's.
 import * as jose from "jose";
 
 import query from "../resources/query.js";
@@ -62,7 +28,9 @@ class Microsoft {
   #cache = new Map();
 
   /**
-   * Where to send the browser so `userId` can connect an account.
+   * Where to send the browser so `userId` can connect an account. Microsoft redirects back to
+   * the public callback with no session, so `state` carries a ten-minute token naming the user
+   * (purpose `ms_connect`); without it a code could be attached to anyone.
    *
    * @param {number} userId
    * @returns {Promise<{ url: string }>}

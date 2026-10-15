@@ -1,26 +1,5 @@
-// Tier 3: everything that decides *whether* a request becomes a session, and what that
-// session then claims. Password hashing, credential checking and token signing/verification
-// live together because they are one rule read from both ends -- what goes into a token
-// here is exactly what the middleware trusts on the way back. This tier owns the refusals:
-// it throws ApiError, so the routes stay four lines.
-//
-// Three decisions worth knowing before changing anything here:
-//
-//   - **A verified token is checked against its row.** verifyToken() costs one primary-key
-//     lookup, and it buys two things a stateless token cannot: a deleted or revoked account
-//     stops working at once rather than when its token expires, and `role` and `areaId`
-//     come from the row, so a change takes effect on the next request instead of in seven
-//     days. This reverses an earlier decision that nothing would re-read the database here;
-//     a shorter TOKEN_TTL was the alternative and it shortens the window without closing
-//     it. Permissions are still NOT read here -- requirePermission() does that separately,
-//     per request, because the catalog is editable at runtime (RF-USR-05).
-//   - **A missing email and a wrong password must cost the same.** Without the padding
-//     hash a missing user returns in microseconds while a real comparison takes ~250ms,
-//     which is a free "does this address have an account?" oracle for anyone with a
-//     stopwatch. One refusal message, for the same reason.
-//   - **An invite is a token like any other and must say what it is for.** Without the
-//     `purpose` claim verifyToken() would accept an invite as a session, handing a full
-//     login to somebody who has not chosen a password yet.
+// Logins, invites and session tokens: hashing passwords, signing and checking tokens. Every
+// token says what it is for (`purpose`), so an invite can never be used as a login.
 import bcrypt from "bcrypt";
 import * as jose from "jose";
 

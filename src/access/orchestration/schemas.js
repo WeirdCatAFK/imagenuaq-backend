@@ -1,56 +1,6 @@
-// Tier 3: request formats (RF-SOL-01), the "schemas" of DATAMODEL.md 2.2 and 2.3.
-//
-// A schema is a stable identity (code, name, active flag); what it asks for lives in
-// `schema_versions.fields`, a document that is immutable once published -- the trigger in
-// projects-spine rejects the UPDATE, so "editing" a format is publishing the next version. Requests, projects and sheets point at a version, never at the schema, so
-// what was captured under v1 still reads as v1 after v2 exists.
-//
-// `fields` is two sections, each an ordered array:
-//
-//   { "deliverables": [ { code, name, type, note, required }, ... ],
-//     "information":  [ ... ] }
-//
-//   deliverables  what the format asks the area to produce.
-//   information   what it asks the requester to state.
-//   code          snake_case, unique **across both sections**. It is the key in
-//                 `requests.data`, the target a sheet's column map names, and the
-//                 `project_field_values.key` the value lands under -- hence one namespace
-//                 and the narrow character set.
-//   type          a `data_types.code`; the coercion a value goes through is chosen by it.
-//                 Reads also carry `baseType` from the catalogue, so a client that only
-//                 cares about string-vs-number need not know the codes.
-//   note          the human hint ("PDF con la firma de Alma"); may be empty.
-//   required      the request is refused without it.
-//
-// The sections hold arrays rather than objects keyed by code because `jsonb` does not
-// preserve object key order -- it sorts keys by length then bytes -- so a keyed object
-// loses capture order and would need an `order` attribute maintained by hand.
-//
-// There is no `propagate` flag: **every** captured value becomes a `project_field_values`
-// row when the request is converted (RF-FLW-06, RF-IMP-05). The propagation exists so the
-// later tools -- labels, stock, invoicing -- can read the project's data, and there are no
-// reserved values in the organisation that would justify excluding one.
-//
-// **A key is vocabulary, not a label local to one format.** It is what the value is stored
-// under in `requests.data` and in `project_field_values`, so `numero_orden` has to mean one
-// thing system-wide: if one format declares it `text` and another `date`, a project ends up
-// holding two different things under one name and the print order reads whichever it finds.
-// So publishing a field whose key already exists **with another type** is refused, naming the
-// format it already lives in. Whoever needs something else uses another key.
-//
-// The consequence, stated: a field's type cannot be changed by publishing a new version either.
-// That is the same rule, not a separate one -- the values already captured under that key are of
-// the old type, and changing it would make them lie. `GET /api/schemas/field-keys` is the list
-// the builder reads to autofill instead of guessing.
-//
-// Templates (RF-SOL-01, "conforme crecen las coordinaciones") are clones: `clone()` copies
-// the latest version's fields into a new identity's version 1. A field-group catalogue
-// that schemas compose was considered and declined -- it adds a table and a propagation
-// rule for a reuse the copy already gives, and the formats the interviews name share a
-// handful of fields, not blocks.
-//
-// The publisher is the session's actor, never a body field: `published_by` is an audit
-// fact and a client may not attribute a publish to someone else.
+// Request formats (RF-SOL-01). A format's fields are published as versions that never change;
+// to edit one, publish a new version. A field key means one thing system-wide, so publishing an
+// existing key with a different type is refused.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
@@ -68,7 +18,10 @@ import {
 const CODE_MAX = 50;
 const NAME_MAX = 300;
 
-/** Field codes are keys elsewhere (see header), so the character set is the narrow one. */
+/**
+ * A field code is the key in `requests.data`, in a column map and in `project_field_values`, so
+ * it uses a narrow character set and is unique across both sections.
+ */
 const FIELD_CODE = /^[a-z][a-z0-9_]{0,99}$/;
 
 /** The two section keys, in the order a form renders them. */
@@ -276,10 +229,11 @@ function publisher() {
 }
 
 /**
- * Checks a `fields` document against the shape in the header and returns it normalised --
- * trimmed strings, `note` and `required` filled in -- so what is stored is canonical
- * whatever the client sent. Exported for the modules that validate a document they did not
- * receive from a client.
+ * Checks a `fields` document and returns it cleaned up (trimmed strings, `note` and `required`
+ * filled in). The shape is `{ deliverables: [...], information: [...] }`, each field
+ * `{ code, name, type, note, required }`: deliverables are what the area produces, information
+ * what the requester states, and `type` is a `data_types.code`. Sections are arrays, not objects
+ * keyed by code, because jsonb reorders object keys and capture order would be lost.
  *
  * @param {{ deliverables: object[], information: object[] }} fields
  * @returns {Promise<{ deliverables: object[], information: object[] }>}
@@ -454,7 +408,7 @@ export function shapeSchemaVersion(row, types) {
   };
 }
 
-/** A constraint violation into the refusal the caller earned; anything else untouched. */
+/** A constraint violation into the matching 4xx error; anything else untouched. */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     return ApiError.conflict("A schema with that code already exists.");

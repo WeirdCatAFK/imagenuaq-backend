@@ -1,8 +1,5 @@
-// The guards on both routers of the spreadsheet feature. What must hold: nothing answers
-// without a session, a role without spreadsheet.read is refused every read, and the one
-// public route -- the sign-in callback -- refuses a missing state by redirecting, never by
-// rendering an error to a browser mid-navigation. The routes that talk to Microsoft Graph
-// are exercised only this far, since a case that reached them would need the network.
+// Permission checks on the spreadsheet routes. Routes that call Microsoft are tested only up to
+// their checks, since going further needs the network.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

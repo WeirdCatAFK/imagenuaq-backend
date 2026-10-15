@@ -1,10 +1,5 @@
-// Test data, built through the same code the API uses wherever that is possible.
-//
-// Fixtures go through query.js rather than hand-written INSERTs so that a schema change
-// breaks the suite in one place instead of thirty. The exceptions are the few statements
-// below that read a row back or soft-delete one: those are assertions about state the API
-// has no endpoint for, and inventing endpoints to make them testable would be the tail
-// wagging the dog.
+// Test data, created through query.js (not hand-written INSERTs) so a schema change breaks one
+// place. Raw SQL only where the API has no endpoint for the state being checked.
 import bcrypt from 'bcrypt';
 
 import query from '../../src/access/resources/query.js';

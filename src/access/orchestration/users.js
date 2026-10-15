@@ -1,29 +1,5 @@
-// Tier 3: staff accounts -- who exists, what they look like, and when they stop existing.
-// Separate from orchestration/auth.js because they answer different questions: auth decides
-// whether a caller is who they say and what a token may claim, this decides what a user
-// record is allowed to look like. Invites are minted through auth.js.
-//
-// There is deliberately no self-registration. RF-USR-01 groups users into areas and
-// RF-USR-02 assigns them one of three role levels; both are decisions the coordination
-// makes about a person, not claims the person makes about themselves. An endpoint that let
-// a caller pick their own role_id would make RF-USR-06 -- do not edit what is not yours --
-// unenforceable, because anyone could ask to be coordination. External requesters are not
-// users at all: RF-EXT-03 gives them view-only sight of their own request.
-//
-// Four rules run through the module:
-//
-//   - **Two shapes, one function.** RF-USR-03 lets everyone see their colleagues, so the
-//     reads are open to any signed-in caller -- but contract type and birthday are nobody
-//     else's business. shapeUser() takes `asAdmin` and is the only place either shape is
-//     built, so the two cannot drift apart.
-//   - **Deleting is soft, and it revokes.** `deleted_at` plus a bump of `token_version`,
-//     because a delete that leaves the session working is a delete that did not happen.
-//   - **Updates are merged here, not assembled in SQL.** query.updateUser() writes every
-//     column; building a SET list from whichever keys arrived would put string
-//     concatenation back into the one module that exists to prevent it.
-//   - **Constraint violations are translated, not pre-flighted.** The constraint is the
-//     authority, and two callers racing on the same address then resolve correctly instead
-//     of both passing a check and one returning a 500.
+// Staff accounts. There is no self sign-up: admins create accounts (RF-USR-01, RF-USR-02).
+// Deleting is soft and signs the person out at once.
 import query from "../resources/query.js";
 import auth from "./auth.js";
 import events from "../../utils/events.js";
@@ -241,7 +217,8 @@ class Users {
   }
 
   /**
-   * Updates only the keys the caller sent. The current row is read first and merged here.
+   * Updates only the keys the caller sent. The current row is read first and merged here, and
+   * query.updateUser() writes every column: never build the SQL from whichever keys arrived.
    *
    * @param {number|string} userId
    * @param {object} changes
@@ -501,7 +478,7 @@ function clampOffset(offset) {
 }
 
 /**
- * Turns a constraint violation into the refusal the caller earned. An unrecognised error
+ * Turns a constraint violation into the matching 4xx error. An unrecognised error
  * is returned untouched, for errorHandler to log in full behind a 500.
  *
  * @returns {ApiError | Error}

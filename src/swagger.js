@@ -1,19 +1,5 @@
-// The OpenAPI description of this API, hand-written.
-//
-// Hand-written rather than generated from JSDoc annotations (`swagger-jsdoc`) for two
-// reasons. The annotation form spreads one document across every route file in a YAML
-// dialect embedded in comments, where a typo is a silent omission rather than an error --
-// and this repository already keeps its route table in one place on purpose (`ROUTERS` in
-// src/api.js), for the same reason. A single module is also the only form that can be
-// asserted against: tests/docs.test.js reads this object and fails when a mounted router
-// has no documented path, which is the drift a generator is usually bought to prevent.
-//
-// The cost is that this file is updated by hand when a route changes. That is the trade,
-// and the test is what keeps it honest.
-//
-// OpenAPI 3.1 rather than 3.0: it is the version that agrees with JSON Schema, so a
-// nullable field is `type: ['integer', 'null']` instead of 3.0's bespoke `nullable: true`.
-// swagger-ui-dist 5.x, which swagger-ui-express 5 bundles, renders it.
+// The hand-written OpenAPI 3.1 description of the API. tests/docs.test.js fails when a mounted
+// route is missing from it, so update it with every route change.
 
 // Reusable error body. Every refusal in this API comes out of middlewares/errorHandler.js
 // in this one shape, including the ones Express's body parser raises before our code runs.

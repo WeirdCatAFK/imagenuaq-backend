@@ -1,19 +1,6 @@
-// Tier 2: what a workbook looks like through Graph, shaped for the tier above.
-//
-// query.js is the resource for Postgres; this is the resource for Excel. Same rule: the
-// only module that knows Graph's paths and response shapes. Orchestration asks for "the
-// tables in this book" and gets `{ tables, worksheets }`, never `@odata` anything.
-//
-// Two shapes of data live in a tracker and both are offered. A *table* is an Excel
-// ListObject with a header row Graph can name; a *worksheet* is the raw grid, read through
-// its used range. The trackers the interviews describe are as likely to be the second as
-// the first, and asking coordination to convert a sheet to a table before registering it
-// is a step nobody would remember to take.
-//
-// Share links are resolved rather than parsed: Graph's /shares endpoint turns any OneDrive
-// or SharePoint URL a person can paste into the drive/item pair the workbook calls take
-// (DATAMODEL.md 2.9 on why that pair, not the URL, is the key). The encoding is the one
-// Graph documents -- base64url of the URL with a `u!` prefix.
+// Reads a workbook's shape from Graph (tables, worksheets, header row) and returns plain
+// objects. The only module that knows Graph's paths; it handles both Excel tables and plain
+// worksheets.
 import { graphGet } from "../primitives/microsoftGraph.js";
 
 /**

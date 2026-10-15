@@ -1,31 +1,6 @@
-// Tier 3: the role catalogue and the permissions each role grants.
-//
-// RF-USR-02 names three levels -- integrante de área, responsable de área,
-// coordinación/secretaría particular -- and the catalog-bootstrap migration seeded those
-// plus `finance` for RF-USR-08. Four rows are the starting point, not the ceiling: this
-// module exists so coordination adds the fifth without a deploy, for the same reason areas
-// are data (RF-USR-09).
-//
-// The permission half is what RF-USR-05 asks for: read and write are independent and
-// assignable by role, so `project.read` and `project.write` are two rows and not two levels
-// of one.
-//
-// `role_permissions` arrives partly filled. Section 8 of catalog-bootstrap seeds the two
-// grants that are definitions rather than configuration -- `admin` gets every permission,
-// because it is the role from which the others are configured and an empty one is a
-// bootstrap deadlock, and `finance` gets finance.read, because that grant IS the role under
-// RF-USR-08. `worker` and `area_lead` are deliberately empty: theirs is policy, and
-// setPermissions() below is where coordination decides it.
-//
-// The role is global and stays that way -- see DATAMODEL.md §5.2, which records the
-// decision. `role_permissions` answers what a person may do; `area_members` and
-// `area_hierarchy` answer which records they may do it to. The case that cannot be expressed
-// is somebody who may edit in one area and only read in another; that is the case the
-// decision declines to support, not an omission.
-//
-// Two rules hold throughout: codes are compared literally, so nothing here case-folds
-// caller input, and a rename is a real hazard -- requireRole() compares `roles.name` and
-// every live JWT carries the old one for seven days.
+// Roles and the permissions each one grants (RF-USR-02, RF-USR-05). `admin` cannot be edited or
+// deleted, because code checks for it by name. A role applies everywhere; which records a person
+// may touch comes from their areas (DATAMODEL.md §5.2).
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -460,7 +435,7 @@ function shapePermission(row) {
 }
 
 /**
- * Turns a constraint violation into the refusal the caller earned. Both catalogues take
+ * Turns a constraint violation into the matching 4xx error. Both catalogues take
  * their unique constraint names from Postgres's defaults, having been declared with an
  * inline UNIQUE. An unrecognised error is returned untouched.
  *

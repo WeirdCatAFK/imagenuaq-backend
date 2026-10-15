@@ -1,7 +1,5 @@
-// The role catalogue and the grants each role holds. `role_permissions` is empty in a fresh
-// database by the role-permissions migration's own decision (RF-USR-05: which role gets
-// what is coordination's call), so most of what these cases assert is the endpoint that
-// stops it being empty.
+// Roles and their permissions. A fresh database gives `admin` every permission and `finance`
+// `finance.read`; `worker` and `area_lead` start empty (RF-USR-05).
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

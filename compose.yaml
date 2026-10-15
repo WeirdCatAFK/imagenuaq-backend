@@ -52,7 +52,7 @@ services:
       minio-init:
         condition: service_completed_successfully
 
-  # File content, keyed by SHA-256 (src/access/primitives/storage.js). One server over four
+  # File content, keyed by SHA-256 (src/access/primitives/minioStorage.js). One server over four
   # disks: MinIO erasure-codes across them, which is why the database records no placement.
   minio:
     image: quay.io/minio/aistor/minio:RELEASE.2026-09-07T08-39-31Z

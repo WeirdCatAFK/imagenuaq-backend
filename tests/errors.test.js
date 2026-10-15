@@ -1,6 +1,5 @@
-// The envelope every refusal arrives in, and the classification behind the status code.
-// These are the assertions the frontend's error handling is built on, so they are pinned
-// here rather than left implicit in the endpoint files.
+// The shape every error response has, and which status each kind of error gets. The frontend's
+// error handling relies on it.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

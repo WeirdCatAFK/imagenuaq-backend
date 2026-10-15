@@ -1,14 +1,5 @@
-// Tier 3: the audit trail (RF-USR-07).
-//
-// A *subscriber*, not a function the rest of the code calls. Orchestration announces what
-// it did through utils/events.js and this turns the announcement into a row in `logs` --
-// the only module that writes that table. The indirection is not decoupling for its own
-// sake: an `audit.record()` call in the middle of Areas.update() reads as part of the
-// business rule and gets deleted by whoever simplifies that method later, whereas the
-// event is the method saying what it did, worth keeping whether or not anybody listens.
-//
-// The actor is not an argument. It comes from utils/context.js, seeded per request by
-// middlewares/context.js, so orchestration never learns that HTTP exists.
+// Writes the audit trail (RF-USR-07). It listens to events from utils/events.js and is the only
+// code that writes `logs`; the acting user comes from utils/context.js, never an argument.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
@@ -79,7 +70,7 @@ class Audit {
     if (actionId === undefined) {
       throw new Error(
         `Unknown action code "${action}". The catalogue is seeded by ` +
-          "migrations/1788794776184_catalog-bootstrap.sql; add the code there first.",
+          "catalog-bootstrap; add it to the actions table in a new migration first.",
       );
     }
 
