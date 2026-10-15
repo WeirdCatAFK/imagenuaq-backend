@@ -9,11 +9,10 @@ import {
   createArea,
   tokenFor,
   logsFor,
-  roleId,
   sql,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// The sign-off (RF-FLW-03) and what a rejection does to the stage (§2.6).
 describe("/api/projects/:id/stages/:stageId/approvals", () => {
   let server;
   let admin;
@@ -37,7 +36,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -47,13 +45,8 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     area = await createArea("Diseño de prueba");
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   async function project(stages = [{ areaId: null, title: "Diseño" }]) {
     const res = await server.post("/api/projects", {
@@ -84,6 +77,7 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.equal(res.body.stage.status, "done");
     assert.ok(res.body.stage.endedAt);
     assert.deepEqual(res.body.reopened, []);
+    assert.deepEqual(res.body.opened, [], "a one-phase project has no next phase to open");
 
     const logs = await logsFor("project_stages", stage.id);
     assert.deepEqual(logs.map((l) => l.action), ["stage_activated", "stage_completed"]);
@@ -109,8 +103,8 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.equal(rerun.title, stage.title);
     assert.equal(String(rerun.areaId), String(area.id));
     assert.notEqual(rerun.id, stage.id);
+    assert.equal(rerun.flowStageId, stage.flowStageId, "a rerun is the same definition, not a copy");
 
-    // Both attempts stay readable: the history is not overwritten.
     const read = await server.get(`/api/projects/${made.id}`, { token: adminToken });
     assert.deepEqual(read.body.project.stages.map((s) => [s.attempt, s.status]), [[1, "done"], [2, "active"]]);
     assert.deepEqual(read.body.project.activeStageIds, [rerun.id]);
@@ -180,7 +174,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.equal(bad.status, 400);
     assert.match(bad.body.error.message, /referenced record/);
 
-    // The stage survived the failed attempt: nothing was half-written.
     const stages = await server.get(`/api/projects/${made.id}/stages`, { token: adminToken });
     assert.equal(stages.body.stages[0].status, "active");
     assert.equal((await sql("select count(*)::int as n from approvals"))[0].n, 0);
@@ -201,7 +194,6 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
 
     await grantWorker(["project.read", "project.write"]);
     try {
-      // The worker is in no area of this project, and signs anyway: the permission is the policy.
       const res = await sign(made.id, made.stages[0].id, { decision: "approved" }, workerToken);
       assert.equal(res.status, 201);
       assert.equal(res.body.approval.approverUserId, worker.id);
@@ -215,5 +207,82 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     const theirs = await project();
 
     assert.equal((await sign(theirs.id, mine.stages[0].id, { decision: "approved" })).status, 404);
+  });
+
+  describe("advancing to the next phase", () => {
+    const byTitle = (stages, title) => stages.find((s) => s.title === title);
+
+    test("approving the only stage of a phase opens the next phase", async () => {
+      const made = await project([
+        { title: "Diseño", seq: 1 },
+        { title: "Impresión", seq: 2 },
+        { title: "Entrega", seq: 3 },
+      ]);
+
+      const res = await sign(made.id, byTitle(made.stages, "Diseño").id, { decision: "approved" });
+      assert.equal(res.status, 201);
+      assert.deepEqual(res.body.opened.map((s) => [s.title, s.status, s.seq]), [["Impresión", "active", 2]]);
+      assert.ok(res.body.opened[0].startedAt);
+
+      const printing = byTitle(made.stages, "Impresión");
+      const logs = await logsFor("project_stages", printing.id);
+      assert.deepEqual(logs.map((l) => l.action), ["stage_activated"]);
+
+      const read = await server.get(`/api/projects/${made.id}`, { token: adminToken });
+      assert.equal(byTitle(read.body.project.stages, "Entrega").status, "pending", "only one phase ahead");
+    });
+
+    test("parallel stages: the phase advances when the last one is approved", async () => {
+      const made = await project([
+        { title: "Propuesta", seq: 1 },
+        { title: "Textos", seq: 1 },
+        { title: "Impresión", seq: 2 },
+      ]);
+
+      const first = await sign(made.id, byTitle(made.stages, "Propuesta").id, { decision: "approved" });
+      assert.deepEqual(first.body.opened, [], "Textos is still active");
+
+      const second = await sign(made.id, byTitle(made.stages, "Textos").id, { decision: "approved" });
+      assert.deepEqual(second.body.opened.map((s) => s.title), ["Impresión"]);
+    });
+
+    test("a rejection never advances", async () => {
+      const made = await project([
+        { title: "Diseño", seq: 1 },
+        { title: "Impresión", seq: 2 },
+      ]);
+
+      const res = await sign(made.id, made.stages[0].id, { decision: "rejected" });
+      assert.equal(res.body.reopened.length, 1);
+      assert.deepEqual(res.body.opened, []);
+    });
+
+    test("a cancelled sibling does not hold the phase open", async () => {
+      const made = await project([
+        { title: "Propuesta", seq: 1 },
+        { title: "Textos", seq: 1 },
+        { title: "Impresión", seq: 2 },
+      ]);
+      const cancelled = await server.patch(
+        `/api/projects/${made.id}/stages/${byTitle(made.stages, "Textos").id}`,
+        { token: adminToken, body: { status: "cancelled" } },
+      );
+      assert.equal(cancelled.status, 200);
+
+      const res = await sign(made.id, byTitle(made.stages, "Propuesta").id, { decision: "approved" });
+      assert.deepEqual(res.body.opened.map((s) => s.title), ["Impresión"]);
+    });
+
+    test("a pending stage in the same phase holds it open", async () => {
+      const made = await project([{ title: "Diseño", seq: 1 }, { title: "Impresión", seq: 2 }]);
+      const late = await server.post(`/api/projects/${made.id}/stages`, {
+        token: adminToken,
+        body: { areaId: area.id, title: "Revisión", seq: 1 },
+      });
+      assert.equal(late.status, 201);
+
+      const res = await sign(made.id, byTitle(made.stages, "Diseño").id, { decision: "approved" });
+      assert.deepEqual(res.body.opened, [], "Revisión has not run yet");
+    });
   });
 });

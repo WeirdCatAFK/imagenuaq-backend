@@ -44,13 +44,6 @@ describe('POST /api/users', () => {
     await server.close();
   });
 
-  // The admin account is KEPT between cases, and it has to be: verifyToken() now re-reads
-  // the user row on every authenticated request, so truncating it -- which this file used
-  // to do -- revokes the session minted in before() and turns every case into a 401. That
-  // is the point of token_version working, not a regression.
-  //
-  // resetCases() removes everything a case created and leaves the login intact, so the file
-  // still pays for exactly one bcrypt comparison rather than one per test.
   beforeEach(() => resetCases(ACCOUNTS));
 
   const valid = () => ({
@@ -77,8 +70,6 @@ describe('POST /api/users', () => {
       assert.equal(res.body.error.message, 'Invalid or expired token.');
     });
 
-    // Area leads direct the work of their area, but staffing it is not theirs to decide --
-    // so the guard is requireRole('admin') and not a list that quietly includes them.
     for (const role of ['worker', 'area_lead', 'finance']) {
       test(`a ${role} is 403`, async () => {
         const user = await createPending({ email: `${role}@uaq.mx`, role });
@@ -91,9 +82,6 @@ describe('POST /api/users', () => {
       });
     }
 
-    // 403 and not 404: the guard is mounted on the router with use(), so it answers before
-    // route matching. A caller learns they lack the role rather than that the route is
-    // missing.
     test('the guard runs before the route, so an unknown sub-path is still 403', async () => {
       const user = await createPending({ email: 'worker2@uaq.mx', role: 'worker' });
       const token = await tokens.session({ ...user, role_name: 'worker' });
@@ -120,18 +108,12 @@ describe('POST /api/users', () => {
       assert.equal(typeof res.body.inviteToken, 'string');
     });
 
-    // The account arrives with no password and reaches one only through the invite, which
-    // is what makes the invite single-use and what stops a created account being logged
-    // into before its owner has chosen a secret.
     test('the account has no password until it is activated', async () => {
       const res = await create(valid());
 
       assert.equal((await findUser(res.body.user.id)).password_hash, null);
     });
 
-    // The invite is a credential with a life of its own, not a property of the user -- it
-    // is returned alongside the record rather than inside it, and this is the only moment
-    // it exists. Nothing stores it and it cannot be read back.
     test('the invitation is usable and is not stored on the user', async () => {
       const res = await create(valid());
 
@@ -157,7 +139,6 @@ describe('POST /api/users', () => {
       assert.equal(res.body.user.fullName, 'Nuevo Usuario');
     });
 
-    // Ids arrive from JSON, where "7" and 7 are both ordinary.
     test('numeric ids sent as strings are accepted', async () => {
       const res = await create({
         ...valid(),
@@ -170,10 +151,6 @@ describe('POST /api/users', () => {
     });
   });
 
-  // area_members is not redundant with users.primary_area_id: leadership lives there
-  // because somebody can lead one area and be a member of another, and the visibility
-  // queries read that table. A user created without a row there is invisible to their own
-  // colleagues, which is a bug nobody notices until the first area listing comes up empty.
   describe('area membership', () => {
     test('an area creates the membership row alongside the user', async () => {
       const res = await create({ ...valid(), primaryAreaId: disenoWeb });
@@ -204,8 +181,6 @@ describe('POST /api/users', () => {
       assert.deepEqual(await areaMemberships(res.body.user.id), []);
     });
 
-    // A leader flag with no area has nowhere to apply; accepting it silently would record
-    // a decision that never took effect.
     test('a leader flag without an area is 400', async () => {
       const res = await create({ ...valid(), isAreaLeader: true });
 
@@ -248,9 +223,6 @@ describe('POST /api/users', () => {
       await rejected({ email: `${'a'.repeat(320)}@uaq.mx` }, EMAIL_REQUIRED);
     });
 
-    // Deliberately permissive: the authority on a deliverable address is whether mail
-    // arrives, and a stricter pattern reliably rejects real addresses. Plus-tagging is the
-    // usual casualty, so it is pinned as accepted.
     test('a plus-tagged address is accepted', async () => {
       const res = await create({ ...valid(), email: 'ana+proyectos@uaq.mx' });
 
@@ -277,8 +249,6 @@ describe('POST /api/users', () => {
       await rejected({ contractTypeId: undefined }, 'contractTypeId is required.');
     });
 
-    // Number() alone would read true as 1 and "7abc" as NaN; toId() rejects both, so a
-    // caller cannot stumble into role 1 by sending a boolean.
     for (const [label, value] of [
       ['a boolean', true],
       ['zero', 0],
@@ -300,8 +270,6 @@ describe('POST /api/users', () => {
       );
     });
 
-    // null and undefined are a legitimate absence, not a malformed value -- staff without
-    // a home area exist.
     test('an explicitly null primaryAreaId is accepted', async () => {
       const res = await create({ ...valid(), primaryAreaId: null });
 
@@ -309,10 +277,6 @@ describe('POST /api/users', () => {
     });
   });
 
-  // The constraint is the authority, not a pre-flight SELECT: two admins creating the same
-  // address at once resolve correctly instead of both passing a check and one becoming a
-  // 500. These assert the translation from Postgres error code back to the field the
-  // caller got wrong.
   describe('constraint violations become refusals', () => {
     test('a duplicate live address is 409', async () => {
       await create(valid());
@@ -331,9 +295,6 @@ describe('POST /api/users', () => {
       assert.equal(res.status, 409);
     });
 
-    // uq_users_email_live is partial on deleted_at IS NULL, so removing someone frees
-    // their address. Without that a departing employee would burn their address forever,
-    // and a returning one could not be re-created.
     test('an address freed by a soft delete can be reused', async () => {
       const first = await create(valid());
       await softDelete(first.body.user.id);
@@ -365,8 +326,6 @@ describe('POST /api/users', () => {
       assert.equal(res.body.error.message, 'Unknown primaryAreaId.');
     });
 
-    // A rejected creation must leave nothing behind. The user and its membership are one
-    // data-modifying CTE precisely so the pair cannot half-succeed.
     test('a rejected creation writes no user', async () => {
       await create({ ...valid(), primaryAreaId: 999_999 });
 
@@ -378,8 +337,6 @@ describe('POST /api/users', () => {
     });
   });
 
-  // Never in the response, and never in the token either. The shape is assembled field by
-  // field rather than spread from the row, and this is what that buys.
   test('the response never carries a password hash', async () => {
     const res = await create(valid());
 

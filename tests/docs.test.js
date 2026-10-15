@@ -1,3 +1,6 @@
+// The docs describe the API; they do not read it. Nothing here touches Postgres, so this
+// file boots the server with no pool at all -- if a case in here ever needs a database,
+// something has gone wrong in routes/docs.js rather than in the test.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -5,9 +8,6 @@ import { startServerWithoutDatabase } from './helpers/server.js';
 import { ROUTERS } from '../src/api.js';
 import { buildOpenApiDocument } from '../src/swagger.js';
 
-// The docs describe the API; they do not read it. Nothing here touches Postgres, so this
-// file boots the server with no pool at all -- if a case in here ever needs a database,
-// something has gone wrong in routes/docs.js rather than in the test.
 describe('GET /api/docs', () => {
   let server;
 
@@ -28,9 +28,6 @@ describe('GET /api/docs', () => {
   });
 
   test('redirects to the trailing slash so relative assets resolve', async () => {
-    // Without this, the browser resolves ./swagger-ui-bundle.js against /api/ and the page
-    // renders empty. fetch() follows redirects by default, so the redirect is opted out of
-    // rather than asserted after the fact.
     const res = await fetch(`${server.base}/api/docs`, { redirect: 'manual' });
 
     assert.equal(res.status, 301);
@@ -43,21 +40,15 @@ describe('GET /api/docs', () => {
     assert.match(page.text, /<div id="swagger-ui">/);
     assert.match(page.text, /swagger-ui-bundle\.js/);
 
-    // The asset that the default CSP and a missing trailing slash both break, fetched the
-    // way the page fetches it.
     const bundle = await server.get('/api/docs/swagger-ui-bundle.js');
     assert.equal(bundle.status, 200);
   });
 
   test('relaxes the script CSP for this subtree only', async () => {
-    // Swagger UI bootstraps from an inline script; helmet's default script-src is 'self'
-    // with no 'unsafe-inline', under which the page loads and then does nothing at all.
     const docs = await server.get('/api/docs/');
     assert.match(docs.headers.get('content-security-policy'), /script-src[^;]*'unsafe-inline'/);
-    // Still helmet, not helmet switched off.
     assert.equal(docs.headers.get('x-content-type-options'), 'nosniff');
 
-    // And the relaxation did not leak onto the rest of the API.
     const root = await server.get('/');
     assert.doesNotMatch(
       root.headers.get('content-security-policy'),
@@ -66,18 +57,11 @@ describe('GET /api/docs', () => {
   });
 });
 
-// The reason src/swagger.js is a module and not a pile of JSDoc comments: a hand-written
-// document drifts, and this is the check that makes the drift a test failure instead of a
-// surprise for whoever is writing the frontend.
 describe('the OpenAPI document covers what is mounted', () => {
   const document = buildOpenApiDocument();
 
-  // Walk the routers the app actually mounts and rebuild the URL Express serves each route
-  // at, in OpenAPI's notation: Express writes a parameter as :id, OpenAPI as {id}.
   const mounted = [];
   for (const [name, router] of Object.entries(ROUTERS)) {
-    // The docs router describes every other route; describing itself as well would be
-    // noise in the page for no reader's benefit.
     if (name === 'docs') continue;
 
     for (const layer of router.stack) {
@@ -93,8 +77,6 @@ describe('the OpenAPI document covers what is mounted', () => {
   }
 
   test('finds routes to check', () => {
-    // Guards the two loops above: if Express changes its internals, every case below would
-    // pass vacuously on an empty list.
     assert.ok(mounted.length >= 6, `only found ${mounted.length} mounted routes`);
   });
 
@@ -107,8 +89,6 @@ describe('the OpenAPI document covers what is mounted', () => {
   }
 
   test('documents nothing that is not mounted', () => {
-    // '/' is on the app rather than in ROUTERS, so it is the one legitimate entry the walk
-    // above cannot see.
     const served = new Set([...mounted.map((r) => `${r.method} ${r.path}`), 'get /']);
 
     for (const [path, item] of Object.entries(document.paths)) {
@@ -122,8 +102,6 @@ describe('the OpenAPI document covers what is mounted', () => {
   });
 
   test('every $ref resolves', () => {
-    // A typo in a $ref is not a parse error: Swagger UI renders the operation with an
-    // empty schema and says nothing, which is worse than a broken page.
     const refs = new Set();
     (function collect(node) {
       if (Array.isArray(node)) return node.forEach(collect);
@@ -146,9 +124,6 @@ describe('the OpenAPI document covers what is mounted', () => {
   });
 
   test('every operation states its authentication', () => {
-    // The document-level `security` locks everything by default, so a public route has to
-    // say `security: []`. That is deliberate -- the failure mode of the opposite default
-    // is a guarded route documented as public, which a frontend then calls without a token.
     for (const [path, item] of Object.entries(document.paths)) {
       for (const [method, operation] of Object.entries(item)) {
         assert.ok(

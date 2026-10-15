@@ -19,6 +19,7 @@
 // not, and nothing reconciles them. Acceptable while the audited tables are users, areas
 // and roles; NOT obviously acceptable for FIN, where the shape that cannot lose a row is a
 // data-modifying CTE writing `logs` in the same statement as the change.
+
 /** Reports a subscriber failure to stderr with the event that caused it. */
 function report(name, event, err) {
   console.error(

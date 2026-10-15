@@ -1,14 +1,14 @@
-import { test, describe } from "node:test";
-import assert from "node:assert/strict";
-
-import { validateColumnMap, applyMapping, rowHash } from "../src/utils/columnMap.js";
-
 // Pure: no server, no database, no Graph.
 //
 // The headers and the first row come from the real tracker (`FORMATO DE SOLICITUD 002 HOJA
 // MEMBRETADA`), read with `npm run sheets:probe -- 1`. That is why the awkward parts are here:
 // a header with a trailing colon, a header Forms suffixed with `1`, a date that arrives as the
 // serial 46030.4107 and a quantity that arrives empty.
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+
+import { validateColumnMap, applyMapping, rowHash } from "../src/utils/columnMap.js";
+
 const HEADERS = [
   "Id",
   "Hora de inicio",
@@ -170,7 +170,6 @@ describe("validateColumnMap()", () => {
   });
 
   test("without headers the column names are not checked", () => {
-    // What the wizard does before it has read the book.
     const { errors } = validateColumnMap(
       withFields({ tipo_papel: { op: "column", column: "Una columna cualquiera" } }),
       FIELDS,
@@ -269,8 +268,21 @@ describe("applyMapping()", () => {
     blank[5] = "";
     const out = apply(MAP, blank, TEXTS);
 
-    assert.deepEqual(out.errors.map((e) => e.key), ["title", "tipo_papel"]);
+    assert.deepEqual(out.errors.map((e) => e.key), ["title"]);
     assert.match(out.errors[0].message, /nothing to use as a title/);
+  });
+
+  test("a required field the sheet left empty comes in missing, it does not stop the row", () => {
+    const blank = [...ROW];
+    blank[5] = "";
+    const out = apply(MAP, blank, TEXTS);
+
+    assert.deepEqual(out.missingRequired, ["tipo_papel"]);
+    assert.ok(
+      out.warnings.some((w) => w.key === "tipo_papel" && /comes in missing/.test(w.message)),
+      "it is said as a warning, not as a refusal",
+    );
+    assert.equal(out.data.tipo_papel, undefined, "nothing is invented for it");
   });
 
   test("a required field that will not coerce stops the row; an optional one warns", () => {
@@ -391,9 +403,6 @@ describe("rowHash()", () => {
   });
 
   test("column order does not change the hash", () => {
-    // The sheet gets reordered; the map names columns by header, so the identity holds. The two
-    // swapped columns are moved, not copied -- duplicating a header is a different case, and the
-    // map refuses it.
     const order = [1, 0, ...HEADERS.map((_, index) => index).slice(2)];
     const swapped = order.map((index) => HEADERS[index]);
     const swappedRow = order.map((index) => ROW[index]);
@@ -403,8 +412,6 @@ describe("rowHash()", () => {
   });
 
   test("two columns cannot be confused for one", () => {
-    // Straight at rowHash with a bare map: this is about the separator between the parts, and
-    // running it through a whole format's validation would only be a way to get it wrong.
     const map = { hashColumns: ["a", "b"] };
     const headers = ["a", "b"];
 

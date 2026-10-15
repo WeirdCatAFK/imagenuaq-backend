@@ -15,6 +15,21 @@
 // connection up to orchestration, which is what this module exists to prevent.
 import { getStore } from "../primitives/database.js";
 
+/**
+ * A project stage as everything above this tier reads it: the execution row joined to its
+ * definition, with the definition's columns under the names project_stages carried before the
+ * flow-templates migration split them. `seq` is the phase; `position` is the order within it.
+ */
+const STAGE_COLUMNS = `
+  ps.*, fp.project_id, fs.area_id, fs.title, fp.seq, fs.seq as position,
+  fs.input_keys as inputs, fs.output_keys as outputs, fs.input_note, fs.output_note,
+  fs.estimated_days, fp.id as phase_id, fp.name as phase_name, a.name as area_name`;
+const STAGE_FROM = `
+  project_stages ps
+  join flow_stages fs on fs.id = ps.flow_stage_id
+  join flow_phases fp on fp.id = fs.phase_id
+  join areas a on a.id = fs.area_id`;
+
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
@@ -28,21 +43,14 @@ class Query {
    *
    * @param {Array} ids
    */
-  // An empty JS array serialises as '' and Postgres refuses it as an array literal, so an
-  // empty list becomes NULL: `= any(NULL)` matches nothing and `unnest(NULL)` yields no rows,
-  // which is what every caller means by "none".
   #idArray(ids) {
     return ids.length ? ids : null;
   }
-
-  // --- Health ---
 
   async ping() {
     const [row] = await this.#rows("select 1 as ok");
     return row?.ok === 1;
   }
-
-  // --- Auth ---
 
   /**
    * One live user with the role name joined in: everything a session token needs, in a
@@ -129,8 +137,6 @@ class Query {
     return rows.map((row) => row.code);
   }
 
-  // --- Users ---
-
   /**
    * Creates a user and, when an area is given, their `area_members` row, in one
    * data-modifying CTE. Writes no password hash: the account is reached through the
@@ -147,7 +153,6 @@ class Query {
     birthday = null,
     isAreaLeader = false,
   }) {
-    // The ::bigint casts are required; Postgres cannot infer $5's type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into users (email, full_name, role_id, contract_type_id,
@@ -287,10 +292,6 @@ class Query {
   /**
    * Soft-deletes an account and revokes its outstanding sessions in the same statement.
    *
-   * The bump belongs here rather than in a second call: between two statements there is a
-   * window where the account is gone and its token still works, which is the exact hole
-   * this column was added to close.
-   *
    * @returns {Promise<object | null>} The deleted row, or null if it was already gone.
    */
   async deleteUser(userId) {
@@ -304,7 +305,6 @@ class Query {
     );
     return row ?? null;
   }
-  // --- User Helpers ---
 
   /**
    * Stores a profile picture and its type, or clears both when `data` is null.
@@ -442,7 +442,6 @@ class Query {
     );
     return row?.id ?? null;
   }
-  // --- Audit trail (RF-USR-07) ---
 
   /**
    * The whole action catalogue. Callers cache it; codes are stable, ids are per database.
@@ -530,8 +529,6 @@ class Query {
     return rows;
   }
 
-  // --- Areas ---
-
   /**
    * Creates an area and, when given, its first leader and its parent, in one
    * data-modifying CTE -- the same shape as createUser(). Neither side write can be left
@@ -545,7 +542,6 @@ class Query {
    * @returns {Promise<object>} The area row plus `parent_area_id` as written.
    */
   async createArea({ name, description, userId = null, parentAreaId = null }) {
-    // The ::bigint casts are required; Postgres cannot infer a type from `is not null`.
     const [row] = await this.#rows(
       `with created as (
          insert into areas (name, description)
@@ -602,8 +598,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  // --- Area Helpers ---
 
   async getAreaById(areaId) {
     const [row] = await this.#rows(
@@ -732,8 +726,6 @@ class Query {
     return rows;
   }
 
-  // --- Area hierarchy (RF-USR-09, RF-USR-04) ---
-
   /** Upserts the child's parent. `child_area_id` is the whole key: one parent per area. */
   async setAreaParent(childAreaId, parentAreaId) {
     const [row] = await this.#rows(
@@ -821,8 +813,6 @@ class Query {
     );
     return rows;
   }
-
-  // --- Roles & Permissions ---
 
   async createRole({ name, description }) {
     const [row] = await this.#rows(
@@ -952,8 +942,6 @@ class Query {
     return row ?? null;
   }
 
-  // --- Role & Permission helpers ---
-
   /** One role's grants as full rows; getRolePermissionCodes() is the codes-only version. */
   async getRolePermissions(roleId) {
     const rows = await this.#rows(
@@ -1002,8 +990,6 @@ class Query {
    */
   async setRolePermissions(roleId, permissionIds) {
     const rows = await this.#rows(
-      // coalesce is repeated rather than hoisted: `<> all (select ...)` would compare
-      // bigint to bigint[].
       `with revoked as (
          delete from role_permissions
           where role_id = $1
@@ -1024,8 +1010,6 @@ class Query {
     );
     return rows;
   }
-
-  //--- REQUESTS (RF-SOL-03) ---
 
   /**
    * A request. `folio` comes from the sequence, never from the caller (RF-SOL-03). A 23505 on
@@ -1072,7 +1056,9 @@ class Query {
         c.full_name as created_by_name,
         p.key as project_key, p.title as project_title,
         sh.name as sheet_name,
-        d.folio as duplicate_of_folio
+        d.folio as duplicate_of_folio,
+        wv.version as flow_version, w.id as flow_workflow_id, w.name as flow_workflow_name,
+        ${this.#phasesJson('r.id', 'request_id')} as flow_phases
       from requests r
       join schema_versions v on v.id = r.schema_version_id
       join schemas sc on sc.id = v.schema_id
@@ -1083,6 +1069,8 @@ class Query {
       left join projects p on p.id = r.project_id
       left join sheets sh on sh.id = r.sheet_id
       left join requests d on d.id = r.possible_duplicate_of
+      left join workflow_versions wv on wv.id = r.workflow_version_id
+      left join workflows w on w.id = wv.workflow_id
       where r.id = $1 and r.deleted_at is null`,
       [requestId],
     );
@@ -1096,7 +1084,7 @@ class Query {
   async listRequests({
     areaId = null, statusId = null, assigneeId = null, requester = null, sheetId = null,
     schemaId = null, q = null, converted = null, duplicates = null, source = null,
-    sort = 'priority', limit = 50, offset = 0,
+    routed = null, sort = 'priority', limit = 50, offset = 0,
   } = {}) {
     return this.#rows(
       `select
@@ -1111,7 +1099,24 @@ class Query {
         a.name as area_name,
         u.full_name as assignee_name,
         sc.code as schema_code, sc.name as schema_name,
-        p.key as project_key
+        p.key as project_key,
+        exists (select 1 from flow_phases fp where fp.request_id = r.id) as has_flow,
+        -- Cuántos campos obligatorios de su formato siguen sin valor. Una fila importada de un
+        -- concentrador puede entrar incompleta a propósito (§2.16): lo que se niega es volverla
+        -- proyecto, no que exista, así que la bandeja tiene que poder decir cuántas lo están.
+        (select count(*)::int
+           from jsonb_array_elements(
+                  coalesce(v.fields->'deliverables', '[]'::jsonb)
+                  || coalesce(v.fields->'information', '[]'::jsonb)) f
+          where coalesce((f->>'required')::boolean, false)
+            and nullif(r.data->>(f->>'code'), '') is null) as missing_required,
+        (select coalesce(json_agg(distinct fa.name), '[]'::json)
+          from flow_phases fp
+          join flow_stages fs on fs.phase_id = fp.id
+          join areas fa on fa.id = fs.area_id
+          where fp.request_id = r.id
+            and fp.seq = (select min(seq) from flow_phases where request_id = r.id))
+          as first_phase_areas
       from requests r
       join schema_versions v on v.id = r.schema_version_id
       join schemas sc on sc.id = v.schema_id
@@ -1120,11 +1125,18 @@ class Query {
       left join users u on u.id = r.assignee_id
       left join projects p on p.id = r.project_id
       where r.deleted_at is null
-        -- -1 is "no area at all": an imported row arrives unrouted and somebody triages it, so
-        -- the inbox has to be able to ask for exactly those.
+        -- An area's inbox holds what was routed to it by hand and what has it in the first
+        -- phase of its flow (DATAMODEL §2.5). -1 is "not routed at all": no area and no flow,
+        -- which is how an imported row arrives and what somebody has to triage.
         and ($1::bigint is null
-             or ($1::bigint = -1 and r.area_id is null)
-             or r.area_id = $1::bigint)
+             or ($1::bigint = -1 and r.area_id is null
+                 and not exists (select 1 from flow_phases fp where fp.request_id = r.id))
+             or r.area_id = $1::bigint
+             or exists (
+               select 1 from flow_phases fp
+               join flow_stages fs on fs.phase_id = fp.id
+               where fp.request_id = r.id and fs.area_id = $1::bigint
+                 and fp.seq = (select min(seq) from flow_phases where request_id = r.id)))
         and ($2::bigint is null or r.status_id = $2::bigint)
         and ($3::bigint is null or r.assignee_id = $3::bigint)
         and ($4::text is null or lower(r.requester) = lower($4))
@@ -1138,13 +1150,19 @@ class Query {
              or ($9::boolean and r.possible_duplicate_of is not null)
              or (not $9::boolean and r.possible_duplicate_of is null))
         and ($10::text is null or r.source = $10::text)
+        -- Routed is the step the inbox tabs split on: a request nobody has yet (no area and
+        -- no flow) against one an area already holds. The negative case is the same condition
+        -- as areaId -1, so one of the two filters is enough.
+        and ($11::boolean is null
+             or ($11::boolean = (r.area_id is not null
+                 or exists (select 1 from flow_phases fp where fp.request_id = r.id))))
       order by
-        case when $11::text = 'priority' then r.priority end desc nulls last,
+        case when $12::text = 'priority' then r.priority end desc nulls last,
         r.created_at desc, r.id desc
-      limit $12 offset $13`,
+      limit $13 offset $14`,
       [
         areaId, statusId, assigneeId, requester, sheetId, schemaId, q,
-        converted, duplicates, source, sort, limit, offset,
+        converted, duplicates, source, routed, sort, limit, offset,
       ],
     );
   }
@@ -1220,9 +1238,6 @@ class Query {
 
   /** Every hash already taken from a book, so an import can skip what it has seen. */
   async listSourceHashes(sheetId) {
-    // Las dos formas de conocer una fila: tener su solicitud, o haberla marcado como ya vista sin
-    // importarla (`sheet_row_marks`). La importación las trata igual --- se saltan ---, que es
-    // justamente lo que hace utilizable un rastreador que ya traía historia.
     const rows = await this.#rows(
       `select source_hash from requests
         where sheet_id = $1 and source_hash is not null and deleted_at is null
@@ -1268,34 +1283,29 @@ class Query {
     return row?.n ?? 0;
   }
 
-  //--- PROJECTS (RF-PRY-02) ---
-
   /**
    * A project, the requests it converts, its first field values and its first stages, in one
    * statement. `key` omitted takes the sequence default.
-   *
-   * The requests update returns its own count so orchestration can tell "linked three" from
-   * "one of them was already converted" without a second read; a partial link is impossible
-   * because it is the same statement.
    */
   async createProject({
     key = null, title, description = null, requester = null, schemaVersionId = null,
     statusId, priority = 0, hasCost = false, carriedOver = false,
     startsOn = null, dueOn = null, folderId = null, eventCollectionId = null, createdBy = null,
     requestIds = [], fieldValues = [], stages = [],
+    flowRequestId = null, discardFlowRequestIds = [], workflowVersionId = null,
   }) {
     const [row] = await this.#rows(
       `with created as (
         insert into projects (
           key, title, description, requester, schema_version_id, status_id,
           priority, has_cost, carried_over, starts_on, due_on,
-          folder_id, event_collection_id, created_by
+          folder_id, event_collection_id, created_by, workflow_version_id
         )
         values (
           coalesce($1, 'PRY-' || to_char(nextval('projects_key_seq'), 'FM000000')),
           $2, $3, $4, $5::bigint, $6,
           $7, $8, $9, $10::date, $11::date,
-          $12::bigint, $13::bigint, $14::bigint
+          $12::bigint, $13::bigint, $14::bigint, $31::bigint
         )
         returning *
       ),
@@ -1312,24 +1322,91 @@ class Query {
         from created, unnest($16::text[], $17::text[]) as v(key, value)
         returning 1
       ),
-      stages_inserted as (
-        insert into project_stages (
-          project_id, area_id, title, seq, status, started_at, assigned_to, inputs, outputs
+      stage_input as (
+        select * from unnest(
+          $18::bigint[], $19::text[], $20::int[], $21::int[], $22::text[], $23::text[],
+          $24::text[], $25::text[], $26::text[], $27::text[], $28::text[]
+        ) as st(
+          area_id, title, seq, position, status, assigned_to,
+          inputs, outputs, input_note, output_note, estimated_days
+        )
+      ),
+      phases_inserted as (
+        insert into flow_phases (project_id, seq, name)
+        select distinct created.id, si.seq, 'Fase ' || si.seq
+        from created, stage_input si
+        returning id, seq
+      ),
+      definitions_inserted as (
+        insert into flow_stages (
+          phase_id, seq, area_id, title, input_keys, output_keys,
+          input_note, output_note, estimated_days
         )
         select
-          created.id, st.area_id, st.title, st.seq, st.status,
-          case when st.status = 'active' then current_timestamp end,
-          nullif(st.assigned_to, '')::bigint,
-          st.inputs::jsonb, st.outputs::jsonb
-        from created, unnest(
-          $18::bigint[], $19::text[], $20::int[], $21::text[], $22::text[], $23::text[], $24::text[]
-        ) as st(area_id, title, seq, status, assigned_to, inputs, outputs)
+          ph.id, si.position, si.area_id, si.title, si.inputs::jsonb, si.outputs::jsonb,
+          nullif(si.input_note, ''), nullif(si.output_note, ''),
+          nullif(si.estimated_days, '')::int
+        from stage_input si
+        join phases_inserted ph on ph.seq = si.seq
+        returning id, phase_id, seq
+      ),
+      stages_inserted as (
+        insert into project_stages (flow_stage_id, status, started_at, assigned_to)
+        select
+          d.id, si.status,
+          case when si.status = 'active' then current_timestamp end,
+          nullif(si.assigned_to, '')::bigint
+        from stage_input si
+        join phases_inserted ph on ph.seq = si.seq
+        join definitions_inserted d on d.phase_id = ph.id and d.seq = si.position
         returning 1
+      ),
+      all_linked as (
+        select (select count(*) from linked) = coalesce(cardinality($15::bigint[]), 0) as ok
+      ),
+      moved_phases as (
+        update flow_phases fp
+          set request_id = null, project_id = created.id
+        from created, all_linked
+        where fp.request_id = $29::bigint and all_linked.ok
+        returning fp.id, fp.seq
+      ),
+      moved_first as (
+        select min(seq) as seq from moved_phases
+      ),
+      moved_executions as (
+        insert into project_stages (flow_stage_id, status, started_at, assigned_to)
+        select
+          fs.id,
+          case when mp.seq = mf.seq then 'active' else 'pending' end,
+          case when mp.seq = mf.seq then current_timestamp end,
+          case when exists (
+            select 1 from area_members m
+            join users u on u.id = m.user_id
+            where m.area_id = fs.area_id and m.user_id = fs.default_assignee_id
+              and u.deleted_at is null
+          ) then fs.default_assignee_id end
+        from moved_phases mp
+        cross join moved_first mf
+        join flow_stages fs on fs.phase_id = mp.id
+        returning 1
+      ),
+      moved_unsuggested as (
+        update flow_stages set default_assignee_id = null
+        where phase_id in (select id from moved_phases) and default_assignee_id is not null
+        returning 1
+      ),
+      discarded_flows as (
+        delete from flow_phases
+        where request_id = any(coalesce($30::bigint[], '{}'::bigint[]))
+          and (select ok from all_linked)
+        returning request_id
       )
       select
         created.*,
         (select count(*) from linked)::int as linked_count,
-        (select count(*) from stages_inserted)::int as stage_count
+        ((select count(*) from stages_inserted) + (select count(*) from moved_executions))::int
+          as stage_count
       from created`,
       [
         key, title, description, requester, schemaVersionId, statusId,
@@ -1341,12 +1418,17 @@ class Query {
         this.#idArray(stages.map((st) => st.areaId)),
         this.#idArray(stages.map((st) => st.title)),
         this.#idArray(stages.map((st) => st.seq)),
+        this.#idArray(stages.map((st) => st.position)),
         this.#idArray(stages.map((st) => st.status)),
-        // postgrejs infers a param's type from its values and cannot type an all-null array,
-        // so "nobody" travels as '' and comes back to NULL in the statement.
         this.#idArray(stages.map((st) => (st.assignedTo == null ? '' : String(st.assignedTo)))),
         this.#idArray(stages.map((st) => JSON.stringify(st.inputs ?? []))),
         this.#idArray(stages.map((st) => JSON.stringify(st.outputs ?? []))),
+        this.#idArray(stages.map((st) => st.inputNote ?? '')),
+        this.#idArray(stages.map((st) => st.outputNote ?? '')),
+        this.#idArray(stages.map((st) => (st.estimatedDays == null ? '' : String(st.estimatedDays)))),
+        flowRequestId,
+        this.#idArray(discardFlowRequestIds),
+        workflowVersionId,
       ],
     );
 
@@ -1367,21 +1449,25 @@ class Query {
       join statuses s on s.id = p.status_id
       left join users u on u.id = p.created_by
       left join lateral (
-        select json_agg(stage order by stage_seq, stage_attempt, stage_id) as list
+        select json_agg(stage order by phase_seq, stage_position, stage_attempt, stage_id) as list
         from (
           select
-            ps.id as stage_id, ps.seq as stage_seq, ps.attempt as stage_attempt,
+            ps.id as stage_id, fp.seq as phase_seq, fs.seq as stage_position,
+            ps.attempt as stage_attempt,
             json_build_object(
-              'id', ps.id, 'areaId', ps.area_id, 'areaName', a.name, 'title', ps.title,
-              'seq', ps.seq, 'attempt', ps.attempt, 'status', ps.status,
+              'id', ps.id, 'flowStageId', ps.flow_stage_id, 'phaseId', fp.id,
+              'phaseName', fp.name, 'seq', fp.seq, 'position', fs.seq,
+              'areaId', fs.area_id, 'areaName', a.name, 'title', fs.title,
+              'attempt', ps.attempt, 'status', ps.status,
               'blockedReason', ps.blocked_reason, 'assignedTo', ps.assigned_to,
               'assignedToName', au.full_name, 'eventId', ps.event_id,
               'startedAt', ps.started_at, 'endedAt', ps.ended_at, 'createdAt', ps.created_at,
-              'inputs', ps.inputs, 'outputs', ps.outputs,
+              'inputs', fs.input_keys, 'outputs', fs.output_keys,
+              'inputNote', fs.input_note, 'outputNote', fs.output_note,
+              'estimatedDays', fs.estimated_days,
               'approvals', coalesce(ap.list, '[]'::json)
             ) as stage
-          from project_stages ps
-          join areas a on a.id = ps.area_id
+          from ${STAGE_FROM}
           left join users au on au.id = ps.assigned_to
           left join lateral (
             select json_agg(json_build_object(
@@ -1393,7 +1479,7 @@ class Query {
             left join users vu on vu.id = v.approver_user_id
             where v.project_stage_id = ps.id
           ) ap on true
-          where ps.project_id = p.id
+          where fp.project_id = p.id
         ) ordered
       ) stages on true
       left join lateral (
@@ -1426,20 +1512,35 @@ class Query {
   async listProjects({
     q = null, statusId = null, areaId = null, requester = null,
     hasCost = null, carriedOver = null, state = 'open',
-    fieldKey = null, fieldValue = null, assignedTo = null,
+    fieldKey = null, fieldValue = null, assignedTo = null, viewerId = null, mine = false,
     sort = 'priority', limit = 50, offset = 0,
   } = {}) {
     return this.#rows(
       `select
         p.id, p.key, p.title, p.requester, p.status_id, p.status_since, p.priority,
         p.has_cost, p.carried_over, p.starts_on, p.due_on,
-        p.closed_at, p.archived_at, p.created_at,
+        p.closed_at, p.archived_at, p.created_at, p.created_by,
+        count(*) over () as total,
         s.code as status_code, s.label as status_label,
-        (select count(*) from project_stages ps
-          where ps.project_id = p.id and ps.status in ('active', 'waiting_external'))::int
+        (select count(*) from ${STAGE_FROM}
+          where fp.project_id = p.id and ps.status in ('active', 'waiting_external'))::int
           as open_stage_count,
+        -- The board says where a project is by naming its open stages, not by counting them:
+        -- "Diseño gráfico - Propuesta" is what somebody can act on, a 2 is not.
+        (select coalesce(json_agg(json_build_object(
+            'id', ps.id, 'areaName', a.name, 'title', fs.title, 'status', ps.status
+          ) order by fp.seq, fs.seq), '[]'::json)
+          from ${STAGE_FROM}
+          where fp.project_id = p.id and ps.status in ('active', 'waiting_external'))
+          as open_stages,
         (select count(*) from requests r
-          where r.project_id = p.id and r.deleted_at is null)::int as request_count
+          where r.project_id = p.id and r.deleted_at is null)::int as request_count,
+        -- What the viewer has a part in, said per row so the board can mark it: a project they
+        -- created, or one where a stage is theirs. Being in the area is not a part in it.
+        ($11::bigint is not null and p.created_by = $11::bigint) as mine_created,
+        ($11::bigint is not null and exists (
+          select 1 from ${STAGE_FROM}
+          where fp.project_id = p.id and ps.assigned_to = $11::bigint)) as mine_responsible
       from projects p
       join statuses s on s.id = p.status_id
       where p.deleted_at is null
@@ -1452,8 +1553,9 @@ class Query {
         and ($1::text is null or p.title ilike '%' || $1 || '%' or p.key ilike $1 || '%')
         and ($2::bigint is null or p.status_id = $2::bigint)
         and ($3::bigint is null or exists (
-              select 1 from project_stages ps
-              where ps.project_id = p.id and ps.area_id = $3::bigint))
+              select 1 from flow_phases fp
+              join flow_stages fs on fs.phase_id = fp.id
+              where fp.project_id = p.id and fs.area_id = $3::bigint))
         and ($4::text is null or lower(p.requester) = lower($4))
         and ($5::boolean is null or p.has_cost = $5::boolean)
         and ($6::boolean is null or p.carried_over = $6::boolean)
@@ -1462,16 +1564,21 @@ class Query {
               where f.project_id = p.id and f.key = $8::text
                 and ($9::text is null or f.value = $9::text)))
         and ($10::bigint is null or exists (
-              select 1 from project_stages ps
-              where ps.project_id = p.id and ps.assigned_to = $10::bigint))
+              select 1 from ${STAGE_FROM}
+              where fp.project_id = p.id and ps.assigned_to = $10::bigint))
+        and (not $12::boolean
+             or p.created_by = $11::bigint
+             or exists (
+               select 1 from ${STAGE_FROM}
+               where fp.project_id = p.id and ps.assigned_to = $11::bigint))
       order by
-        case when $11::text = 'priority' then p.priority end desc nulls last,
-        case when $11::text = 'due' then p.due_on end asc nulls last,
+        case when $13::text = 'priority' then p.priority end desc nulls last,
+        case when $13::text = 'due' then p.due_on end asc nulls last,
         p.created_at desc, p.id desc
-      limit $12 offset $13`,
+      limit $14 offset $15`,
       [
         q, statusId, areaId, requester, hasCost, carriedOver, state,
-        fieldKey, fieldValue, assignedTo, sort, limit, offset,
+        fieldKey, fieldValue, assignedTo, viewerId, mine, sort, limit, offset,
       ],
     );
   }
@@ -1546,30 +1653,60 @@ class Query {
     );
   }
 
-  //--- PROJECT STAGES (RF-FLW-01) ---
-
-  async createProjectStage({
-    projectId, areaId, title, seq = 1, status = 'pending', assignedTo = null,
-    blockedReason = null, attempt = null, inputs = [], outputs = [],
+  /**
+   * Adds a stage to a project: its phase (created as `Fase <seq>` when the project has none at
+   * that seq), its definition at the end of that phase, and its first attempt, in one
+   * statement. Returns the three rows so orchestration can audit each; `phase` is null when
+   * the phase already existed.
+   *
+   * @returns {Promise<{ stage: object, definition: object, phase: object|null }>}
+   */
+  async addProjectStage({
+    projectId, seq = 1, areaId, title, status = 'pending', assignedTo = null,
+    inputs = [], outputs = [], inputNote = null, outputNote = null, estimatedDays = null,
   }) {
     const [row] = await this.#rows(
-      `insert into project_stages (
-        project_id, area_id, title, seq, attempt, status, blocked_reason, assigned_to,
-        started_at, inputs, outputs
+      `with phase_existing as (
+        select id from flow_phases where project_id = $1 and seq = $2::int
+      ),
+      phase_new as (
+        insert into flow_phases (project_id, seq, name)
+        select $1, $2::int, 'Fase ' || $2::int
+        where not exists (select 1 from phase_existing)
+        returning *
+      ),
+      phase as (
+        select id from phase_existing
+        union all
+        select id from phase_new
+      ),
+      definition as (
+        insert into flow_stages (
+          phase_id, seq, area_id, title, input_keys, output_keys,
+          input_note, output_note, estimated_days
+        )
+        select
+          phase.id,
+          coalesce((select max(fs.seq) from flow_stages fs where fs.phase_id = phase.id), 0) + 1,
+          $3, $4, $5::jsonb, $6::jsonb, $7::text, $8::text, $9::int
+        from phase
+        returning *
+      ),
+      execution as (
+        insert into project_stages (flow_stage_id, attempt, status, assigned_to, started_at)
+        select definition.id, 1, $10, $11::bigint,
+          case when $10 = 'active' then current_timestamp end
+        from definition
+        returning *
       )
       select
-        $1, $2, $3, $4,
-        coalesce($8::int, (
-          select coalesce(max(attempt), 0) + 1 from project_stages
-          where project_id = $1 and area_id = $2 and seq = $4
-        )),
-        $5, $6, $7::bigint,
-        case when $5 = 'active' then current_timestamp end,
-        $9::jsonb, $10::jsonb
-      returning *`,
+        to_json(execution.*) as stage,
+        to_json(definition.*) as definition,
+        (select to_json(phase_new.*) from phase_new) as phase
+      from execution, definition`,
       [
-        projectId, areaId, title, seq, status, blockedReason, assignedTo, attempt,
-        JSON.stringify(inputs), JSON.stringify(outputs),
+        projectId, seq, areaId, title, JSON.stringify(inputs), JSON.stringify(outputs),
+        inputNote, outputNote, estimatedDays, status, assignedTo,
       ],
     );
     return row;
@@ -1577,10 +1714,9 @@ class Query {
 
   async getProjectStage(stageId) {
     const [row] = await this.#rows(
-      `select ps.*, a.name as area_name, p.deleted_at as project_deleted_at
-      from project_stages ps
-      join areas a on a.id = ps.area_id
-      join projects p on p.id = ps.project_id
+      `select ${STAGE_COLUMNS}, p.deleted_at as project_deleted_at
+      from ${STAGE_FROM}
+      join projects p on p.id = fp.project_id
       where ps.id = $1`,
       [stageId],
     );
@@ -1589,65 +1725,86 @@ class Query {
 
   async listProjectStages(projectId) {
     return this.#rows(
-      `select ps.*, a.name as area_name, u.full_name as assigned_to_name
-      from project_stages ps
-      join areas a on a.id = ps.area_id
+      `select ${STAGE_COLUMNS}, u.full_name as assigned_to_name
+      from ${STAGE_FROM}
       left join users u on u.id = ps.assigned_to
-      where ps.project_id = $1
-      order by ps.seq, ps.attempt, ps.id`,
+      where fp.project_id = $1
+      order by fp.seq, fs.seq, ps.attempt, ps.id`,
       [projectId],
     );
   }
 
   /**
-   * `started_at` is stamped the first time a stage becomes active and `ended_at` when it
-   * leaves the flow, both here rather than in orchestration so a status change cannot forget
-   * its timestamp.
+   * Updates a stage's definition and its execution in one statement. The definition is
+   * shared by every attempt, so a retitle or a new output reaches the history too; the
+   * execution columns belong to this attempt alone.
+   *
+   * @returns {Promise<{ stage: object, definition: object|null }|null>}
    */
   async updateProjectStage(stageId, {
     title = null, status = null, blockedReason = null, assignedTo = null, clearBlocked = false,
     inputs = null, outputs = null,
+    inputNote, outputNote, estimatedDays,
   }) {
+    const definitionChanged =
+      title !== null || inputs !== null || outputs !== null ||
+      inputNote !== undefined || outputNote !== undefined || estimatedDays !== undefined;
+
     const [row] = await this.#rows(
-      `update project_stages set
-        inputs         = coalesce($7::jsonb, inputs),
-        outputs        = coalesce($8::jsonb, outputs),
-        title          = coalesce($2, title),
-        status         = coalesce($3, status),
-        blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
-        assigned_to    = coalesce($5::bigint, assigned_to),
-        started_at     = case
-                           when started_at is null and coalesce($3, status) = 'active'
-                           then current_timestamp else started_at
-                         end,
-        ended_at       = case
-                           when coalesce($3, status) in ('done', 'cancelled')
-                           then coalesce(ended_at, current_timestamp)
-                           else ended_at
-                         end
-      where id = $1
-      returning *`,
+      `with definition as (
+        update flow_stages set
+          title          = coalesce($2, title),
+          input_keys     = coalesce($7::jsonb, input_keys),
+          output_keys    = coalesce($8::jsonb, output_keys),
+          input_note     = case when $9::boolean then $10::text else input_note end,
+          output_note    = case when $11::boolean then $12::text else output_note end,
+          estimated_days = case when $13::boolean then $14::int else estimated_days end
+        where $15::boolean
+          and id = (select flow_stage_id from project_stages where id = $1)
+        returning *
+      ),
+      execution as (
+        update project_stages set
+          status         = coalesce($3, status),
+          blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
+          assigned_to    = coalesce($5::bigint, assigned_to),
+          started_at     = case
+                             when started_at is null and coalesce($3, status) = 'active'
+                             then current_timestamp else started_at
+                           end,
+          ended_at       = case
+                             when coalesce($3, status) in ('done', 'cancelled')
+                             then coalesce(ended_at, current_timestamp)
+                             else ended_at
+                           end
+        where id = $1
+        returning *
+      )
+      select
+        to_json(execution.*) as stage,
+        (select to_json(definition.*) from definition) as definition
+      from execution`,
       [
         stageId, title, status, blockedReason, assignedTo, clearBlocked,
         inputs === null ? null : JSON.stringify(inputs),
         outputs === null ? null : JSON.stringify(outputs),
+        inputNote !== undefined, inputNote ?? null,
+        outputNote !== undefined, outputNote ?? null,
+        estimatedDays !== undefined, estimatedDays ?? null,
+        definitionChanged,
       ],
     );
     return row ?? null;
   }
 
   /**
-   * Closes a stage and opens its follow-ups in one statement: a rejection that reruns the
-   * stage, or -- once E lands -- the targets of the transitions out of it. Each follow-up
-   * takes `attempt = max + 1` for its own (project, area, seq), which is what the unique
-   * index counts, so two callers racing collide on the index instead of on each other.
+   * Closes a stage and opens what follows it, in one statement.
    *
    * @param {number} stageId
-   * @param {{ status?: string, nextStages?: {areaId:number,title:string,seq:number,
-   *   assignedTo?:number|null}[] }} input
-   * @returns {Promise<{ stage: object, opened: object[] }>}
+   * @param {{ status?: string, rerun?: boolean }} input
+   * @returns {Promise<{ stage: object, reopened: object[], opened: object[] }>}
    */
-  async advanceStage(stageId, { status = 'done', nextStages = [] } = {}) {
+  async advanceStage(stageId, { status = 'done', rerun = false } = {}) {
     const rows = await this.#rows(
       `with closed as (
         update project_stages
@@ -1655,45 +1812,64 @@ class Query {
         where id = $1
         returning *
       ),
-      opened as (
-        insert into project_stages (
-          project_id, area_id, title, seq, attempt, status, assigned_to, started_at,
-          inputs, outputs
-        )
+      place as (
+        select fs.phase_id, fp.project_id, fp.seq as phase_seq
+        from closed
+        join flow_stages fs on fs.id = closed.flow_stage_id
+        join flow_phases fp on fp.id = fs.phase_id
+      ),
+      rerun as (
+        insert into project_stages (flow_stage_id, attempt, status, assigned_to, started_at)
         select
-          closed.project_id, n.area_id, n.title, n.seq,
-          coalesce((
-            select max(ps.attempt) from project_stages ps
-            where ps.project_id = closed.project_id
-              and ps.area_id = n.area_id and ps.seq = n.seq
-          ), 0) + 1,
-          'active', nullif(n.assigned_to, '')::bigint, current_timestamp,
-          n.inputs::jsonb, n.outputs::jsonb
-        from closed, unnest($3::bigint[], $4::text[], $5::int[], $6::text[], $7::text[], $8::text[])
-          as n(area_id, title, seq, assigned_to, inputs, outputs)
+          closed.flow_stage_id,
+          (select max(ps.attempt) from project_stages ps
+            where ps.flow_stage_id = closed.flow_stage_id) + 1,
+          'active', closed.assigned_to, current_timestamp
+        from closed
+        where $3::boolean
         returning *
+      ),
+      next_phase as (
+        select min(fp.seq) as seq
+        from place
+        join flow_phases fp on fp.project_id = place.project_id and fp.seq > place.phase_seq
+        join flow_stages fs on fs.phase_id = fp.id
+        join project_stages ps on ps.flow_stage_id = fs.id and ps.status = 'pending'
+        where not $3::boolean and $2::text = 'done'
+          and not exists (
+            select 1
+            from flow_stages sibling
+            join project_stages sp on sp.flow_stage_id = sibling.id
+            where sibling.phase_id = place.phase_id
+              and sp.id <> $1
+              and sp.status in ('pending', 'active', 'waiting_external')
+          )
+      ),
+      advanced as (
+        update project_stages ps
+          set status = 'active', started_at = coalesce(ps.started_at, current_timestamp)
+        from flow_stages fs, flow_phases fp, place, next_phase
+        where fs.id = ps.flow_stage_id
+          and fp.id = fs.phase_id
+          and fp.project_id = place.project_id
+          and fp.seq = next_phase.seq
+          and ps.status = 'pending'
+        returning ps.*
       )
       select 'closed' as kind, to_json(closed.*) as row from closed
       union all
-      select 'opened' as kind, to_json(opened.*) as row from opened`,
-      [
-        stageId, status,
-        this.#idArray(nextStages.map((n) => n.areaId)),
-        this.#idArray(nextStages.map((n) => n.title)),
-        this.#idArray(nextStages.map((n) => n.seq)),
-        this.#idArray(nextStages.map((n) => (n.assignedTo == null ? '' : String(n.assignedTo)))),
-        this.#idArray(nextStages.map((n) => JSON.stringify(n.inputs ?? []))),
-        this.#idArray(nextStages.map((n) => JSON.stringify(n.outputs ?? []))),
-      ],
+      select 'reopened' as kind, to_json(rerun.*) as row from rerun
+      union all
+      select 'opened' as kind, to_json(advanced.*) as row from advanced`,
+      [stageId, status, rerun],
     );
 
     return {
       stage: rows.find((r) => r.kind === 'closed')?.row ?? null,
+      reopened: rows.filter((r) => r.kind === 'reopened').map((r) => r.row),
       opened: rows.filter((r) => r.kind === 'opened').map((r) => r.row),
     };
   }
-
-  //--- APPROVALS (RF-FLW-03) ---
 
   async createApproval({ projectStageId, decision, approverUserId, comment = null, evidenceFileId = null }) {
     const [row] = await this.#rows(
@@ -1718,9 +1894,9 @@ class Query {
     );
   }
 
-  //--- PROJECT FIELD VALUES (RF-FLW-06, RF-IMP-08) ---
-
-  /** One row per key per project; a correction is an UPDATE that moves the provenance with it. */
+  /**
+   *  One row per key per project; a correction is an UPDATE that moves the provenance with it.
+   */
   async upsertFieldValue(projectId, { key, value, producedByStageId = null }) {
     const [row] = await this.#rows(
       `insert into project_field_values (project_id, key, value, produced_by_stage_id)
@@ -1749,8 +1925,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  //--- SHEET MAPPING AND IMPORTS (RF-MIG-02) ---
 
   /** Points a registered book at a format version and stores how its columns feed it. */
   async setSheetMapping(sheetId, { schemaVersionId, columnMap }) {
@@ -1830,8 +2004,6 @@ class Query {
     return row ?? null;
   }
 
-  //--- REQUESTERS (RF-SOL-07) ---
-
   /**
    * The requester strings already in use, for the autocomplete that keeps a person from
    * inventing a fifth spelling. Distinct across requests and projects, prefix-matched so
@@ -1853,8 +2025,6 @@ class Query {
     );
   }
 
-  //--- STATUSES (RF-EST-02) ---
-
   /**
    * The catalogue an area works with: its own rows plus the global ones. Without an area,
    * the global catalogue alone.
@@ -1863,7 +2033,9 @@ class Query {
     return this.#rows(
       `select
         s.id, s.area_id, s.code, s.label, s.sort_order, s.is_terminal, s.is_active,
-        a.name as area_name
+        a.name as area_name,
+        (select count(*)::int from projects p where p.status_id = s.id) as project_count,
+        (select count(*)::int from requests r where r.status_id = s.id) as request_count
       from statuses s
       left join areas a on a.id = s.area_id
       where (s.area_id is null or s.area_id = $1::bigint)
@@ -1886,7 +2058,9 @@ class Query {
     return row ?? null;
   }
 
-  /** A code in one catalogue. `areaId` null looks in the global one, matching the two partial indexes. */
+  /**
+   *  A code in one catalogue. `areaId` null looks in the global one, matching the two partial indexes.
+   */
   async findStatusByCode(code, areaId = null) {
     const [row] = await this.#rows(
       `select id, area_id, code, label, sort_order, is_terminal, is_active
@@ -1944,8 +2118,6 @@ class Query {
     return row ?? null;
   }
 
-  //--- DATA TYPES ---
-
   async getDataType(code) {
     const [row] = await this.#rows(
       `select
@@ -1979,8 +2151,6 @@ class Query {
       order by name, id`,
     );
   }
-
-  //--- SCHEMAS ---
 
   /**
    * CREATE
@@ -2065,12 +2235,9 @@ class Query {
       where s.id = $1`,
       [schemaId],
     );
-    //Asegura que la función responda con null en lugar de undefined
-    //Ejemplo: si falla el filtro del JOIN.
     return row ?? null;
   }
 
-  /* READ - Obtiene TODOS los schemas con sus más recientes/últimas versiones*/
   async getSchemas() {
     return this.#rows(
       `select
@@ -2083,7 +2250,17 @@ class Query {
         v.version,
         v.fields,
         v.published_at,
-        v.published_by
+        v.published_by,
+        pu.full_name as published_by_name,
+        -- What publishing a version would affect, said in this format's own numbers: the
+        -- requests already captured with one of its versions keep being read with theirs, and
+        -- a workbook stays mapped to the version it names until somebody remaps it.
+        (select count(*) from requests r
+          join schema_versions rv on rv.id = r.schema_version_id
+          where rv.schema_id = s.id and r.deleted_at is null)::int as request_count,
+        (select count(*) from sheets sh
+          join schema_versions shv on shv.id = sh.schema_version_id
+          where shv.schema_id = s.id and sh.deleted_at is null)::int as sheet_count
       from schemas s
       left join lateral (
         select
@@ -2093,6 +2270,7 @@ class Query {
         order by version desc
         limit 1
       ) v on true
+      left join users pu on pu.id = v.published_by
       order by s.name, s.id`,
     );
   }
@@ -2100,9 +2278,6 @@ class Query {
   /**
    * UPDATE
    * Crea una NUEVA versión de un schema existente
-   *
-   * Las versiones publicadas NO son modificadas.
-   * En lugar de eso, el siguiente numero versión es creado con los nuevos campos
    */
 
   async createSchemaVersion(schemaId, { fields, publishedBy = null }) {
@@ -2136,10 +2311,6 @@ class Query {
   /**
    * DELETE
    * Desactiva un schema
-   *
-   * No elimina fisicamente el registro.
-   * Se conserva el schema y sus versiones, pero
-   * is_active pasa a false
    */
 
   async desactivateSchema(schemaId) {
@@ -2218,7 +2389,9 @@ class Query {
     return row ?? null;
   }
 
-  /** The newest version of a schema, or null. Used wherever "the schema" means its current shape. */
+  /**
+   *  The newest version of a schema, or null. Used wherever "the schema" means its current shape.
+   */
   async getLatestSchemaVersion(schemaId) {
     const [row] = await this.#rows(
       `select
@@ -2237,10 +2410,6 @@ class Query {
   /**
    * The field vocabulary: every key ever published, with its most recent definition and where it
    * is used.
-   *
-   * A key is not local to a format -- it is what the value is stored under in `requests.data` and
-   * in `project_field_values`, so `numero_orden` has to mean one thing system-wide. Keys from
-   * retired versions stay in the list: they have captured data under them.
    */
   async listFieldKeys() {
     return this.#rows(
@@ -2288,7 +2457,375 @@ class Query {
     return row ?? null;
   }
 
-  // --- Microsoft app registration (RF-MIG-01) ---
+  /**
+   * The phases and stages of one flow as nested camelCase JSON, ordered. `ownerId` is a SQL
+   * expression naming the owner and `ownerColumn` which of the three owners it is, so a
+   * template version, a request and the latest version of a template share one reader.
+   */
+  #phasesJson(ownerId, ownerColumn = 'workflow_version_id') {
+    return `coalesce((
+      select json_agg(json_build_object(
+        'id', fp.id, 'seq', fp.seq, 'name', fp.name,
+        'stages', coalesce((
+          select json_agg(json_build_object(
+            'id', fs.id, 'seq', fs.seq, 'areaId', fs.area_id, 'areaName', a.name,
+            'title', fs.title, 'defaultAssigneeId', fs.default_assignee_id,
+            'defaultAssigneeName', du.full_name,
+            'inputs', fs.input_keys, 'outputs', fs.output_keys,
+            'inputNote', fs.input_note, 'outputNote', fs.output_note,
+            'estimatedDays', fs.estimated_days
+          ) order by fs.seq)
+          from flow_stages fs
+          join areas a on a.id = fs.area_id
+          left join users du on du.id = fs.default_assignee_id
+          where fs.phase_id = fp.id
+        ), '[]'::json)
+      ) order by fp.seq)
+      from flow_phases fp
+      where fp.${ownerColumn} = ${ownerId}
+    ), '[]'::json)`;
+  }
+
+  /**
+   * The CTEs that write a flow from one jsonb parameter into the owner a preceding CTE names
+   * (`ownerCte`, whose `id` goes in `ownerColumn`). Phases and stages take their order from
+   * their position in the arrays.
+   */
+  #publishCtes(phasesParam, ownerCte = 'created_version', ownerColumn = 'workflow_version_id') {
+    return `phase_input as (
+        select p.ord::int as seq, p.value->>'name' as name, p.value->'stages' as stages
+        from jsonb_array_elements(${phasesParam}::jsonb) with ordinality as p(value, ord)
+      ),
+      phases_inserted as (
+        insert into flow_phases (${ownerColumn}, seq, name)
+        select ${ownerCte}.id, pi.seq, pi.name
+        from ${ownerCte}, phase_input pi
+        returning id, seq
+      ),
+      stages_inserted as (
+        insert into flow_stages (
+          phase_id, seq, area_id, title, default_assignee_id, input_keys, output_keys,
+          input_note, output_note, estimated_days
+        )
+        select
+          ph.id, s.ord::int, (s.value->>'areaId')::bigint, s.value->>'title',
+          (s.value->>'defaultAssigneeId')::bigint, s.value->'inputs', s.value->'outputs',
+          s.value->>'inputNote', s.value->>'outputNote', (s.value->>'estimatedDays')::int
+        from phase_input pi
+        join phases_inserted ph on ph.seq = pi.seq
+        cross join lateral jsonb_array_elements(pi.stages) with ordinality as s(value, ord)
+        returning id
+      )`;
+  }
+
+  /**
+   * A template and its version 1, phases and stages included, in one statement. `phases`
+   * is the array orchestration normalised: `[{name, stages: [{areaId, title, ...}]}]`.
+   */
+  async createWorkflow({ code, name, phases, publishedBy = null }) {
+    const [row] = await this.#rows(
+      `with created as (
+        insert into workflows (code, name) values ($1, $2)
+        returning *
+      ),
+      created_version as (
+        insert into workflow_versions (workflow_id, version, published_by)
+        select created.id, 1, $4::bigint from created
+        returning *
+      ),
+      ${this.#publishCtes('$3')}
+      select
+        created.*, v.id as workflow_version_id, v.version, v.published_at, v.published_by,
+        (select count(*) from phases_inserted)::int as phase_count,
+        (select count(*) from stages_inserted)::int as stage_count
+      from created, created_version v`,
+      [code, name, JSON.stringify(phases), publishedBy],
+    );
+    return row;
+  }
+
+  /**
+   * Publishes the next version of a template. Nothing already published is touched: the
+   * new content is a new version, numbered `max + 1`, so two publishers racing collide on
+   * `uq_workflow_versions_version` rather than on each other.
+   */
+  async publishWorkflowVersion(workflowId, { phases, publishedBy = null }) {
+    const [row] = await this.#rows(
+      `with created_version as (
+        insert into workflow_versions (workflow_id, version, published_by)
+        select $1, coalesce(max(version), 0) + 1, $3::bigint
+        from workflow_versions
+        where workflow_id = $1
+        returning *
+      ),
+      ${this.#publishCtes('$2')}
+      select
+        v.*,
+        (select count(*) from phases_inserted)::int as phase_count,
+        (select count(*) from stages_inserted)::int as stage_count
+      from created_version v`,
+      [workflowId, JSON.stringify(phases), publishedBy],
+    );
+    return row;
+  }
+
+  /**
+   * A new template whose version 1 copies the LATEST version of the source, in one statement.
+   * A default person who is no longer an active member of the stage's area is dropped from
+   * the copy rather than failing it. `null` when the source does not exist or has no version.
+   */
+  async cloneWorkflow(sourceId, { code, name, publishedBy = null }) {
+    const [row] = await this.#rows(
+      `with source as (
+        select id from workflow_versions
+        where workflow_id = $1
+        order by version desc
+        limit 1
+      ),
+      created as (
+        insert into workflows (code, name)
+        select $2, $3 from source
+        returning *
+      ),
+      created_version as (
+        insert into workflow_versions (workflow_id, version, published_by)
+        select created.id, 1, $4::bigint from created
+        returning *
+      ),
+      source_phases as (
+        select fp.* from flow_phases fp, source where fp.workflow_version_id = source.id
+      ),
+      phases_inserted as (
+        insert into flow_phases (workflow_version_id, seq, name)
+        select created_version.id, sp.seq, sp.name
+        from created_version, source_phases sp
+        returning id, seq
+      ),
+      stages_inserted as (
+        insert into flow_stages (
+          phase_id, seq, area_id, title, default_assignee_id, input_keys, output_keys,
+          input_note, output_note, estimated_days
+        )
+        select
+          ph.id, fs.seq, fs.area_id, fs.title,
+          case when exists (
+            select 1 from area_members m
+            join users u on u.id = m.user_id
+            where m.area_id = fs.area_id and m.user_id = fs.default_assignee_id
+              and u.deleted_at is null
+          ) then fs.default_assignee_id end,
+          fs.input_keys, fs.output_keys, fs.input_note, fs.output_note, fs.estimated_days
+        from source_phases sp
+        join phases_inserted ph on ph.seq = sp.seq
+        join flow_stages fs on fs.phase_id = sp.id
+        returning id
+      )
+      select
+        created.*, v.id as workflow_version_id, v.version, v.published_at, v.published_by,
+        (select count(*) from phases_inserted)::int as phase_count,
+        (select count(*) from stages_inserted)::int as stage_count
+      from created, created_version v`,
+      [sourceId, code, name, publishedBy],
+    );
+    return row ?? null;
+  }
+
+  /** Every template with a summary of its latest version, by name. */
+  async listWorkflows() {
+    return this.#rows(
+      `select
+        w.*, v.id as workflow_version_id, v.version, v.published_at, v.published_by,
+        pu.full_name as published_by_name,
+        (select count(*) from flow_phases fp
+          where fp.workflow_version_id = v.id)::int as phase_count,
+        (select count(*) from flow_phases fp join flow_stages fs on fs.phase_id = fp.id
+          where fp.workflow_version_id = v.id)::int as stage_count
+      from workflows w
+      left join lateral (
+        select * from workflow_versions
+        where workflow_id = w.id
+        order by version desc
+        limit 1
+      ) v on true
+      left join users pu on pu.id = v.published_by
+      order by w.name, w.id`,
+    );
+  }
+
+  /** One template with its latest version's phases and stages. */
+  async getWorkflow(workflowId) {
+    const [row] = await this.#rows(
+      `select
+        w.*, v.id as workflow_version_id, v.version, v.published_at, v.published_by,
+        pu.full_name as published_by_name,
+        ${this.#phasesJson('v.id')} as phases
+      from workflows w
+      left join lateral (
+        select * from workflow_versions
+        where workflow_id = w.id
+        order by version desc
+        limit 1
+      ) v on true
+      left join users pu on pu.id = v.published_by
+      where w.id = $1`,
+      [workflowId],
+    );
+    return row ?? null;
+  }
+
+  /** Every version of a template, newest first, without their content. */
+  async listWorkflowVersions(workflowId) {
+    return this.#rows(
+      `select
+        v.*, pu.full_name as published_by_name,
+        (select count(*) from flow_phases fp
+          where fp.workflow_version_id = v.id)::int as phase_count,
+        (select count(*) from flow_phases fp join flow_stages fs on fs.phase_id = fp.id
+          where fp.workflow_version_id = v.id)::int as stage_count
+      from workflow_versions v
+      left join users pu on pu.id = v.published_by
+      where v.workflow_id = $1
+      order by v.version desc`,
+      [workflowId],
+    );
+  }
+
+  /** One version, whichever it is, with its template's identity and its content. */
+  async getWorkflowVersion(versionId) {
+    const [row] = await this.#rows(
+      `select
+        v.*, w.code, w.name, w.is_active, pu.full_name as published_by_name,
+        ${this.#phasesJson('v.id')} as phases
+      from workflow_versions v
+      join workflows w on w.id = v.workflow_id
+      left join users pu on pu.id = v.published_by
+      where v.id = $1`,
+      [versionId],
+    );
+    return row ?? null;
+  }
+
+  /** Only `name` and `is_active` change; the code is what a clone or a project named. */
+  async updateWorkflow(workflowId, { name = null, isActive = null }) {
+    const [row] = await this.#rows(
+      `update workflows
+        set name = coalesce($2, name),
+            is_active = coalesce($3::boolean, is_active)
+      where id = $1
+      returning *`,
+      [workflowId, name, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** Deactivates a template; its versions stay readable. */
+  async deactivateWorkflow(workflowId) {
+    const [row] = await this.#rows(
+      `update workflows set is_active = false where id = $1 returning *`,
+      [workflowId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Replaces a request's whole flow in one statement: its old phases go (their stages
+   * cascade) and the new ones come either from `phases` -- a flow designed for it, in the
+   * template shape -- or from a copy of the template version `sourceVersionId`, whose id is
+   * recorded in `requests.workflow_version_id`. Only an unconverted, live request is touched;
+   * `found` says whether it was.
+   */
+  async setRequestFlow(requestId, { phases = null, sourceVersionId = null }) {
+    const fromTemplate = sourceVersionId !== null;
+    const version = fromTemplate ? '$2' : '$3';
+    const [row] = await this.#rows(
+      `with target as (
+        select id from requests
+        where id = $1 and deleted_at is null and project_id is null
+      ),
+      cleared as (
+        delete from flow_phases where request_id = (select id from target)
+        returning id
+      ),
+      recorded as (
+        update requests set workflow_version_id = ${version}::bigint
+        where id = (select id from target)
+        returning id
+      ),
+      -- A data-modifying CTE nobody reads runs after the main query, so the new phases would be
+      -- inserted before the old ones are deleted and collide on (request_id, seq). Reading
+      -- \`cleared\` here makes the delete run first.
+      ready as (
+        select target.id from target where (select count(*) from cleared) >= 0
+      ),
+      ${fromTemplate
+        ? `source_phases as (
+        select fp.* from flow_phases fp where fp.workflow_version_id = ${version}::bigint
+      ),
+      phases_inserted as (
+        insert into flow_phases (request_id, seq, name)
+        select ready.id, sp.seq, sp.name
+        from ready, source_phases sp
+        returning id, seq
+      ),
+      stages_inserted as (
+        insert into flow_stages (
+          phase_id, seq, area_id, title, default_assignee_id, input_keys, output_keys,
+          input_note, output_note, estimated_days
+        )
+        select
+          ph.id, fs.seq, fs.area_id, fs.title, fs.default_assignee_id, fs.input_keys,
+          fs.output_keys, fs.input_note, fs.output_note, fs.estimated_days
+        from source_phases sp
+        join phases_inserted ph on ph.seq = sp.seq
+        join flow_stages fs on fs.phase_id = sp.id
+        returning id
+      )`
+        : this.#publishCtes('$2', 'ready', 'request_id')}
+      select
+        (select count(*) from target)::int as found,
+        (select count(*) from phases_inserted)::int as phase_count,
+        (select count(*) from stages_inserted)::int as stage_count`,
+      fromTemplate
+        ? [requestId, sourceVersionId]
+        : [requestId, JSON.stringify(phases), null],
+    );
+    return row;
+  }
+
+  /** Removes a request's flow; `workflow_version_id` goes with it. */
+  async clearRequestFlow(requestId) {
+    const [row] = await this.#rows(
+      `with cleared as (
+        delete from flow_phases where request_id = $1 returning id
+      ),
+      recorded as (
+        update requests set workflow_version_id = null where id = $1 returning id
+      )
+      select (select count(*) from cleared)::int as phase_count`,
+      [requestId],
+    );
+    return row;
+  }
+
+  /**
+   * For each of these requests, whether it owns a flow, and the areas of its first phase and
+   * of the whole flow. What conversion and the status check need, in one read.
+   */
+  async getRequestFlowAreas(requestIds) {
+    return this.#rows(
+      `select
+        fp.request_id,
+        array_agg(distinct fs.area_id) as area_ids,
+        array_agg(distinct fs.area_id) filter (
+          where fp.seq = (select min(seq) from flow_phases where request_id = fp.request_id)
+        ) as first_phase_area_ids
+      from flow_phases fp
+      join flow_stages fs on fs.phase_id = fp.id
+      where fp.request_id = any(coalesce($1::bigint[], '{}'::bigint[]))
+      group by fp.request_id`,
+      [this.#idArray(requestIds)],
+    );
+  }
 
   /** The one row, with who last saved it, or null when the registration lives in .env. */
   async getMicrosoftApp() {
@@ -2312,8 +2849,6 @@ class Query {
    */
   async setMicrosoftApp({ tenantId, clientId, clientSecretEnc, updatedBy }) {
     const [row] = await this.#rows(
-      // The stored secret is folded in BEFORE the insert is attempted: NOT NULL is checked
-      // on the proposed row, ahead of ON CONFLICT, so a coalesce in the DO UPDATE never runs.
       `insert into microsoft_app (id, tenant_id, client_id, client_secret_enc, updated_by)
        values (1, $1, $2,
                coalesce($3::bytea, (select client_secret_enc from microsoft_app where id = 1)),
@@ -2338,8 +2873,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  // --- Microsoft accounts (RF-MIG-01) ---
 
   /**
    * Records a delegated grant, or replaces the token when this user reconnects the same
@@ -2397,19 +2930,24 @@ class Query {
   }
 
   /**
-   * Live accounts, everyone's or one person's.
+   * Accounts, everyone's or one person's, each with how many live books are read with it: a
+   * screen that offers to disconnect one has to be able to say what stops working.
    *
    * @param {number | null} userId Null lists them all.
+   * @param {boolean} includeRevoked Revoked rows stay, so a book can say which account to
+   *   reconnect; the connect flow only wants the live ones.
    */
-  async listMicrosoftAccounts(userId = null) {
+  async listMicrosoftAccounts(userId = null, includeRevoked = false) {
     return this.#rows(
-      `select a.*, u.full_name as user_full_name
+      `select a.*, u.full_name as user_full_name,
+              (select count(*)::int from sheets s
+                where s.microsoft_account_id = a.id and s.deleted_at is null) as sheet_count
          from microsoft_accounts a
          join users u on u.id = a.user_id
-        where a.revoked_at is null
+        where ($2::boolean or a.revoked_at is null)
           and ($1::bigint is null or a.user_id = $1)
-        order by a.connected_at desc, a.id desc`,
-      [userId],
+        order by a.revoked_at nulls first, a.connected_at desc, a.id desc`,
+      [userId, includeRevoked],
     );
   }
 
@@ -2437,8 +2975,6 @@ class Query {
     );
     return row ?? null;
   }
-
-  // --- Sheets (RF-MIG-01, RF-MIG-02) ---
 
   /**
    * Registers a workbook. `schema_version_id` and `column_map` are left at their defaults:
@@ -2481,10 +3017,29 @@ class Query {
            u.full_name    as registered_by_name,
            -- Cuántas filas se marcaron como ya vistas sin importarlas: una pantalla que ofrece
            -- deshacerlo tiene que poder decir cuántas son.
-           (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows
+           (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows,
+           -- A qué formato está mapeado, por su nombre: la pantalla dice «Papel institucional
+           -- v2», no un id, y un libro puede quedarse en una versión vieja.
+           sc.name    as schema_name,
+           sv.version as schema_version,
+           -- Cómo salió la última importación, para decirlo en el renglón sin pedir la
+           -- historia de cada libro por separado.
+           li.rows_created  as last_rows_created,
+           li.rows_skipped  as last_rows_skipped,
+           li.rows_failed   as last_rows_failed,
+           li.finished_at   as last_finished_at
       from sheets s
       join microsoft_accounts a on a.id = s.microsoft_account_id
-      left join users u on u.id = s.registered_by`;
+      left join users u on u.id = s.registered_by
+      left join schema_versions sv on sv.id = s.schema_version_id
+      left join schemas sc on sc.id = sv.schema_id
+      left join lateral (
+        select rows_created, rows_skipped, rows_failed, finished_at
+          from sheet_imports
+         where sheet_id = s.id and finished_at is not null
+         order by started_at desc
+         limit 1
+      ) li on true`;
 
   async listSheets() {
     return this.#rows(

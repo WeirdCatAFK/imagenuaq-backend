@@ -6,16 +6,15 @@ import { Router } from "express";
 
 import requests from "../access/orchestration/requests.js";
 import { authenticate, requirePermission } from "../middlewares/auth.js";
-import { ApiError } from "../utils/ApiError.js";
+import { idParam } from "../utils/params.js";
 
 const router = Router();
+const requestId = (req) => idParam(req, "id", "request id");
 
 router.use(authenticate);
 router.use(requirePermission("request.read"));
 
-// The inbox (RF-SOL-04, RF-SOL-05): by default what has not been converted yet.
 router.get("/", async (req, res) => {
-  // La respuesta ya trae { requests, total, limit, offset }.
   res.json(await requests.list(req.query));
 });
 
@@ -42,22 +41,17 @@ router.delete("/:id", async (req, res) => {
   res.json({ request: await requests.remove(requestId(req)) });
 });
 
-// RF-PRY-01: one or several requests become a project, keeping the link.
-router.post(
-  "/:id/convert",
-  requirePermission("project.write"),
-  async (req, res) => {
-    res
-      .status(201)
-      .json(await requests.convert(requestId(req), req.body ?? {}));
-  },
-);
+router.put("/:id/flow", async (req, res) => {
+  const { workflowId, phases } = req.body ?? {};
+  res.json({ request: await requests.setFlow(requestId(req), { workflowId, phases }) });
+});
 
-function requestId(req) {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0)
-    throw ApiError.badRequest("Invalid request id.");
-  return id;
-}
+router.delete("/:id/flow", async (req, res) => {
+  res.json({ request: await requests.clearFlow(requestId(req)) });
+});
+
+router.post("/:id/convert", requirePermission("project.write"), async (req, res) => {
+  res.status(201).json(await requests.convert(requestId(req), req.body ?? {}));
+});
 
 export default router;

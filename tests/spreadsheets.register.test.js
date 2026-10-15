@@ -1,3 +1,6 @@
+// The registry half: registering a table under a connected account, listing, removing.
+// Registration takes the ids `resolve` returned and does not call Microsoft, which is what
+// makes these cases possible offline (orchestration/spreadsheets.js on the trade).
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -9,13 +12,10 @@ import {
   createMicrosoftAccount,
   tokenFor,
   logsFor,
-  roleId,
   sql,
+  grantPermissions,
 } from './helpers/fixtures.js';
 
-// The registry half: registering a table under a connected account, listing, removing.
-// Registration takes the ids `resolve` returned and does not call Microsoft, which is what
-// makes these cases possible offline (orchestration/spreadsheets.js on the trade).
 describe('/api/spreadsheets', () => {
   let server;
   let admin;
@@ -48,20 +48,14 @@ describe('/api/spreadsheets', () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
 
   beforeEach(() => resetCases(ACCOUNTS));
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId('worker')}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, 'worker', permissions);
 
   describe('POST /', () => {
     test('registers a table under the caller\'s account, unmapped', async () => {
@@ -83,7 +77,6 @@ describe('/api/spreadsheets', () => {
       assert.equal(sheet.accountEmail, 'cuenta@outlook.com');
       assert.equal(sheet.registeredBy, worker.id);
       assert.equal(sheet.registeredByName, 'Prueba Usuario');
-      // Registered, not mapped: the microsoft-accounts migration made this the resting state.
       assert.equal(sheet.schemaVersionId, null);
       assert.deepEqual(sheet.columnMap, {});
       assert.equal(sheet.mapped, false);
@@ -123,8 +116,6 @@ describe('/api/spreadsheets', () => {
       assert.equal(other.status, 201);
     });
 
-    // uq_sheets_item coalesces a NULL table_name, so "the default table" registered twice
-    // is the same table twice and not two rows that happen to both say nothing.
     test('the default table twice is also 409', async () => {
       const account = await createMicrosoftAccount(worker.id);
       const body = { name: BOOK.name, driveId: BOOK.driveId, itemId: BOOK.itemId, accountId: account.id };

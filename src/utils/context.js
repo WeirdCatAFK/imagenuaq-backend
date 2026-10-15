@@ -25,7 +25,7 @@ const storage = new AsyncLocalStorage();
 /**
  * Runs `fn` with `context` attached; everything `fn` awaits sees it.
  *
- * @param {{ requestId: string, actor: object | null }} context
+ * @param {{ actor: object | null }} context
  * @param {() => unknown} fn
  */
 export function runWithContext(context, fn) {
@@ -40,13 +40,4 @@ export function runWithContext(context, fn) {
  */
 export function currentActor() {
   return storage.getStore()?.actor ?? null;
-}
-
-/**
- * Id correlating everything logged while serving one request, or null outside one.
- *
- * @returns {string | null}
- */
-export function currentRequestId() {
-  return storage.getStore()?.requestId ?? null;
 }

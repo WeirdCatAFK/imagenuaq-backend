@@ -14,17 +14,32 @@
 // `data` is the whole capture, coerced by `utils/fieldValues.js` against the format's fields, so
 // a value typed here and the same value read out of Excel land identically. Unknown keys are
 // kept: RF-SOL-06 says nothing the requester sent is dropped.
+//
+// **A request is routed by giving it a flow** (`request-flows`, DATAMODEL.md §2.5): a copy of a
+// template or one designed for it, owned by the request until it converts. Every area in the
+// flow's first phase finds it in its inbox, and converting hands the same phases to the
+// project. `area_id` stays for what was routed by hand before flows existed.
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import projects from "./projects.js";
+import { validatePhases } from "./workflows.js";
 import { fieldList } from "./schemas.js";
-import { validateData } from "../../utils/fieldValues.js";
+import { storedText, validateData } from "../../utils/fieldValues.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  cleanText,
+  requireText,
+  optionalText,
+  requireId,
+  optionalId,
+  uniqueIds,
+  requireInt,
+  optionalBoolean,
+} from "../../utils/validate.js";
 
 const TITLE_MAX = 300;
 const REQUESTER_MAX = 300;
@@ -102,6 +117,9 @@ class Requests {
    * The inbox (RF-SOL-04): ordered, filterable, and by default only what has not been converted,
    * because that is what an area still has to act on.
    *
+   * `routed` splits the two steps a hand has to move: `false` is what nobody has yet, with no
+   * flow and no area, and `true` is what an area already holds (DATAMODEL.md §8.2).
+   *
    * @returns {Promise<{requests: object[], total: number, limit: number, offset: number}>} `total`
    *   counts every request matching the filters, not the page, so a client can page through and
    *   say how much is left.
@@ -123,15 +141,29 @@ class Requests {
       converted: optionalBoolean(filters.converted, "converted"),
       duplicates: optionalBoolean(filters.duplicates, "duplicates"),
       source: filters.source === undefined ? null : requireAnySource(filters.source),
+      routed: optionalBoolean(filters.routed, "routed"),
       sort: filters.sort === "created" ? "created" : "priority",
       limit,
       offset,
     });
 
-    // `total` es de la consulta, no de la página: sin él la bandeja no puede decir cuánto falta
-    // por ver. Con cero filas no hay de dónde leerlo y el total es cero.
     const total = rows.length === 0 ? 0 : Number(rows[0].total);
     return { requests: rows.map(shapeListed), total, limit, offset };
+  }
+
+  /**
+   * Requester names already in use, most used first, for the autocomplete (RF-SOL-07).
+   *
+   * @param {{ q?: string, limit?: string|number }} [filters] `q` is a prefix; `limit` 1-100.
+   * @returns {Promise<Array<{ name: string, uses: number }>>}
+   */
+  async listRequesters({ q, limit } = {}) {
+    const cap = Number(limit);
+    const rows = await query.listRequesters({
+      q: cleanText(q),
+      limit: Number.isInteger(cap) && cap > 0 && cap <= 100 ? cap : 20,
+    });
+    return rows.map((row) => ({ name: row.requester, uses: row.uses }));
   }
 
   /**
@@ -171,7 +203,6 @@ class Requests {
       assigneeId: input.assigneeId === undefined ? null : optionalId(input.assigneeId, "assigneeId"),
       priority: input.priority === undefined ? null : requireInt(input.priority, "priority"),
       data,
-      // `null` clears the duplicate flag: somebody looked and said these are not the same.
       possibleDuplicateOf:
         input.possibleDuplicateOf === undefined || input.possibleDuplicateOf === null
           ? null
@@ -214,7 +245,11 @@ class Requests {
     if (!row) throw ApiError.badRequest("That status does not exist.");
     if (row.is_active === false) throw ApiError.badRequest("That status is inactive.");
     if (row.area_id !== null && String(row.area_id) !== String(before.area_id)) {
-      throw ApiError.badRequest("That status belongs to another area.");
+      const [flow] = await query.getRequestFlowAreas([id]);
+      const inbox = (flow?.first_phase_area_ids ?? []).map(String);
+      if (!inbox.includes(String(row.area_id))) {
+        throw ApiError.badRequest("That status belongs to another area.");
+      }
     }
 
     const after = await query.setRequestStatus(id, status);
@@ -227,6 +262,87 @@ class Requests {
     });
 
     return this.getById(id);
+  }
+
+  /**
+   * Gives a request its flow, replacing any it had: a copy of a template's latest version
+   * (`workflowId`), or one designed for it (`phases`, the template shape). The request then
+   * sits in the inbox of every area in the first phase.
+   *
+   * @param {number} requestId
+   * @param {{ workflowId?: number, phases?: object[] }} input Exactly one of the two.
+   * @throws {ApiError} 400 on a bad payload, 404 on an unknown request or template, 409 when
+   *   the request is converted or the template inactive.
+   */
+  async setFlow(requestId, { workflowId, phases } = {}) {
+    const id = requireId(requestId, "requestId");
+    const fromTemplate = workflowId !== undefined && workflowId !== null;
+    const designed = phases !== undefined && phases !== null;
+    if (fromTemplate === designed) {
+      throw ApiError.badRequest("Send either workflowId, to copy a template, or phases.");
+    }
+
+    const before = await query.getRequest(id);
+    if (!before) throw ApiError.notFound("Request not found.");
+    if (before.project_id !== null) {
+      throw ApiError.conflict("That request is already a project; its flow belongs to it now.");
+    }
+
+    let input;
+    if (fromTemplate) {
+      const workflow = await query.getWorkflow(requireId(workflowId, "workflowId"));
+      if (!workflow || workflow.workflow_version_id === null) {
+        throw ApiError.notFound("Workflow not found.");
+      }
+      if (workflow.is_active === false) {
+        throw ApiError.conflict("That workflow is inactive; pick another or reactivate it.");
+      }
+      input = { sourceVersionId: workflow.workflow_version_id };
+    } else {
+      input = { phases: await validatePhases(phases) };
+    }
+
+    const result = await query.setRequestFlow(id, input);
+    if (result.found === 0) {
+      throw ApiError.conflict("That request was converted or removed meanwhile; read it again.");
+    }
+
+    const after = await query.getRequest(id);
+    await events.emit({
+      action: "record_updated",
+      target: { table: "requests", id },
+      before,
+      after,
+    });
+
+    return shapeRequest(after);
+  }
+
+  /**
+   * Takes a request's flow away; it goes back to being unrouted unless it has an area.
+   *
+   * @throws {ApiError} 404, 409 once converted.
+   */
+  async clearFlow(requestId) {
+    const id = requireId(requestId, "requestId");
+
+    const before = await query.getRequest(id);
+    if (!before) throw ApiError.notFound("Request not found.");
+    if (before.project_id !== null) {
+      throw ApiError.conflict("That request is already a project; its flow belongs to it now.");
+    }
+
+    await query.clearRequestFlow(id);
+
+    const after = await query.getRequest(id);
+    await events.emit({
+      action: "record_updated",
+      target: { table: "requests", id },
+      before,
+      after,
+    });
+
+    return shapeRequest(after);
   }
 
   /** @throws {ApiError} 404, 409 once converted. */
@@ -254,19 +370,17 @@ class Requests {
   /**
    * Turns a request into a project (RF-PRY-01), optionally answering several at once.
    *
-   * What travels: the requester (correctable here, which is where the autocomplete lands), the
-   * format version, and **every captured value** as a `project_field_values` row keyed by its
-   * field code — no per-field opt-in, because the propagation exists for the later tools to read
-   * (§2.11). `produced_by_stage_id` stays null: it came from the request, not from a stage.
-   *
-   * On a multi-request conversion the first request wins a repeated key and the rest come back
-   * in `conflicts` rather than being silently dropped.
+   * This is where an incomplete request is stopped: a row imported from a tracker may come in
+   * without a value its format marks required, because the sheet had it half filled. It exists,
+   * it shows in the inbox saying what it owes, and here it is refused by name until somebody
+   * fills it, which is the last moment where that is still cheap.
    *
    * @param {number} requestId
    * @param {object} [input] `key`, `title`, `requester`, `stages`, `requestIds` and the project
    *   flags; anything omitted is taken from the request.
-   * @returns {Promise<{project: object, conflicts: object[]}>}
-   * @throws {ApiError} 404, 409 when it is already converted.
+   * @returns {Promise<{project: object, conflicts: object[], discardedFlows: string[]}>}
+   * @throws {ApiError} 400 on stages for a request with a flow, 404, 409 when it is already
+   *   converted or still missing a required value.
    */
   async convert(requestId, input = {}) {
     const id = requireId(requestId, "requestId");
@@ -289,7 +403,39 @@ class Requests {
       all.push(other);
     }
 
+    for (const row of all) {
+      const faltan = faltantesDe(row);
+      if (faltan.length > 0) {
+        throw ApiError.conflict(
+          `${row.folio} still has no value for ${faltan.map((campo) => `"${campo.name}"`).join(", ")}; fill it in before converting.`,
+        );
+      }
+    }
+
     const { fieldValues, conflicts } = mergeCaptures(all);
+
+    const flows = new Map(
+      (await query.getRequestFlowAreas(all.map((row) => row.id)))
+        .map((flow) => [String(flow.request_id), flow]),
+    );
+    const owner = all.find((row) => flows.has(String(row.id))) ?? null;
+    const others = all.filter((row) => row !== owner && flows.has(String(row.id)));
+
+    const stages = input.stages ?? [];
+    if (owner !== null && Array.isArray(stages) && stages.length > 0) {
+      throw ApiError.badRequest(
+        `${owner.folio} already has a flow; convert with it, or remove it to build the stages by hand.`,
+      );
+    }
+
+    const requestFlow = owner === null
+      ? null
+      : {
+          requestId: owner.id,
+          workflowVersionId: owner.workflow_version_id,
+          areaIds: flows.get(String(owner.id)).area_ids ?? [],
+          discardRequestIds: others.map((row) => row.id),
+        };
 
     const project = await projects.create({
       key: input.key,
@@ -303,9 +449,10 @@ class Requests {
       carriedOver: input.carriedOver ?? false,
       startsOn: input.startsOn ?? null,
       dueOn: input.dueOn ?? null,
-      stages: input.stages ?? [],
+      stages,
       fieldValues,
       requestIds: all.map((row) => row.id),
+      requestFlow,
     });
 
     for (const row of all) {
@@ -317,10 +464,8 @@ class Requests {
       });
     }
 
-    return { project, conflicts };
+    return { project, conflicts, discardedFlows: others.map((row) => row.folio) };
   }
-
-  // --- Internals ---
 
   /** The version to capture under: one named directly, or the format's latest. */
   async #resolveVersion({ schemaId, schemaVersionId }) {
@@ -360,8 +505,6 @@ class Requests {
   }
 }
 
-/* HELPERS */
-
 /**
  * Every captured value of every request, as field values for the project. First request wins a
  * repeated key; the losers are reported so a conversion does not quietly pick one.
@@ -380,12 +523,12 @@ function mergeCaptures(requests) {
           key,
           folio: request.folio,
           kept: seen.get(key),
-          discarded: stringify(value),
+          discarded: storedText(value),
         });
         continue;
       }
 
-      const text = stringify(value);
+      const text = storedText(value);
       if (text === null) continue;
       seen.set(key, text);
       fieldValues.push({ key, value: text });
@@ -393,13 +536,6 @@ function mergeCaptures(requests) {
   }
 
   return { fieldValues, conflicts };
-}
-
-function stringify(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "string") return value.trim() === "" ? null : value.trim();
-  if (typeof value === "boolean" || typeof value === "number") return String(value);
-  return JSON.stringify(value);
 }
 
 /**
@@ -410,26 +546,6 @@ function stringify(value) {
  */
 function badCapture(errors) {
   return ApiError.badRequest(errors.map((entry) => entry.message).join(" "));
-}
-
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-function requireText(value, field, max) {
-  const text = cleanText(value);
-  if (text === null) throw ApiError.badRequest(`${field} is required.`);
-  if (typeof text !== "string" || text.length > max) {
-    throw ApiError.badRequest(`${field} must be a string of ${max} characters or fewer.`);
-  }
-  return text;
-}
-
-function optionalText(value, field, max) {
-  const text = cleanText(value);
-  return text === null ? null : requireText(text, field, max);
 }
 
 function requireSource(source) {
@@ -455,55 +571,39 @@ function requireAnySource(source) {
   return value;
 }
 
-function requireInt(value, field) {
-  const n = Number(value);
-  if (!Number.isInteger(n)) throw ApiError.badRequest(`${field} must be an integer.`);
-  return n;
-}
-
-function optionalBoolean(value, field) {
-  if (value === undefined || value === null || value === "") return null;
-  if (value === true || value === "true") return true;
-  if (value === false || value === "false") return false;
-  throw ApiError.badRequest(`${field} must be a boolean.`);
-}
-
-function requireId(value, field) {
-  if (value === null || value === undefined || typeof value === "boolean") {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  const id = Number(value);
-  if (!Number.isInteger(id) || id <= 0) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
-}
-
-/**
- * The area filter, which also answers "the ones with no area".
- *
- * An imported row arrives unrouted (the sheet says which faculty asked, not which area works
- * it), so the inbox has to be able to ask for exactly those to triage them. `-1` is what the
- * query reads as "no area at all"; it is not an id anybody can hold.
- */
+/** The area filter, which also answers "the ones with no area". */
 function areaFilter(value) {
   if (value === "none") return -1;
   return optionalId(value, "areaId");
 }
 
-function optionalId(value, field) {
-  if (value === null || value === undefined || value === "") return null;
-  return requireId(value, field);
-}
+/**
+ * Los campos obligatorios del formato que la solicitud todavía no tiene. Una importada puede
+ * entrar incompleta a propósito; convertirla en proyecto es lo que se niega hasta que estén
+ * (RF-SOL-06, §2.16).
+ *
+ * @param {object} row A `requests` row with `schema_fields` and `data`.
+ * @returns {{code: string, name: string}[]}
+ */
+function faltantesDe(row) {
+  const campos = [
+    ...(row.schema_fields?.deliverables ?? []),
+    ...(row.schema_fields?.information ?? []),
+  ];
+  const data = row.data ?? {};
 
-function uniqueIds(values, field) {
-  if (values === undefined || values === null) return [];
-  if (!Array.isArray(values)) throw ApiError.badRequest(`${field} must be an array.`);
-  return [...new Set(values.map((value) => requireId(value, field)))];
+  return campos
+    .filter((campo) => campo.required)
+    .filter((campo) => {
+      const valor = data[campo.code];
+      return valor === undefined || valor === null || valor === "";
+    })
+    .map((campo) => ({ code: campo.code, name: campo.name }));
 }
 
 function shapeRequest(row) {
   return {
+    missingRequired: faltantesDe(row),
     id: row.id,
     folio: row.folio,
     title: row.title,
@@ -514,9 +614,6 @@ function shapeRequest(row) {
     schemaCode: row.schema_code,
     schemaName: row.schema_name,
     schemaVersion: row.schema_version,
-    // Rebuilt rather than passed through: jsonb sorts object keys by length then bytes, so the
-    // document comes back as { information, deliverables } and a client reading it in order
-    // would render the sections backwards.
     fields: row.schema_fields
       ? {
           deliverables: row.schema_fields.deliverables ?? [],
@@ -525,6 +622,16 @@ function shapeRequest(row) {
       : null,
     areaId: row.area_id,
     areaName: row.area_name ?? null,
+    flow:
+      Array.isArray(row.flow_phases) && row.flow_phases.length > 0
+        ? {
+            workflowVersionId: row.workflow_version_id ?? null,
+            workflowId: row.flow_workflow_id ?? null,
+            workflowName: row.flow_workflow_name ?? null,
+            version: row.flow_version ?? null,
+            phases: row.flow_phases,
+          }
+        : null,
     statusId: row.status_id,
     statusCode: row.status_code,
     statusLabel: row.status_label,
@@ -537,7 +644,6 @@ function shapeRequest(row) {
     sheetId: row.sheet_id,
     sheetName: row.sheet_name ?? null,
     sourceIndex: row.source_index,
-    // The raw row as the book held it, unmapped columns included (RF-SOL-06).
     sourceData: row.source_data,
     sourceHash: row.source_hash,
     possibleDuplicateOf: row.possible_duplicate_of,
@@ -561,6 +667,8 @@ function shapeListed(row) {
     requester: row.requester,
     areaId: row.area_id,
     areaName: row.area_name ?? null,
+    hasFlow: row.has_flow ?? false,
+    firstPhaseAreas: row.first_phase_areas ?? [],
     statusId: row.status_id,
     statusCode: row.status_code,
     statusLabel: row.status_label,
@@ -573,6 +681,7 @@ function shapeListed(row) {
     schemaCode: row.schema_code,
     schemaName: row.schema_name,
     possibleDuplicateOf: row.possible_duplicate_of,
+    missingRequired: row.missing_required ?? 0,
     projectId: row.project_id,
     projectKey: row.project_key ?? null,
     createdAt: row.created_at,

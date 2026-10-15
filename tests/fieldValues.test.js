@@ -1,11 +1,11 @@
+// Pure: no server, no database. The three callers -- the request API, the project API and the
+// sheet import -- share this, so a value typed into a form and the same value read out of a cell
+// have to land identically.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import { coerce, validateData } from "../src/utils/fieldValues.js";
 
-// Pure: no server, no database. The three callers -- the request API, the project API and the
-// sheet import -- share this, so a value typed into a form and the same value read out of a cell
-// have to land identically.
 describe("coerce()", () => {
   const value = (type, raw, options) => coerce(type, raw, options).value;
   const error = (type, raw, options) => coerce(type, raw, options).error;
@@ -68,13 +68,9 @@ describe("coerce()", () => {
 
   describe("date", () => {
     test("an Excel serial becomes an ISO date", () => {
-      // 45000 is 2023-03-15 counting from 1899-12-30, which is the epoch the 1900 leap-year
-      // bug forces.
       assert.equal(value("date", 45000), "2023-03-15");
       assert.equal(value("date", "45000"), "2023-03-15", "a serial that arrived as text");
       assert.equal(value("date", 61), "1900-03-01", "the first serial the epoch maps correctly");
-      // 1 to 60 fall in the range Excel's fake 1900-02-29 corrupts, so they are refused rather
-      // than answered a day off. A 1900 delivery date is a typo anyway.
       assert.match(error("date", 1), /valid date/);
       assert.match(error("date", 60), /valid date/);
       assert.match(error("date", 0), /valid date/);
@@ -104,16 +100,11 @@ describe("coerce()", () => {
     });
 
     test("a two-digit year is refused, not quietly turned into 1926", () => {
-      // Excel displays a real date as "1/8/26", and `Date.UTC(26, ...)` means 1926 -- so guessing
-      // would import a delivery date a century off with no error to show for it. The message says
-      // what to do instead, because the fix is a mapping decision (read the serial, not the text).
       assert.match(error("date", "1/8/26"), /four digits/);
       assert.match(error("date", "01/08/26"), /four digits/);
       assert.match(error("datetime", "1/8/26 10:15"), /four digits/);
       assert.match(error("date", "1/8/26"), /Excel date instead of as text/);
 
-      // Four digits is what it asks for, and an explicit early year is honoured rather than
-      // second-guessed: it is what the cell says.
       assert.equal(value("date", "1/8/2026"), "2026-08-01");
       assert.equal(value("date", "1/8/0026"), "0026-08-01");
     });
@@ -196,8 +187,6 @@ describe("validateData()", () => {
     assert.deepEqual(strict.errors.map((e) => e.key), ["tiraje"]);
     assert.match(strict.errors[0].message, /is not a number/);
 
-    // The import wants the row reported, not the run stopped -- but a required field that could
-    // not be read is still an error, or the request would arrive without it.
     const loose = validateData(FIELDS, dirty, { strict: false });
     assert.deepEqual(loose.warnings.map((w) => w.key), ["tiraje"]);
     assert.deepEqual(loose.errors.map((e) => e.key), ["tiraje"]);

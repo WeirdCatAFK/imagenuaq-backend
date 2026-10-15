@@ -29,9 +29,13 @@
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  cleanText,
+  requireId,
+  optionalId,
+} from "../../utils/validate.js";
 
 /**
  * Constraint name to the request field the caller got wrong. Names come from the
@@ -45,12 +49,12 @@ const FK_FIELDS = {
   fk_area_members_user_id_users_id: "userId",
 };
 
-/** `areas.name` is varchar(200); checking here makes a 22001 into a 400 that names the field. */
+/**
+ *  `areas.name` is varchar(200); checking here makes a 22001 into a 400 that names the field.
+ */
 const NAME_MAX = 200;
 
 class Areas {
-  // --- CRUD ---
-
   /**
    * Creates an area, with its first leader and its parent in the same statement -- a
    * second call for either would leave an area nobody is responsible for, or a root
@@ -148,8 +152,6 @@ class Areas {
       });
       if (!area) throw ApiError.notFound("Area not found.");
 
-      // `current` was read to merge the update, so before_data costs nothing here -- the
-      // reason this is emitted from this tier and not the route, where it is already gone.
       await events.emit({
         action: "record_updated",
         target: { table: "areas", id: area.id },
@@ -168,10 +170,6 @@ class Areas {
    * area_hierarchy; people are not, and the NO ACTION foreign key is deliberately the
    * gate -- counting members first would still race a concurrent assignment.
    *
-   * 23503 is caught here rather than in translate() because the code alone cannot say
-   * which direction was violated: Postgres names the referencing table either way, so
-   * only the call site knows whether it asked for a membership or a deletion.
-   *
    * @param {number|string} areaId
    * @throws {ApiError} 404 when it does not exist, 409 when people are still assigned.
    */
@@ -182,7 +180,6 @@ class Areas {
       const area = await query.deleteArea(id);
       if (!area) throw ApiError.notFound("Area not found.");
 
-      // The deleted row IS before_data; a null after_data is what says it is gone.
       await events.emit({
         action: "record_deleted",
         target: { table: "areas", id: area.id },
@@ -200,8 +197,6 @@ class Areas {
     }
   }
 
-  // --- Lookups ---
-
   async getById(areaId) {
     const area = await query.getAreaById(requireId(areaId, "areaId"));
     if (!area) throw ApiError.notFound("Area not found.");
@@ -216,7 +211,6 @@ class Areas {
 
   async getMembers(areaId) {
     const id = requireId(areaId, "areaId");
-    // Checked separately: an empty area and a missing one both return zero rows.
     const area = await query.getAreaById(id);
     if (!area) throw ApiError.notFound("Area not found.");
 
@@ -245,8 +239,6 @@ class Areas {
     );
   }
 
-  // --- Membership ---
-
   async setMembership(userId, areaId, isAreaLeader = false) {
     const user = requireId(userId, "userId");
     const area = requireId(areaId, "areaId");
@@ -258,9 +250,6 @@ class Areas {
         Boolean(isAreaLeader),
       );
 
-      // record_created for what is really an upsert: the trail records the resulting state,
-      // and the area's history read in order already shows whether it was a join or a
-      // promotion.
       await events.emit({
         action: "record_created",
         target: { table: "area_members", id: area },
@@ -296,8 +285,6 @@ class Areas {
       isAreaLeader: row.is_area_leader,
     };
   }
-
-  // --- Hierarchy (RF-USR-09) ---
 
   async getParent(areaId) {
     const id = requireId(areaId, "areaId");
@@ -342,15 +329,11 @@ class Areas {
       );
     }
 
-    // Read before the upsert overwrites it: a move recorded without where the area came
-    // from cannot be read backwards.
     const previousParent = await query.getAreaParent(child);
 
     try {
       const row = await query.setAreaParent(child, parent);
 
-      // Targeted at the area that moved, not at area_hierarchy: somebody reading an area's
-      // history wants the move in the same list as its rename.
       await events.emit({
         action: "record_updated",
         target: { table: "areas", id: child },
@@ -380,8 +363,6 @@ class Areas {
 
     const row = await query.clearAreaParent(id);
 
-    // Only when something actually changed: a trail that records requests rather than
-    // changes buries the rows that matter.
     if (row) {
       await events.emit({
         action: "record_updated",
@@ -394,16 +375,8 @@ class Areas {
     return { areaId: id, parentAreaId: null, changed: row !== null };
   }
 
-  // --- The organisation chart ---
-
   /**
    * The whole organisation as a forest, or one subtree when `rootAreaId` is given.
-   *
-   * Two queries, never one per node: the tree rows, then every member of every area in
-   * it. The nesting is assembled here because shaping is this tier's job and query.js
-   * stays SQL-only. The result is the shape react-organizational-chart nests -- every
-   * node carries its children, and `leaders` is a projection of `members` rather than a
-   * separate set, so the frontend does not filter twice per node.
    *
    * @param {number|string|null} [rootAreaId]
    * @returns {Promise<object[]>} The roots of this chart.
@@ -417,7 +390,6 @@ class Areas {
     }
 
     const rows = await query.getAreaTreeRows(root);
-    // An empty forest is legitimate; the empty-array parameter is handled by #idArray().
     const members = await query.getAreaMembersForAreas(rows.map((row) => row.id));
 
     const membersByArea = new Map();
@@ -443,9 +415,6 @@ class Areas {
       });
     }
 
-    // Attached in walk order, which is by depth, so a node's parent is always already in
-    // the map. A parent that is NOT in the map means the walk started below it -- the
-    // subtree case -- so the node is a root of this chart despite having one in the table.
     const roots = [];
     for (const row of rows) {
       const node = nodes.get(row.id);
@@ -458,50 +427,6 @@ class Areas {
 
     return { roots };
   }
-}
-
-/**
- * Trims, and turns an empty string into null -- a cleared description must not be stored
- * as "", or "" and NULL would both mean "none" and every reader would test for both.
- *
- * @returns {string | null}
- */
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-/**
- * Coerces a JSON or route-parameter id to a positive integer, or null. Rejects "7abc"
- * and booleans, which Number() would turn into NaN and 1.
- *
- * @returns {number | null}
- */
-function toId(value) {
-  if (typeof value === "boolean" || value === null || value === undefined)
-    return null;
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-function requireId(value, field) {
-  const id = toId(value);
-  if (id === null) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
-}
-
-/**
- * Passes null and undefined through; anything else must parse. "No leader given" and
- * "leader given as garbage" are a 201 and a 400.
- *
- * @throws {ApiError} 400 when `value` is present and not a positive integer.
- */
-function optionalId(value, field) {
-  if (value === null || value === undefined) return null;
-  return requireId(value, field);
 }
 
 /**
@@ -530,14 +455,10 @@ function shapeMember(row) {
  */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
-    // uq_areas_name, or the area_hierarchy primary key -- unreachable through
-    // setParent(), which upserts, but a future writer to that table can hit it.
     return ApiError.conflict("An area with that name already exists.");
   }
 
   if (err?.code === FOREIGN_KEY_VIOLATION) {
-    // Always the "you named something that is not there" direction; the other reaches
-    // 23503 under the same constraint name and is handled in delete().
     const field = FK_FIELDS[err.constraint];
     return ApiError.badRequest(
       field ? `Unknown ${field}.` : "A referenced record does not exist.",

@@ -1,8 +1,7 @@
 // Tier 3: staff accounts -- who exists, what they look like, and when they stop existing.
 // Separate from orchestration/auth.js because they answer different questions: auth decides
 // whether a caller is who they say and what a token may claim, this decides what a user
-// record is allowed to look like. The invite token that ties the two together is minted by
-// the route, which composes both.
+// record is allowed to look like. Invites are minted through auth.js.
 //
 // There is deliberately no self-registration. RF-USR-01 groups users into areas and
 // RF-USR-02 assigns them one of three role levels; both are decisions the coordination
@@ -26,11 +25,17 @@
 //     authority, and two callers racing on the same address then resolve correctly instead
 //     of both passing a check and one returning a 500.
 import query from "../resources/query.js";
+import auth from "./auth.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
-
-const UNIQUE_VIOLATION = "23505";
-const FOREIGN_KEY_VIOLATION = "23503";
+import {
+  UNIQUE_VIOLATION,
+  FOREIGN_KEY_VIOLATION,
+  cleanText,
+  toId,
+  requireId,
+  optionalId,
+} from "../../utils/validate.js";
 
 /**
  * Constraint name to the request field the caller got wrong. Names come from the
@@ -109,7 +114,6 @@ class Users {
         isAreaLeader: Boolean(isAreaLeader),
       });
 
-      // Emitted whole; audit.js redacts by column name so the rule lives in one place.
       await events.emit({
         action: "record_created",
         target: { table: "users", id: row.id },
@@ -127,6 +131,20 @@ class Users {
     } catch (err) {
       throw translate(err);
     }
+  }
+
+  /**
+   * A fresh invite for an account nobody has activated yet.
+   *
+   * @param {number} userId
+   * @returns {Promise<string>} The invite token.
+   * @throws {ApiError} 404 when missing, 409 when the account already has a password.
+   */
+  async reissueInvite(userId) {
+    const user = await query.getAuthUserById(userId);
+    if (!user) throw ApiError.notFound("User not found.");
+    if (user.password_hash !== null) throw ApiError.conflict("This account is already active.");
+    return auth.issueInviteToken(user.id);
   }
 
   /**
@@ -225,10 +243,6 @@ class Users {
   /**
    * Updates only the keys the caller sent. The current row is read first and merged here.
    *
-   * The role is deliberately NOT updatable through this method: changing what somebody may
-   * do is a different decision from correcting their birthday, and RF-USR-02 puts it with
-   * the role catalogue rather than the profile form.
-   *
    * @param {number|string} userId
    * @param {object} changes
    * @returns {Promise<object>}
@@ -275,8 +289,6 @@ class Users {
         after: auditable(row),
       });
 
-      // RETURNING gives the bare row; the role name is joined in so the response has the
-      // same shape as getById() and a client can merge it over what it already holds.
       const role = await query.getRoleById(row.role_id);
       return shapeUser({ ...row, role_name: role?.name ?? null }, true);
     } catch (err) {
@@ -335,10 +347,6 @@ class Users {
   async setPicture(userId, bytes, mime) {
     const id = requireId(userId, "userId");
 
-    // The type is checked BEFORE the body, and the order is load-bearing. Express 5 leaves
-    // req.body `undefined` when no parser claimed the request, so a Content-Type off the
-    // allow-list arrives here indistinguishable from no body at all -- and answering "an
-    // image body is required" to a caller who sent one is a refusal that cannot be acted on.
     if (!PICTURE_TYPES.includes(mime)) {
       throw ApiError.badRequest(
         `Content-Type must be one of: ${PICTURE_TYPES.join(", ")}.`,
@@ -352,8 +360,6 @@ class Users {
     const row = await query.updateProfilePicture(id, { data: bytes, mime });
     if (!row) throw ApiError.notFound("User not found.");
 
-    // Whether there is a picture, never the bytes: audit.js does not redact this column
-    // and a log row is not the place for an image.
     await events.emit({
       action: "record_updated",
       target: { table: "users", id },
@@ -483,45 +489,6 @@ function requireName(name) {
   }
 }
 
-/**
- * Trims, and turns an empty string into null.
- *
- * @returns {string | null}
- */
-function cleanText(value) {
-  if (typeof value !== "string") return value == null ? null : value;
-  const trimmed = value.trim();
-  return trimmed === "" ? null : trimmed;
-}
-
-/**
- * Coerces a JSON or route-parameter id to a positive integer, or null. Rejects "7abc"
- * and booleans, which Number() would turn into NaN and 1.
- *
- * @returns {number | null}
- */
-function toId(value) {
-  if (typeof value === "boolean" || value === null || value === undefined)
-    return null;
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-/** @throws {ApiError} 400 when `value` is not a positive integer. */
-function requireId(value, field) {
-  const id = toId(value);
-  if (id === null) {
-    throw ApiError.badRequest(`${field} must be a positive integer.`);
-  }
-  return id;
-}
-
-/** Passes null and undefined through; anything else must parse. */
-function optionalId(value, field) {
-  if (value === null || value === undefined) return null;
-  return requireId(value, field);
-}
-
 /** Keeps a page window sane whatever the query string said. */
 function clampLimit(limit) {
   const n = toId(limit);
@@ -541,7 +508,6 @@ function clampOffset(offset) {
  */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
-    // uq_users_email_live is partial, so a soft-deleted account frees its address.
     return ApiError.conflict("A user with that email address already exists.");
   }
 

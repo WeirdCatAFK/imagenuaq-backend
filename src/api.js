@@ -17,6 +17,7 @@ import dataTypesRouter from './routes/dataTypes.js';
 import statusesRouter from './routes/statuses.js';
 import requestersRouter from './routes/requesters.js';
 import projectsRouter from './routes/projects.js';
+import workflowsRouter from './routes/workflows.js';
 import requestsRouter from './routes/requests.js';
 import contractTypesRouter from './routes/contractTypes.js';
 import docsRouter from './routes/docs.js';
@@ -26,8 +27,10 @@ import { errorHandler } from './middlewares/errorHandler.js';
 import audit from './access/orchestration/audit.js';
 
 
-// Every router, keyed by its mount name under /api/. A map rather than one app.use line
-// each, so the URL comes from a single place.
+/**
+ * Every router, keyed by its mount name under /api/. A map rather than one app.use line
+ * each, so the URL comes from a single place.
+ */
 export const ROUTERS = {
   health: healthRouter,
   spreadsheets: spreadsheetsRouter,
@@ -42,21 +45,19 @@ export const ROUTERS = {
   requesters: requestersRouter,
   requests: requestsRouter,
   projects: projectsRouter,
-  // Quoted because the key IS the URL segment: /api/contract-types, not /api/contractTypes.
+  workflows: workflowsRouter,
   'contract-types': contractTypesRouter,
-  // Swagger UI and the raw document, at /api/docs and /api/docs/openapi.json. It belongs
-  // in this map rather than beside the `/` handler below because it is mounted the same
-  // way everything else is; the only thing unusual about it is that it serves no data.
   docs: docsRouter,
 
 };
 
 export default class Api {
-  // Options fall back to the environment, so main.js constructs this with nothing and a
-  // test can override one field without touching process.env.
+  /**
+   * Options fall back to the environment, so main.js constructs this with nothing and a
+   * test can override one field without touching process.env.
+   */
   constructor(options = {}) {
     this.app = express();
-    // `??`, not `||`: port 0 means "let the OS pick a free one", a real value for tests.
     this.port = options.port ?? Number(process.env.PORT ?? 3000);
     this.host = options.host || process.env.HOST || 'localhost';
     this.logFormat = options.logFormat || process.env.LOG_FORMAT || 'dev';
@@ -67,12 +68,6 @@ export default class Api {
   }
 
   build() {
-    // The audit trail listens for domain events (RF-USR-07). Subscribed here rather than as
-    // an import side effect so that building an Api is what turns it on, and a tool that
-    // imports orchestration without serving HTTP does not quietly acquire a listener
-    // (scripts/createAdmin.js subscribes itself, in the open, for the grants it restores).
-    // The dispatcher keys subscribers by name, so a second Api
-    // in the same process replaces this one instead of logging everything twice.
     audit.subscribe();
 
     this.app.use(helmet());
@@ -80,9 +75,6 @@ export default class Api {
     this.app.use(morgan(this.logFormat));
     this.app.use(express.json());
 
-    // Before the routers, so every handler runs inside a request context, and before
-    // authenticate(), so the public routes have one too -- user_login_failed is emitted
-    // from a request that by definition has no session. See middlewares/context.js.
     this.app.use(requestContext);
 
     this.app.get('/', (_req, res) => res.json({ name: 'imagenuaq-api', status: 'up' }));
@@ -99,7 +91,6 @@ export default class Api {
     return new Promise((resolve, reject) => {
       this.server = this.app.listen(this.port, this.host);
       this.server.once('listening', () => {
-        // Re-read it: with port 0 the bound port is not the requested one.
         this.port = this.server.address().port;
         console.log(`API listening on http://${this.host}:${this.port}`);
         resolve(this.server);

@@ -1,3 +1,11 @@
+// The read half of /api/users: the list, one user, and the search. Writes are
+// users.write.test.js; pictures are users.picture.test.js.
+//
+// The case this file exists for is the two shapes. RF-USR-03 lets any colleague see who
+// else is in the organisation, so these reads are open to every signed-in caller -- but
+// contract type and birthday are coordination's business, and a worker must not receive
+// them. Asserting on the KEY SET rather than on values is deliberate: a field that leaks
+// as `null` still leaks its existence, and a value assertion would pass.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,14 +20,6 @@ import {
   tokenFor,
 } from './helpers/fixtures.js';
 
-// The read half of /api/users: the list, one user, and the search. Writes are
-// users.write.test.js; pictures are users.picture.test.js.
-//
-// The case this file exists for is the two shapes. RF-USR-03 lets any colleague see who
-// else is in the organisation, so these reads are open to every signed-in caller -- but
-// contract type and birthday are coordination's business, and a worker must not receive
-// them. Asserting on the KEY SET rather than on values is deliberate: a field that leaks
-// as `null` still leaks its existence, and a value assertion would pass.
 describe('/api/users reads', () => {
   let server;
   let adminToken;
@@ -43,7 +43,6 @@ describe('/api/users reads', () => {
   });
 
   after(async () => {
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -150,8 +149,6 @@ describe('/api/users reads', () => {
       assert.notEqual(found.deletedAt, null);
     });
 
-    // The flag is a permission, not a preference: honouring it for a worker would hand
-    // them a list the admin shape exists to keep from them.
     test('includeDeleted is ignored for a worker', async () => {
       const doomed = await createPending({ email: 'fuera@uaq.mx', role: 'worker' });
       await softDelete(doomed.id);
@@ -230,8 +227,6 @@ describe('/api/users reads', () => {
   });
 
   describe('GET /api/users/search', () => {
-    // The ordering trick in routes/users.js: declared before '/:id', or Express captures
-    // `search` as an id and answers "Invalid user id." for a URL that is not one.
     test('is not captured by /:id', async () => {
       const res = await server.get('/api/users/search?q=coord', { token: workerToken });
 

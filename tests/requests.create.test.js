@@ -1,3 +1,5 @@
+// Capture and edit (RF-SOL-03, RF-SOL-06, RF-SOL-08). The coercion itself is covered by
+// fieldValues.test.js; here it is the API's use of it.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -10,13 +12,11 @@ import {
   createSchema,
   tokenFor,
   logsFor,
-  roleId,
   sql,
   TEST_SCHEMA_PREFIX,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// Capture and edit (RF-SOL-03, RF-SOL-06, RF-SOL-08). The coercion itself is covered by
-// fieldValues.test.js; here it is the API's use of it.
 describe("/api/requests", () => {
   let server;
   let admin;
@@ -52,7 +52,6 @@ describe("/api/requests", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -63,13 +62,8 @@ describe("/api/requests", () => {
     schema = await createSchema("papel", FIELDS);
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   const create = (body, token = adminToken) => server.post("/api/requests", { token, body });
 
@@ -106,7 +100,6 @@ describe("/api/requests", () => {
         urgente: true,
       });
 
-      // The read carries the format's fields, so a screen can render the capture.
       assert.deepEqual(Object.keys(request.fields), ["deliverables", "information"]);
 
       const logs = await logsFor("requests", request.id);

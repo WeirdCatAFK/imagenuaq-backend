@@ -19,9 +19,11 @@ import { testDatabaseUrl } from '../tests/helpers/env.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..');
 
-// The first mistake: connecting to the database you are about to create. CREATE DATABASE
-// cannot run from inside its own target, so this connects to `postgres`, the maintenance
-// database every server has, and issues the statement from there.
+/**
+ * The first mistake: connecting to the database you are about to create. CREATE DATABASE
+ * cannot run from inside its own target, so this connects to `postgres`, the maintenance
+ * database every server has, and issues the statement from there.
+ */
 const target = new URL(testDatabaseUrl());
 const dbName = decodeURIComponent(target.pathname.slice(1));
 
@@ -46,10 +48,6 @@ try {
   ]);
 
   if (rowCount === 0) {
-    // No parameters: CREATE DATABASE is not preparable, so the name has to be inlined.
-    // Quoting it as an identifier is what keeps that from being an injection -- and the
-    // name is not user input in the first place, it comes from env.js, which has already
-    // refused anything not ending in `_test`.
     await client.query(`create database "${dbName.replace(/"/g, '""')}"`);
     console.log(`  Created database ${dbName}.`);
   }
@@ -57,12 +55,14 @@ try {
   await client.end();
 }
 
-// The second mistake: running `npm run migrate:up`. That script has a `postmigrate:up`
-// hook which runs `npm run dbml`, and genDBML.js reads whatever database DATABASE_URL
-// points at and overwrites the tracked snapshots in dbml/ with it. Pointed at the test
-// database -- as it would be here -- every test run would rewrite committed files with a
-// snapshot named after a schema nobody asked about. Call the binary directly instead; it
-// has no hooks.
+/**
+ * The second mistake: running `npm run migrate:up`. That script has a `postmigrate:up`
+ * hook which runs `npm run dbml`, and genDBML.js reads whatever database DATABASE_URL
+ * points at and overwrites the tracked snapshots in dbml/ with it. Pointed at the test
+ * database -- as it would be here -- every test run would rewrite committed files with a
+ * snapshot named after a schema nobody asked about. Call the binary directly instead; it
+ * has no hooks.
+ */
 const result = spawnSync(
   process.execPath,
   [path.join(repoRoot, 'node_modules', 'node-pg-migrate', 'bin', 'node-pg-migrate.js'), 'up'],

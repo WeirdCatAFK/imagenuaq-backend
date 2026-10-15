@@ -10,10 +10,10 @@ import {
   createSchema,
   tokenFor,
   logsFor,
-  roleId,
+  grantPermissions,
+  sql,
 } from "./helpers/fixtures.js";
 
-// The one crossing from request to project (RF-PRY-01, RF-FLW-06).
 describe("POST /api/requests/:id/convert", () => {
   let server;
   let adminToken;
@@ -48,7 +48,6 @@ describe("POST /api/requests/:id/convert", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -59,13 +58,8 @@ describe("POST /api/requests/:id/convert", () => {
     schema = await createSchema("papel", FIELDS);
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   async function request(overrides = {}) {
     const res = await server.post("/api/requests", {
@@ -87,6 +81,30 @@ describe("POST /api/requests/:id/convert", () => {
   const convert = (id, body = {}, token = adminToken) =>
     server.post(`/api/requests/${id}/convert`, { token, body });
 
+  test("an imported request missing a required value is refused by name", async () => {
+    const made = await request();
+    await sql("update requests set data = data - 'tiraje' where id = $1", [made.id]);
+
+    const res = await convert(made.id);
+
+    assert.equal(res.status, 409);
+    assert.match(res.body.error.message, /"Tiraje"/, "it says which value is missing");
+    assert.match(res.body.error.message, /fill it in before converting/);
+
+    const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
+    assert.deepEqual(
+      read.body.request.missingRequired.map((campo) => campo.code),
+      ["tiraje"],
+      "the request itself says what it owes, so the inbox can show it",
+    );
+
+    await server.patch(`/api/requests/${made.id}`, {
+      token: adminToken,
+      body: { data: { descripcion: "Hojas", tiraje: 500 } },
+    });
+    assert.equal((await convert(made.id)).status, 201, "once filled, it converts");
+  });
+
   test("carries the requester, the title, the priority and every captured value", async () => {
     const made = await request();
 
@@ -101,14 +119,12 @@ describe("POST /api/requests/:id/convert", () => {
     assert.equal(String(project.schemaVersionId), String(made.schemaVersionId));
     assert.deepEqual(conflicts, []);
 
-    // Every value travels, keyed by its field code, stringified, with no stage behind it.
     assert.deepEqual(
       project.fieldValues.map((v) => [v.key, v.value]),
       [["descripcion", "Hojas"], ["fecha_entrega", "2026-03-15"], ["tiraje", "1000"], ["urgente", "true"]],
     );
     assert.ok(project.fieldValues.every((v) => v.producedByStageId === null));
 
-    // The link, both ways.
     assert.deepEqual(project.requests.map((r) => r.folio), [made.folio]);
     const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
     assert.equal(String(read.body.request.projectId), String(project.id));
@@ -149,7 +165,6 @@ describe("POST /api/requests/:id/convert", () => {
     assert.equal(res.body.project.hasCost, true);
     assert.equal(res.body.project.dueOn, "2026-04-01");
 
-    // The request keeps its own requester: the correction applies to the project.
     const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
     assert.equal(read.body.request.requester, "Facultad de Química");
   });
@@ -223,7 +238,6 @@ describe("POST /api/requests/:id/convert", () => {
     assert.equal(stealing.status, 409);
     assert.match(stealing.body.error.message, new RegExp(made.folio));
 
-    // The refused call created nothing.
     const projects = await server.get("/api/projects?state=all", { token: adminToken });
     assert.equal(projects.body.projects.length, 1);
   });

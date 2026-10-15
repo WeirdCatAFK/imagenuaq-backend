@@ -1,3 +1,8 @@
+// Saving and clearing a book's mapping (RF-MIG-02). Validation and the transformation itself are
+// `columnMap.test.js`'s business, pure and fast; what belongs here is the endpoint: whether it
+// refuses what it should, what it stores, and the guards. The two routes that read the workbook
+// live -- preview and import -- are exercised only as far as their guards, for the reason
+// `spreadsheets.guard.test.js` gives: reaching them needs the network.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 
@@ -11,14 +16,9 @@ import {
   createSheet,
   tokenFor,
   logsFor,
-  roleId,
+  grantPermissions,
 } from "./helpers/fixtures.js";
 
-// Saving and clearing a book's mapping (RF-MIG-02). Validation and the transformation itself are
-// `columnMap.test.js`'s business, pure and fast; what belongs here is the endpoint: whether it
-// refuses what it should, what it stores, and the guards. The two routes that read the workbook
-// live -- preview and import -- are exercised only as far as their guards, for the reason
-// `spreadsheets.guard.test.js` gives: reaching them needs the network.
 describe("/api/spreadsheets/:id/mapping", () => {
   let server;
   let admin;
@@ -63,7 +63,6 @@ describe("/api/spreadsheets/:id/mapping", () => {
 
   after(async () => {
     await grantWorker([]);
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -75,13 +74,8 @@ describe("/api/spreadsheets/:id/mapping", () => {
     schema = await createSchema("papel", FIELDS);
   });
 
-  async function grantWorker(permissions) {
-    const res = await server.put(`/api/roles/${await roleId("worker")}/permissions`, {
-      token: adminToken,
-      body: { permissions },
-    });
-    assert.equal(res.status, 200);
-  }
+  const grantWorker = (permissions) =>
+    grantPermissions(server, adminToken, "worker", permissions);
 
   const save = (body, token = adminToken) =>
     server.put(`/api/spreadsheets/${sheet.id}/mapping`, { token, body });
@@ -111,7 +105,6 @@ describe("/api/spreadsheets/:id/mapping", () => {
     );
 
     assert.equal(res.status, 200);
-    // `column` means nothing to a constant, so it is not kept as if it did.
     assert.deepEqual(res.body.sheet.columnMap.title, { op: "constant", value: "Papelería" });
   });
 
@@ -175,7 +168,6 @@ describe("/api/spreadsheets/:id/mapping", () => {
   });
 
   test("without headers the column names are not checked", async () => {
-    // What a client that has not read the book yet can still do.
     const res = await save({
       schemaVersionId: schema.schema_version_id,
       columnMap: { ...MAP, title: { op: "column", column: "Una columna cualquiera" } },
@@ -256,7 +248,6 @@ describe("/api/spreadsheets/:id/mapping", () => {
 
     test("a role with neither permission is refused all of them", async () => {
       for (const [method, path] of ROUTES) {
-        // A GET carries no body: fetch refuses one before the request leaves.
         const options = method === "get" ? { token: workerToken } : { token: workerToken, body: {} };
         const res = await server[method](`/api/spreadsheets/${sheet.id}${path}`, options);
         assert.equal(res.status, 403, `${method} ${path}`);

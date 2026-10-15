@@ -73,8 +73,6 @@ export function coerce(dataType, raw, options = {}) {
     }
 
     case "phone": {
-      // Digits, spaces and the punctuation a phone number is written with. Not validated
-      // against a country plan: the interviews list extensions and internal numbers.
       const value = text(raw);
       return /^[\d\s()+.-]{5,50}$/.test(value)
         ? ok(value.replace(/\s+/g, " "))
@@ -104,7 +102,6 @@ export function coerce(dataType, raw, options = {}) {
     case "currency": {
       const value = number(raw);
       if (value === null) return bad("is not an amount");
-      // Two decimals: money, and the print shop quotes in pesos and cents.
       return ok(Math.round(value * 100) / 100);
     }
 
@@ -125,19 +122,12 @@ export function coerce(dataType, raw, options = {}) {
       return boolean(raw, options);
 
     default:
-      // An unknown type is a schema problem, not a value problem, and the schema validator
-      // already refuses one. Passing the text through keeps a data type added tomorrow from
-      // silently emptying today's captures.
       return ok(text(raw));
   }
 }
 
 /**
  * A whole capture against a format's fields.
- *
- * Unknown keys are **kept**: `RF-SOL-06` says nothing the requester sent is dropped, and a
- * format that loses a field in its next version must not erase what was captured under the old
- * one. They are reported as warnings so a mapping typo is visible.
  *
  * @param {object[]} fields The flattened field list (`fieldList()` in orchestration/schemas.js).
  * @param {object} data
@@ -164,7 +154,6 @@ export function validateData(fields, data, { strict = true } = {}) {
       const message = `"${field.name}" ${error}.`;
       if (strict) errors.push({ key: field.code, message });
       else warnings.push({ key: field.code, message });
-      // A dirty value is not stored: null is honest, the raw text is a lie about its type.
       if (field.required && !strict) {
         errors.push({ key: field.code, message: `"${field.name}" is required.` });
       }
@@ -188,8 +177,6 @@ export function validateData(fields, data, { strict = true } = {}) {
 
   return { data: out, errors, warnings };
 }
-
-/* HELPERS */
 
 function ok(value) {
   return { value, error: null };
@@ -217,10 +204,10 @@ function number(raw) {
 
   const cleaned = text(raw)
     .replace(/[$€\s%]/g, "")
-    .replace(/,(?=\d{3}\b)/g, ""); // thousands separator, not a decimal comma
+    .replace(/,(?=\d{3}\b)/g, "");
 
   const normalised = cleaned.includes(",") && !cleaned.includes(".")
-    ? cleaned.replace(",", ".") // `1,5` is one and a half in Spanish
+    ? cleaned.replace(",", ".")
     : cleaned;
 
   if (normalised === "" || !/^-?\d*\.?\d+$/.test(normalised)) return null;
@@ -244,7 +231,6 @@ function date(raw, options, withTime) {
 
   const value = text(raw);
 
-  // ISO first, whatever `format` says: a client that sends 2026-05-01 means that date.
   const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})([T ].*)?$/);
   if (iso) {
     const parsed = Date.parse(withTime && iso[4] ? value.replace(" ", "T") : `${iso[1]}-${iso[2]}-${iso[3]}T00:00:00Z`);
@@ -261,10 +247,6 @@ function date(raw, options, withTime) {
   if (time) parts[2] = parts[2].slice(0, time.index);
   if (parts.length < 3) return bad(`is not a date written as ${token}`);
 
-  // A two-digit year is refused rather than guessed. `Date.UTC(26, ...)` silently means 1926, so
-  // a cell displaying "1/8/26" would import as a delivery date a hundred years ago and no error
-  // would say so -- the same reason the Excel serials 1 to 60 are refused above. Which century
-  // somebody meant is not ours to invent.
   const writtenYear = (parts[order.year] ?? "").trim();
   if (!/^\d{4}$/.test(writtenYear)) {
     return bad(
@@ -279,9 +261,6 @@ function date(raw, options, withTime) {
   if (![year, month, day].every(Number.isInteger)) return bad(`is not a date written as ${token}`);
   if (month < 1 || month > 12 || day < 1 || day > 31) return bad("is not a valid date");
 
-  // The year is set afterwards, not passed to Date.UTC: that constructor reads 0 to 99 as
-  // 1900 + n, so even a four-digit "0026" would come back as 1926. setUTCFullYear() takes the
-  // year literally, which is the only way the value that comes out is the value that went in.
   const at = new Date(Date.UTC(
     2000,
     month - 1,
@@ -291,8 +270,6 @@ function date(raw, options, withTime) {
     time && time[3] ? Number(time[3]) : 0,
   ));
   at.setUTCFullYear(year);
-  // Rejects 31/02, and 29/02 of a year that has no 29th: the constructor rolls over and the day
-  // no longer matches. 2000 is a leap year, so the check has to run after the year is set.
   if (at.getUTCMonth() !== month - 1 || at.getUTCDate() !== day) return bad("is not a valid date");
 
   return ok(withTime ? at.toISOString() : at.toISOString().slice(0, 10));
@@ -309,4 +286,18 @@ function boolean(raw, options) {
   if (truthy.includes(value)) return ok(true);
   if (falsy.includes(value)) return ok(false);
   return bad(`is not a yes or no value (got "${value}")`);
+}
+
+/**
+ * A captured value as the text `project_field_values.value` stores. Empty is null, so the
+ * caller drops it rather than storing "".
+ *
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function storedText(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value.trim() === "" ? null : value.trim();
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  return JSON.stringify(value);
 }

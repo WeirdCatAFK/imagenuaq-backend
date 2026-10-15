@@ -447,6 +447,7 @@ Table "projects" {
   "archived_at" timestamptz
   "deleted_at" timestamptz
   "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se hereda de la solicitud al convertir.']
+  "workflow_version_id" int8 [note: 'La version de plantilla de la que salio su flujo (DATAMODEL 2.2); nulo si se armo a mano.']
 
   Indexes {
     (priority, created_at) [type: btree, name: "idx_projects_open"]
@@ -481,6 +482,7 @@ Table "requests" {
   "source_data" jsonb [note: 'RF-SOL-06: el renglón completo indexado por encabezado, incluidas las columnas que el mapeo ignora.']
   "source_hash" varchar(64) [note: 'RF-MIG-02: sha256 de las celdas que el mapeo declara, normalizadas. Único por libro; es lo que impide importar dos veces la misma fila.']
   "possible_duplicate_of" int8 [note: 'La solicitud que esta probablemente corrige: mismo título y solicitante en el mismo libro, con la huella cambiada. Lo resuelve una persona.']
+  "workflow_version_id" int8 [note: 'La version de plantilla de la que se copio su flujo; nulo si se diseno desde cero o no tiene flujo.']
 
   Indexes {
     (sheet_id, source_hash) [type: btree, unique, name: "uq_requests_sheet_hash"]
@@ -500,10 +502,6 @@ DEFAULT folio: (\'SOL-\'::text || to_char(nextval(\'requests_folio_seq\'::regcla
 
 Table "project_stages" {
   "id" int8 [pk, not null, increment]
-  "project_id" int8 [not null]
-  "area_id" int8 [not null]
-  "title" varchar(300) [not null]
-  "seq" int4 [not null, default: 1, note: 'Orden de presentacion dentro del proyecto. No decide que sigue.']
   "attempt" int4 [not null, default: 1, note: 'RF-FLW-03: un visto bueno rechazado devuelve el trabajo y la etapa se repite']
   "status" varchar(20) [not null, default: 'pending', note: 'Maquina del flujo. Distinta de statuses, que es el estatus visible del proyecto (RF-EST-01).']
   "blocked_reason" text [note: 'RF-FLW-07: motivo del bloqueo cuando se espera a un tercero externo']
@@ -512,22 +510,18 @@ Table "project_stages" {
   "started_at" timestamptz
   "ended_at" timestamptz
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  "inputs" jsonb [not null, default: `[]`, note: 'RF-FLW-06: claves de project_field_values que esta etapa necesita para trabajar. Informativas: no bloquean.']
-  "outputs" jsonb [not null, default: `[]`, note: 'RF-FLW-06: claves que esta etapa entrega. El visto bueno se niega si alguna no tiene valor.']
+  "flow_stage_id" int8 [not null, note: 'La definicion que este intento ejecuta. Siempre de un proyecto, nunca de una plantilla.']
 
   Indexes {
-    (project_id, area_id, seq, attempt) [type: btree, unique, name: "uq_project_stages_attempt"]
+    (flow_stage_id, attempt) [type: btree, unique, name: "uq_project_stages_attempt"]
     assigned_to [type: btree, name: "idx_project_stages_assigned_to"]
-    (area_id, status) [type: btree, name: "idx_project_stages_open"]
-    project_id [type: btree, name: "idx_project_stages_project_id"]
+    flow_stage_id [type: btree, name: "idx_project_stages_open"]
   }
-  Note: '''RF-FLW-01, RF-FLW-09, RF-PRY-03. La etapa actual es el conjunto de filas con status active, no una columna en projects.
+  Note: '''RF-FLW-01, RF-FLW-03, RF-PRY-03: la ejecucion de una etapa, un renglon por intento. La definicion vive en flow_stages; la etapa actual es el conjunto de filas con status active, no una columna en projects.
 CHECK project_stages_blocked_reason_present: ((status)::text <> \'waiting_external\'::text) OR (blocked_reason IS NOT NULL)
 CHECK project_stages_time_range: (ended_at IS NULL) OR (started_at IS NULL) OR (ended_at >= started_at)
 CHECK project_stages_status_valid: (status)::text = ANY ((ARRAY[\'pending\'::character varying, \'active\'::character varying, \'waiting_external\'::character varying, \'done\'::character varying, \'cancelled\'::character varying])::text[])
-CHECK project_stages_attempt_positive: attempt >= 1
-CHECK project_stages_inputs_is_array: jsonb_typeof(inputs) = \'array\'::text
-CHECK project_stages_outputs_is_array: jsonb_typeof(outputs) = \'array\'::text'''
+CHECK project_stages_attempt_positive: attempt >= 1'''
 }
 
 Table "approvals" {
@@ -637,6 +631,71 @@ Table "sheet_row_marks" {
   Note: 'RF-MIG-02: filas de un libro marcadas como ya vistas sin haberlas importado. Sirve para poner en cero un rastreador que ya traía historia: la importación las salta igual que si existiera la solicitud.'
 }
 
+Table "workflows" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null]
+  "name" varchar(300) [not null]
+  "is_active" bool [not null, default: true]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: 'RF-FLW-02, RF-PRY-06: identidad estable de una plantilla de flujo. Su contenido vive en workflow_versions.'
+}
+
+Table "workflow_versions" {
+  "id" int8 [pk, not null, increment]
+  "workflow_id" int8 [not null]
+  "version" int4 [not null]
+  "published_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "published_by" int8
+
+  Indexes {
+    (workflow_id, version) [type: btree, unique, name: "uq_workflow_versions_version"]
+  }
+  Note: '''DATAMODEL 2.2: inmutable una vez publicada. Editar una plantilla publica una version nueva.
+CHECK workflow_versions_version_positive: version >= 1'''
+}
+
+Table "flow_phases" {
+  "id" int8 [pk, not null, increment]
+  "workflow_version_id" int8
+  "project_id" int8
+  "seq" int4 [not null, note: 'Orden de la fase dentro de su flujo. Es lo que decide que fase sigue.']
+  "name" varchar(100) [not null]
+  "request_id" int8 [note: 'Solicitud duena mientras no se convierte (DATAMODEL 2.5). Al convertir, la fase pasa al proyecto.']
+
+  Indexes {
+    (project_id, seq) [type: btree, unique, name: "uq_flow_phases_project_seq"]
+    (request_id, seq) [type: btree, unique, name: "uq_flow_phases_request_seq"]
+    (workflow_version_id, seq) [type: btree, unique, name: "uq_flow_phases_version_seq"]
+  }
+  Note: '''RF-FLW-02, RF-FLW-09: una fase del flujo. Sus etapas trabajan en paralelo; la siguiente fase empieza cuando esta termina. Pertenece a una version de plantilla, a una solicitud o a un proyecto: exactamente a uno.
+CHECK flow_phases_one_owner: num_nonnulls(workflow_version_id, project_id, request_id) = 1
+CHECK flow_phases_seq_positive: seq >= 1'''
+}
+
+Table "flow_stages" {
+  "id" int8 [pk, not null, increment]
+  "phase_id" int8 [not null]
+  "seq" int4 [not null, default: 1, note: 'Orden de presentacion dentro de la fase. No decide que sigue: las etapas de una fase son paralelas.']
+  "area_id" int8 [not null]
+  "title" varchar(300) [not null]
+  "default_assignee_id" int8 [note: 'Solo en plantillas: la persona sugerida, miembro activo del area al publicar. En un proyecto el responsable es project_stages.assigned_to.']
+  "input_keys" jsonb [not null, default: `[]`, note: 'RF-FLW-06: claves de project_field_values que esta etapa necesita para trabajar. Informativas: no bloquean.']
+  "output_keys" jsonb [not null, default: `[]`, note: 'RF-FLW-06: claves que esta etapa entrega. El visto bueno se niega si alguna no tiene valor.']
+  "input_note" text [note: 'Descripcion libre de lo que entra, para quien lee el flujo.']
+  "output_note" text [note: 'Descripcion libre de lo que sale, para quien lee el flujo.']
+  "estimated_days" int4 [note: 'Dias habiles estimados. Obligatorio en plantillas, opcional en proyectos.']
+
+  Indexes {
+    (phase_id, seq) [type: btree, unique, name: "uq_flow_stages_phase_seq"]
+    area_id [type: btree, name: "idx_flow_stages_area_id"]
+  }
+  Note: '''La definicion de una etapa: que area, que hace, que necesita y que entrega. Su ejecucion (intentos, estatus, fechas) vive en project_stages.
+CHECK flow_stages_seq_positive: seq >= 1
+CHECK flow_stages_input_keys_is_array: jsonb_typeof(input_keys) = \'array\'::text
+CHECK flow_stages_output_keys_is_array: jsonb_typeof(output_keys) = \'array\'::text
+CHECK flow_stages_estimated_days_positive: (estimated_days IS NULL) OR (estimated_days > 0)'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -695,6 +754,18 @@ Ref "files_author_id_fkey":"users"."id" < "files"."author_id"
 
 Ref "files_folder_id_fkey":"folders"."id" < "files"."folder_id"
 
+Ref "flow_phases_project_id_fkey":"projects"."id" < "flow_phases"."project_id"
+
+Ref "flow_phases_request_id_fkey":"requests"."id" < "flow_phases"."request_id"
+
+Ref "flow_phases_workflow_version_id_fkey":"workflow_versions"."id" < "flow_phases"."workflow_version_id" [delete: cascade]
+
+Ref "flow_stages_area_id_fkey":"areas"."id" < "flow_stages"."area_id"
+
+Ref "flow_stages_default_assignee_id_fkey":"users"."id" < "flow_stages"."default_assignee_id"
+
+Ref "flow_stages_phase_id_fkey":"flow_phases"."id" < "flow_stages"."phase_id" [delete: cascade]
+
 Ref "folder_areas_area_id_fkey":"areas"."id" < "folder_areas"."area_id" [delete: cascade]
 
 Ref "folder_areas_folder_id_fkey":"folders"."id" < "folder_areas"."folder_id" [delete: cascade]
@@ -721,13 +792,11 @@ Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "pr
 
 Ref "project_field_values_project_id_fkey":"projects"."id" < "project_field_values"."project_id" [delete: cascade]
 
-Ref "project_stages_area_id_fkey":"areas"."id" < "project_stages"."area_id"
-
 Ref "project_stages_assigned_to_fkey":"users"."id" < "project_stages"."assigned_to"
 
 Ref "project_stages_event_id_fkey":"events"."id" < "project_stages"."event_id"
 
-Ref "project_stages_project_id_fkey":"projects"."id" < "project_stages"."project_id"
+Ref "project_stages_flow_stage_id_fkey":"flow_stages"."id" < "project_stages"."flow_stage_id"
 
 Ref "projects_created_by_fkey":"users"."id" < "projects"."created_by"
 
@@ -738,6 +807,8 @@ Ref "projects_folder_id_fkey":"folders"."id" < "projects"."folder_id"
 Ref "projects_schema_version_id_fkey":"schema_versions"."id" < "projects"."schema_version_id"
 
 Ref "projects_status_id_fkey":"statuses"."id" < "projects"."status_id"
+
+Ref "projects_workflow_version_id_fkey":"workflow_versions"."id" < "projects"."workflow_version_id"
 
 Ref "requests_area_id_fkey":"areas"."id" < "requests"."area_id"
 
@@ -756,6 +827,8 @@ Ref "requests_schema_version_id_fkey":"schema_versions"."id" < "requests"."schem
 Ref "requests_sheet_id_fkey":"sheets"."id" < "requests"."sheet_id"
 
 Ref "requests_status_id_fkey":"statuses"."id" < "requests"."status_id"
+
+Ref "requests_workflow_version_id_fkey":"workflow_versions"."id" < "requests"."workflow_version_id"
 
 Ref "role_permissions_permission_id_fkey":"permissions"."id" < "role_permissions"."permission_id" [delete: cascade]
 
@@ -788,3 +861,7 @@ Ref "fk_users_primary_area_id_areas_id":"areas"."id" < "users"."primary_area_id"
 Ref "fk_users_role_id_roles_id":"roles"."id" < "users"."role_id"
 
 Ref "fk_users_schedule_id_event_collections_id":"event_collections"."id" < "users"."schedule_id"
+
+Ref "workflow_versions_published_by_fkey":"users"."id" < "workflow_versions"."published_by"
+
+Ref "workflow_versions_workflow_id_fkey":"workflows"."id" < "workflow_versions"."workflow_id"

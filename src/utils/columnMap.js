@@ -30,6 +30,13 @@
 // number and the same date typed by hand arrives as a string; `from: "text"` asks for what Excel
 // displays. The probe script prints both so a person can see which a column holds.
 //
+// **A required field the sheet left empty does not reject the row.** The request comes in
+// incomplete, with the field named in `missingRequired`; the inbox says so and conversion to a
+// project is what refuses until somebody fills it. A tracker always carries rows that were
+// started and never finished, and leaving them outside the system is how they get lost. A cell
+// that *has* a value the field's type cannot read is a different thing and still rejects the row:
+// there the sheet says something, and importing it wrong would be worse than not importing it.
+//
 // **`hashColumns` is the row's identity, and an Id column is better than content.** The papel
 // institucional tracker carries a Forms `Id`, so hashing that alone means correcting a typo in
 // the sheet does not look like a new row. The consequence, accepted: an edit after the import is
@@ -124,9 +131,6 @@ export function validateColumnMap(map, fields, headers = null) {
     }
   }
 
-  // A required field with no rule is a request that will always fail validation, which is worth
-  // refusing when the map is saved rather than once per row at import. A field whose rule was
-  // rejected above is not named again: one mistake earns one message.
   for (const field of fields ?? []) {
     if (field.required && out.fields[field.code] === undefined && !attempted.has(field.code)) {
       errors.push(`"${field.name}" is required by the format, so the map has to feed it.`);
@@ -153,17 +157,16 @@ export function validateColumnMap(map, fields, headers = null) {
 /**
  * One row through the map.
  *
- * Never throws: a row that cannot be read comes back with `errors`, because an import reports
- * twenty bad rows rather than stopping at the first.
- *
  * @param {object} map A validated map.
  * @param {object[]} fields The version's fields, flattened.
  * @param {unknown[]} headers
  * @param {unknown[]} row The row's values.
  * @param {unknown[]} [texts] The same row as Excel displays it, for `from: "text"`.
  * @returns {{ title: string|null, requester: string|null, priority: number,
- *   statusCode: string|null, data: object, sourceData: object, sourceHash: string,
- *   errors: {key: string, message: string}[], warnings: {key: string, message: string}[] }}
+ *   statusCode: string|null, data: object, missingRequired: string[], sourceData: object,
+ *   sourceHash: string, errors: {key: string, message: string}[],
+ *   warnings: {key: string, message: string}[] }} `missingRequired` names the required fields the
+ *   row left empty: the request comes in anyway and conversion is what refuses until they exist.
  */
 export function applyMapping(map, fields, headers, row, texts = []) {
   const errors = [];
@@ -181,9 +184,6 @@ export function applyMapping(map, fields, headers, row, texts = []) {
 
   let statusCode = null;
   if (map.status !== undefined) {
-    // `default` on this slot is a status CODE to fall back to, not a value to put in the cell,
-    // so the rule is read without it -- otherwise an empty cell would arrive already holding
-    // "recibido" and then be looked up in the table as if the sheet had said it.
     const { default: fallback, ...reader } = map.status;
     const raw = readRule(reader, cells);
     const text = raw === null ? "" : String(raw).trim();
@@ -194,7 +194,6 @@ export function applyMapping(map, fields, headers, row, texts = []) {
     else {
       statusCode = fallback ?? null;
       if (text !== "") {
-        // Naming it matters: an unlisted status is how "VoBo" would quietly become "recibido".
         warnings.push({
           key: "status",
           message: `Status ${JSON.stringify(text)} is not in the map's table; used ${statusCode ?? "the default"}.`,
@@ -204,6 +203,7 @@ export function applyMapping(map, fields, headers, row, texts = []) {
   }
 
   const data = {};
+  const missingRequired = [];
   for (const field of fields) {
     const rule = map.fields[field.code];
     if (rule === undefined) continue;
@@ -212,8 +212,6 @@ export function applyMapping(map, fields, headers, row, texts = []) {
     const { value, error } = coerce(field.type, raw, rule);
 
     if (error !== null) {
-      // A required field that cannot be read stops the row; an optional one is a warning and the
-      // request arrives without it, which is better than arriving with a lie.
       const message = `"${field.name}" ${error}.`;
       if (field.required) errors.push({ key: field.code, message });
       else warnings.push({ key: field.code, message });
@@ -222,7 +220,11 @@ export function applyMapping(map, fields, headers, row, texts = []) {
 
     if (value === null) {
       if (field.required) {
-        errors.push({ key: field.code, message: `"${field.name}" is required and the row has no value.` });
+        missingRequired.push(field.code);
+        warnings.push({
+          key: field.code,
+          message: `"${field.name}" is required and the row has no value; it comes in missing.`,
+        });
       }
       continue;
     }
@@ -231,12 +233,12 @@ export function applyMapping(map, fields, headers, row, texts = []) {
   }
 
   return {
+    missingRequired,
     title: title === null ? null : String(title).trim(),
     requester: requester === null || String(requester).trim() === "" ? null : String(requester).trim(),
     priority,
     statusCode,
     data,
-    // RF-SOL-06: the whole row by header, including the columns no rule names.
     sourceData: rawRow(cells),
     sourceHash: rowHash(map, headers, row),
     errors,
@@ -260,11 +262,8 @@ export function rowHash(map, headers, row) {
     return index === -1 ? "" : normaliseForHash(row[index]);
   });
 
-  // NUL between the parts so ["ab", "c"] and ["a", "bc"] are different rows.
   return createHash("sha256").update(parts.join("\u0000")).digest("hex");
 }
-
-/* HELPERS */
 
 /** Every column any rule reads, for the fallback identity when no Id column was named. */
 function defaultHashColumns(map) {
@@ -338,7 +337,9 @@ function checkRule(rule, where, target, headerList) {
   return errors;
 }
 
-/** The status slot's table: text to a status code, which orchestration resolves against the catalogue. */
+/**
+ *  The status slot's table: text to a status code, which orchestration resolves against the catalogue.
+ */
 function checkStatusRule(rule) {
   const errors = [];
   const table = rule.map;
@@ -378,7 +379,6 @@ function cellAt(cells, column, from) {
 
   if (from === "text") {
     const text = cells.texts?.[index];
-    // A table's rows carry no formatted text, so `from: "text"` falls back rather than emptying.
     if (text !== undefined && text !== null && text !== "") return text;
   }
   return cells.row[index] ?? null;

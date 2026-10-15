@@ -1,3 +1,5 @@
+// The catalogue half of /api/areas: creating, listing, renaming and deleting. The hierarchy
+// and the chart are areas.orgchart.test.js; memberships are areas.members.test.js.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,16 +14,11 @@ import {
   TEST_PREFIX,
 } from './helpers/fixtures.js';
 
-// The catalogue half of /api/areas: creating, listing, renaming and deleting. The hierarchy
-// and the chart are areas.orgchart.test.js; memberships are areas.members.test.js.
 describe('/api/areas', () => {
   let server;
   let adminToken;
   let workerToken;
 
-  // The two accounts are created ONCE. Re-creating them per case costs two bcrypt hashes at
-  // cost 12 and two real logins -- about four seconds a test -- and nothing any case does
-  // changes either account, so there is nothing for the repetition to protect.
   const ACCOUNTS = ['coordinacion@uaq.mx', 'disenador@uaq.mx'];
 
   before(async () => {
@@ -36,10 +33,6 @@ describe('/api/areas', () => {
   });
 
   after(async () => {
-    // resetCases() before reset(): area_members and users reference areas, so deleting the
-    // areas first raises a foreign-key error, the hook throws, and server.close() never
-    // runs -- which leaves this file's rows behind for whatever runs next.
-    await resetCases();
     await reset();
     await server.close();
   });
@@ -54,8 +47,6 @@ describe('/api/areas', () => {
       assert.equal(res.body.error.message, 'No token provided.');
     });
 
-    // The point of the two-block guard layout in routes/areas.js: reads are open to
-    // everyone signed in (RF-USR-03), writes are not.
     test('a worker may read the list', async () => {
       const res = await server.get('/api/areas', { token: workerToken });
 
@@ -86,11 +77,6 @@ describe('/api/areas', () => {
       });
     }
 
-    // The write block is gated on the permission, not on the role's name (RF-USR-05): a
-    // role nobody seeded, granted area.manage through the API, passes; take the grant
-    // away and the very next request is refused. That second half is the point --
-    // requirePermission() reads role_permissions per request, never from the token, so the
-    // token minted while the grant stood does not keep it.
     test('a role granted area.manage may write, and loses it the moment it is revoked', async () => {
       const created = await server.post('/api/roles', {
         token: adminToken,
@@ -127,7 +113,6 @@ describe('/api/areas', () => {
       assert.equal(refused.status, 403);
       assert.equal(refused.body.error.message, 'Missing permission: area.manage.');
 
-      // Reads were never behind the grant (RF-USR-03), so they survive the revocation.
       const stillReads = await server.get('/api/areas', { token: gestorToken });
       assert.equal(stillReads.status, 200);
     });
@@ -146,8 +131,6 @@ describe('/api/areas', () => {
       assert.ok(Number.isInteger(res.body.area.id));
     });
 
-    // An area created with a leader must arrive with the membership already written --
-    // that is the whole reason it is one statement rather than two calls.
     test('leaderUserId makes that user the area lead in the same statement', async () => {
       const lead = await createActive({ email: 'lider@uaq.mx', role: 'area_lead' });
 
@@ -208,8 +191,6 @@ describe('/api/areas', () => {
       assert.equal(res.body.error.message, 'Unknown userId.');
     });
 
-    // uq_areas_name is a plain unique index, not a partial one: areas have no deleted_at,
-    // so there is no such thing as a freed name.
     test('a duplicate name is 409', async () => {
       await createArea('Repetida');
 
@@ -222,10 +203,6 @@ describe('/api/areas', () => {
       assert.equal(res.body.error.message, 'An area with that name already exists.');
     });
 
-    // Where a new area hangs. .env.test pins DEFAULT_AREA=Coordinación, which is the seeded
-    // root since coordinacion-root, so these cases do not depend on the developer's .env.
-    // The request distinguishes omitted from null: omitted takes the default, null asks
-    // for a root -- and the difference is the whole contract, so both are asserted.
     describe('the default parent (DEFAULT_AREA)', () => {
       const parentOf = async (id) => {
         const chart = await server.get('/api/areas/orgchart', { token: adminToken });
@@ -317,10 +294,6 @@ describe('/api/areas', () => {
         assert.equal(res.body.error.message, 'parentAreaId must be a positive integer.');
       });
 
-      // The variable is read per request, not at boot, so a case can take it away. Two
-      // shapes of "no default": unset, and set to a name no area has. Both fall through
-      // to a root silently -- that is the decision, and the assertion is that nothing
-      // refuses.
       for (const [label, value] of [
         ['unset', undefined],
         ['naming no area', `${TEST_PREFIX}no existe`],
@@ -446,8 +419,6 @@ describe('/api/areas', () => {
       assert.equal(gone.status, 404);
     });
 
-    // The foreign key is the gate, not a count taken first -- a count would race a
-    // concurrent assignment, and this is the case that proves the FK is reached.
     test('an area with members is 409', async () => {
       const area = await createArea('Ocupada por gente');
       const user = await createActive({ email: 'miembro@uaq.mx', role: 'worker' });
