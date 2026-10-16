@@ -562,6 +562,17 @@ Table "project_field_values" {
   Note: 'RF-FLW-06, RF-IMP-08: los datos que una etapa produce y otra consume sin recaptura.'
 }
 
+Table "data_types" {
+  "id" int8 [pk, not null, increment]
+  "code" varchar(50) [unique, not null]
+  "name" varchar(100) [not null]
+  "base_type" varchar(30) [not null]
+  "properties" jsonb [not null, default: `{}`]
+  "is_active" bool [not null, default: true]
+  "created_at" timestamptz [not null]
+  Note: 'DEFAULT created_at: now()'
+}
+
 Table "microsoft_accounts" {
   "id" int8 [pk, not null, increment]
   "user_id" int8 [not null]
@@ -591,17 +602,6 @@ Table "microsoft_app" {
   "updated_by" int8
   Note: '''RF-MIG-01: el registro de aplicacion de Azure con el que se inicia sesion en Microsoft. Una sola fila; si no existe se leen MS_* de .env.
 CHECK microsoft_app_singleton: id = 1'''
-}
-
-Table "data_types" {
-  "id" int8 [pk, not null, increment]
-  "code" varchar(50) [unique, not null]
-  "name" varchar(100) [not null]
-  "base_type" varchar(30) [not null]
-  "properties" jsonb [not null, default: `{}`]
-  "is_active" bool [not null, default: true]
-  "created_at" timestamptz [not null]
-  Note: 'DEFAULT created_at: now()'
 }
 
 Table "sheet_imports" {

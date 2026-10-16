@@ -98,6 +98,12 @@ export async function resetCases(keepEmails = []) {
   // once the audit trail started writing (RF-USR-07) every case leaves rows here and the
   // delete below fails on them. reset() gets away without this because TRUNCATE ... CASCADE
   // follows inbound foreign keys and takes logs with it.
+
+  // Las notificaciones pertenecen a usuarios.
+  // Se eliminan antes de borrar las cuentas de prueba
+  // para respetar la llave foránea notifications.user_id.
+  await sql('delete from notifications');
+
   await sql('delete from logs');
   // The foreign keys read backwards, and the order is load-bearing: `requests.sheet_id`
   // references `sheets`, so an imported request has to go before the book it came from -- which

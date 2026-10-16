@@ -20,10 +20,17 @@ import projectsRouter from './routes/projects.js';
 import requestsRouter from './routes/requests.js';
 import contractTypesRouter from './routes/contractTypes.js';
 import docsRouter from './routes/docs.js';
+import notificationsRouter from './routes/notifications.js';
+
 import { requestContext } from './middlewares/context.js';
 import { notFound } from './middlewares/notFound.js';
 import { errorHandler } from './middlewares/errorHandler.js';
+
+import { createServer } from 'node:http';
+import realtime from './realtime/socket.js';
+
 import audit from './access/orchestration/audit.js';
+import notifications from './access/orchestration/notifications.js';
 
 
 // Every router, keyed by its mount name under /api/. A map rather than one app.use line
@@ -42,6 +49,7 @@ export const ROUTERS = {
   requesters: requestersRouter,
   requests: requestsRouter,
   projects: projectsRouter,
+  notifications: notificationsRouter,
   // Quoted because the key IS the URL segment: /api/contract-types, not /api/contractTypes.
   'contract-types': contractTypesRouter,
   // Swagger UI and the raw document, at /api/docs and /api/docs/openapi.json. It belongs
@@ -75,6 +83,9 @@ export default class Api {
     // in the same process replaces this one instead of logging everything twice.
     audit.subscribe();
 
+    //registra los eventos para la auditoría
+    notifications.subscribe();
+
     this.app.use(helmet());
     this.app.use(cors({ origin: this.corsOrigin }));
     this.app.use(morgan(this.logFormat));
@@ -97,24 +108,39 @@ export default class Api {
 
   start() {
     return new Promise((resolve, reject) => {
-      this.server = this.app.listen(this.port, this.host);
+      this.server = createServer(this.app);
+
+      realtime.start(this.server, this.corsOrigin);
+
       this.server.once('listening', () => {
-        // Re-read it: with port 0 the bound port is not the requested one.
         this.port = this.server.address().port;
         console.log(`API listening on http://${this.host}:${this.port}`);
         resolve(this.server);
       });
+
       this.server.once('error', reject);
+
+      this.server.listen(this.port, this.host);
     });
   }
 
-  stop() {
-    if (!this.server) return Promise.resolve();
-    return new Promise((resolve) => {
-      this.server.close(() => {
-        this.server = null;
-        resolve();
+  async stop() {
+    if (!this.server) return;
+
+    const server = this.server;
+
+    await realtime.stop();
+
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') {
+          reject(error);
+        } else {
+          resolve();
+        }
       });
     });
+
+    this.server = null;
   }
 }

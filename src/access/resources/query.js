@@ -1319,7 +1319,7 @@ class Query {
         select
           created.id, st.area_id, st.title, st.seq, st.status,
           case when st.status = 'active' then current_timestamp end,
-          nullif(st.assigned_to, '')::bigint,
+          nullif(btrim(st.assigned_to), '')::bigint,
           st.inputs::jsonb, st.outputs::jsonb
         from created, unnest(
           $18::bigint[], $19::text[], $20::int[], $21::text[], $22::text[], $23::text[], $24::text[]
@@ -2514,6 +2514,196 @@ class Query {
       [sheetId],
     );
     return row ?? null;
+  }
+  
+
+  //NOTIFICACIONES
+  /*
+   * Crea una notificación para un usuario activo. * Una clave de deduplicación evita notificaciones repetidas para el mismo usuario y situación.
+  */
+
+  //Guarda un aviso para un usr y evita duplpicados cuando se proporciona dedupKey
+  async createNotification({
+    userId,
+    category,
+    type = "generico",
+    title,
+    message,
+    sourceType = null,
+    sourceId = null,
+    dedupKey = null,
+  })
+  {
+    const [row] = await this.#rows(
+      `insert into notifications (
+         user_id, category, type, title, message,
+         source_type, source_id, dedup_key
+       )
+       select u.id, $2, $3, $4, $5,
+              $6::varchar, $7::bigint, $8::varchar
+         from users u
+        where u.id = $1
+          and u.deleted_at is null
+       on conflict (user_id, dedup_key)
+         where dedup_key is not null
+       do nothing
+       returning *`,
+      [
+        userId,
+        category,
+        type,
+        title,
+        message,
+        sourceType,
+        sourceId,
+        dedupKey,
+      ],
+    );
+
+    return row ?? null;
+  }
+
+  /**
+   * Devuelve el historial de notificaciones del usuario, de la más reciente a la más antigua.
+  */
+  async listNotifications(userId, limit = 50, offset = 0) {
+    return this.#rows(
+      `select id, user_id, category, type, title, message,
+              source_type, source_id, created_at, read_at
+         from notifications
+        where user_id = $1
+        order by created_at desc, id desc
+        limit $2 offset $3`,
+      [userId, limit, offset],
+    );
+  }
+
+  /**
+   * Cuenta las notificaciones no leídas de un usuario. (obtiene el numero de las notis pendientes, basicamente)
+  */
+  async countUnreadNotifications(userId) {
+    const [row] = await this.#rows(
+      `select count(*)::int as total
+         from notifications
+        where user_id = $1
+          and read_at is null`,
+      [userId],
+    );
+
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Marca una notificación como leída.
+   * El ID de usuario impide modificar la notificación de otro usuario.
+  */
+  async markNotificationAsRead(notificationId, userId) {
+    const [row] = await this.#rows(
+      `update notifications
+          set read_at = current_timestamp
+        where id = $1
+          and user_id = $2
+          and read_at is null
+        returning id, user_id, read_at`,
+      [notificationId, userId],
+    );
+
+    return row ?? null;
+  }
+
+  /**
+   * Marca como leídas todas las notificaciones no leídas que pertenecen a un usuario.
+  */
+  async markAllNotificationsAsRead(userId) {
+    const rows = await this.#rows(
+      `update notifications
+          set read_at = current_timestamp
+        where user_id = $1
+          and read_at is null
+        returning id`,
+      [userId],
+    );
+
+    return rows.length;
+  }
+
+  /**
+   * Borra todas las notificaciones con + de 6 meses de antiguedad 
+   * Está diseñado para ser llamado por un proceso programado en segundo plano.
+  */
+  async deleteExpiredNotifications() {
+    const [row] = await this.#rows(
+      `with deleted as (
+         delete from notifications
+          where created_at < current_timestamp - interval '6 months'
+          returning id
+       )
+       select count(*)::int as total from deleted`,
+    );
+
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Obtiene los destinatarios de una notificación cuando se activa una etapa de un proyecto
+  */
+  async getStageNotificationRecipients(stageId) {
+    const rows = await this.#rows(
+      
+      `WITH stage_info AS (
+        SELECT
+          ps.id AS stage_id,
+          ps.project_id,
+          ps.area_id,
+          ps.title AS stage_title,
+          ps.assigned_to,
+          p.key AS project_key,
+          p.title AS project_title
+        FROM project_stages ps
+        INNER JOIN projects p
+          ON p.id = ps.project_id
+        WHERE ps.id = $1
+          AND p.deleted_at IS NULL
+      ),
+      recipients AS (
+        -- Usuario asignado a la etapa
+        SELECT assigned_to AS user_id
+        FROM stage_info
+        WHERE assigned_to IS NOT NULL
+
+        UNION
+        -- Líderes del área responsable
+        SELECT am.user_id
+        FROM area_members am
+        INNER JOIN stage_info s
+          ON s.area_id = am.area_id
+        WHERE am.is_area_leader = TRUE
+
+        UNION
+        -- Administradores del sistema
+        SELECT u.id AS user_id
+        FROM users u
+        INNER JOIN roles r
+          ON r.id = u.role_id
+        WHERE r.name = 'admin'
+      )
+      SELECT
+        u.id AS user_id,
+        s.stage_id,
+        s.project_id,
+        s.project_key,
+        s.project_title,
+        s.stage_title
+      FROM recipients recipient
+      INNER JOIN users u
+        ON u.id = recipient.user_id
+      CROSS JOIN stage_info s
+      WHERE u.deleted_at IS NULL
+      ORDER BY u.id`,
+      [stageId]
+    );
+
+    return rows;
   }
 }
 
