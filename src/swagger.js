@@ -4635,6 +4635,51 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/tasks/review': {
+        get: {
+          tags: ['tasks'],
+          summary: 'Delivered stages waiting for my sign-off',
+          description:
+            "Needs task.write. RF-FLW-03. Stages delivered and still open, in the areas the caller leads (coordination: all), most urgent project first. Each as /api/tasks/mine shapes it, plus `assignedToName`.",
+          responses: {
+            200: { description: '`{ stages: [...] }`.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/stages/{stageId}/approvals': {
+        post: {
+          tags: ['tasks'],
+          summary: 'Sign a stage off from the review queue',
+          description:
+            "Needs task.write and leading the stage's area (coordination: any). The same sign-off as POST /api/projects/{id}/stages/{stageId}/approvals, without needing project.write.",
+          parameters: [pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['decision'],
+                  properties: {
+                    decision: { type: 'string', enum: ['approved', 'rejected'] },
+                    comment: { type: ['string', 'null'] },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            201: { description: 'As the project sign-off: `{ approval, stage, reopened, opened }`.' },
+            400: errorResponse('A bad decision.', 'decision must be "approved" or "rejected".'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+            409: errorResponse('Not open, or owes values.', 'Only an open stage can be signed off; this one is done.'),
+          },
+        },
+      },
       '/api/tasks/stages/{stageId}/assignee': {
         put: {
           tags: ['tasks'],

@@ -1,7 +1,8 @@
-// Each person's stages, the area inbox and the load panel (RF-TSK-01 to RF-TSK-06). The unit of
-// work is the project stage: there are no free-standing tasks. Only a leader of the stage's area
-// hands it out, and only to that area's members. Load is a count of open stages, never of hours.
+// Each person's stages, the area inbox, the load panel and the sign-off queue (RF-TSK-01 to RF-TSK-07,
+// RF-FLW-03). The unit of work is the project stage: there are no free-standing tasks. Only a leader
+// of the stage's area hands it out and signs it off. Load is a count of open stages, never of hours.
 import query from "../resources/query.js";
+import projects from "./projects.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -19,6 +20,33 @@ class Tasks {
    */
   async listMine() {
     return { stages: (await query.listAssignedStages(currentActor().id)).map(shapeAssignedStage) };
+  }
+
+  /**
+   * The delivered stages waiting for the caller's sign-off (RF-FLW-03): those of the areas they
+   * lead, every area for coordination.
+   */
+  async listToReview() {
+    const actor = currentActor();
+    const rows = await query.listToReview(actor.role === "admin" ? null : actor.id);
+    return {
+      stages: rows.map((row) => ({ ...shapeAssignedStage(row), assignedToName: row.assigned_to_name ?? null })),
+    };
+  }
+
+  /**
+   * Signs a stage off from the review queue (RF-FLW-03). The same sign-off as the project detail's,
+   * which needs `project.write`; here the leader of the stage's area may give it.
+   *
+   * @param {{decision: 'approved'|'rejected', comment?: string}} input
+   * @throws {ApiError} 400, 403 to anyone but coordination and the area's leaders, 404, 409.
+   */
+  async signOff(stageId, { decision, comment = null }) {
+    const id = requireId(stageId, "stageId");
+    const stage = await query.getProjectStage(id);
+    if (!stage || stage.project_deleted_at !== null) throw ApiError.notFound("Stage not found.");
+    await this.#requireLead(stage.area_id);
+    return projects.approve(stage.project_id, id, { decision, comment });
   }
 
   /**

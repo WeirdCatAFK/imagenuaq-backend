@@ -1,6 +1,6 @@
-// Each person's stages, the area inbox and the load panel (RF-TSK-01 to RF-TSK-06). Reading one's
-// own stages needs `task.read`; handing work out needs `task.write`, and orchestration then checks
-// that the caller leads the stage's area.
+// Each person's stages, the area inbox, the load panel and the sign-off queue (RF-TSK-01 to RF-TSK-07,
+// RF-FLW-03). Reading one's own stages needs `task.read`; handing work out and signing it off need
+// `task.write`, and orchestration then checks that the caller leads the stage's area.
 import { Router } from "express";
 
 import tasks from "../access/orchestration/tasks.js";
@@ -30,6 +30,15 @@ router.get("/workload", async (req, res) => {
 router.get("/overview", async (req, res) => {
   const { from, to } = req.query;
   res.json(await tasks.overview({ from, to }));
+});
+
+router.get("/review", async (req, res) => {
+  res.json(await tasks.listToReview());
+});
+
+router.post("/stages/:stageId/approvals", async (req, res) => {
+  const { decision, comment } = req.body ?? {};
+  res.status(201).json(await tasks.signOff(idParam(req, "stageId", "stage id"), { decision, comment }));
 });
 
 router.put("/stages/:stageId/assignee", async (req, res) => {

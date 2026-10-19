@@ -182,6 +182,41 @@ describe("/api/tasks", () => {
     assert.ok(logs.some((log) => log.action === "record_updated"));
   });
 
+  test("the review queue lists delivered stages of the areas I lead, and I sign them from it", async () => {
+    const made = await project({ title: "Revisión" });
+    const done = await stage(made.id, design.id, { title: "Entregada", assignedTo: ana.id, status: "active" });
+    await stage(made.id, design.id, { title: "Sin entregar", assignedTo: ana.id, status: "active" });
+    const elsewhere = await stage(made.id, print.id, { title: "De impresión", status: "active" });
+    for (const [s, token] of [[done, anaToken], [elsewhere, adminToken]]) {
+      const res = await server.put(`/api/projects/${made.id}/stages/${s.id}/delivery`, {
+        token, body: { note: "Listo" },
+      });
+      assert.equal(res.status, 200);
+    }
+
+    const queue = await server.get("/api/tasks/review", { token: leadToken });
+    assert.equal(queue.status, 200);
+    assert.deepEqual(queue.body.stages.map((s) => s.title), ["Entregada"]);
+    assert.equal(queue.body.stages[0].assignedToName, "Ana");
+    const all = await server.get("/api/tasks/review", { token: adminToken });
+    assert.deepEqual(all.body.stages.map((s) => s.title).sort(), ["De impresión", "Entregada"]);
+    assert.equal((await server.get("/api/tasks/review", { token: anaToken })).status, 403);
+
+    const foreign = await server.post(`/api/tasks/stages/${elsewhere.id}/approvals`, {
+      token: leadToken, body: { decision: "approved" },
+    });
+    assert.equal(foreign.status, 403);
+
+    const signed = await server.post(`/api/tasks/stages/${done.id}/approvals`, {
+      token: leadToken, body: { decision: "rejected", comment: "Falta el logo" },
+    });
+    assert.equal(signed.status, 201);
+    assert.equal(signed.body.approval.decision, "rejected");
+    assert.equal(signed.body.reopened.length, 1);
+    const after = await server.get("/api/tasks/review", { token: leadToken });
+    assert.deepEqual(after.body.stages, []);
+  });
+
   test("load counts open stages, and the suggestion skips who is away", async () => {
     const made = await project();
     await stage(made.id, design.id, { assignedTo: ana.id });

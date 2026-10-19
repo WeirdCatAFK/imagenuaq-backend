@@ -575,9 +575,9 @@ class Projects {
   /**
    * Records a sign-off and moves the stage. `approved` completes it; `rejected` completes it
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
-   * work stays visible instead of overwriting what happened (§2.6). Needs only `project.write`,
-   * with no check that the signer belongs to the stage's area (RF-FLW-03 asks for the author to
-   * be recorded, not for a second permission model).
+   * work stays visible instead of overwriting what happened (§2.6). Callers check who may sign:
+   * the project route asks only for `project.write`, and `tasks.signOff` lets the stage's area
+   * leader sign from the review queue (RF-FLW-03 asks for the author to be recorded).
    *
    * @param {{decision: 'approved'|'rejected', comment?: string, evidenceFileId?: number}} input
    * @throws {ApiError} 400 on a bad decision or unknown evidence file, 404, 409 when the

@@ -3461,6 +3461,33 @@ class Query {
   }
 
   /**
+   * Delivered stages still waiting for their sign-off (RF-FLW-03), in the areas `userId` leads, or
+   * in every area when `userId` is null (coordination). Most urgent project first, never by
+   * arrival (RF-FLW-08).
+   */
+  async listToReview(userId) {
+    return this.#rows(
+      `select ${STAGE_COLUMNS}, p.key as project_key, p.title as project_title,
+              p.priority as project_priority, p.due_on as project_due_on,
+              df.name as delivery_file_name, du.full_name as delivered_by_name,
+              au.full_name as assigned_to_name
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+         left join files df on df.id = ps.delivery_file_id and df.deleted_at is null
+         left join users du on du.id = ps.delivered_by
+         left join users au on au.id = ps.assigned_to
+        where ps.delivered_at is not null
+          and ps.status in ('active', 'waiting_external')
+          and ${LIVE_PROJECT}
+          and ($1::bigint is null
+               or exists (select 1 from area_members am
+                           where am.area_id = fs.area_id and am.user_id = $1 and am.is_area_leader))
+        order by p.priority desc, p.due_on nulls last, ps.delivered_at`,
+      [userId],
+    );
+  }
+
+  /**
    * What `areaId` has to hand out (RF-TSK-01): the open stages of its own with nobody on them,
    * ranked by their project's priority, never by arrival (RF-FLW-08).
    */
