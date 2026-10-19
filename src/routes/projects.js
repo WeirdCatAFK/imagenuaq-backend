@@ -40,6 +40,11 @@ router.post("/:id/finance-request", requirePermission("finance.request"), async 
   });
 });
 
+router.put("/:id/stages/:stageId/delivery", async (req, res) => {
+  const { note, fileId } = req.body ?? {};
+  res.json({ stage: await projects.deliver(projectId(req), stageId(req), { note, fileId }) });
+});
+
 router.use(requirePermission("project.write"));
 
 router.post("/", async (req, res) => {

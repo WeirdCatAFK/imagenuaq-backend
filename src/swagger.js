@@ -1242,6 +1242,11 @@ export function buildOpenApiDocument() {
             startedAt: { type: ['string', 'null'], format: 'date-time' },
             endedAt: { type: ['string', 'null'], format: 'date-time' },
             createdAt: { type: 'string', format: 'date-time' },
+            deliveryNote: { type: ['string', 'null'], description: 'RF-FLW-03: the evidence of what this attempt delivered.' },
+            deliveryFileId: { type: ['integer', 'null'], description: 'files.id of the optional file delivered.' },
+            deliveryFileName: { type: ['string', 'null'], description: 'Only in GET /api/projects/{id}.' },
+            deliveredBy: { type: ['integer', 'null'] },
+            deliveredAt: { type: ['string', 'null'], format: 'date-time' },
             inputs: {
               type: 'array',
               items: { type: 'string' },
@@ -4461,6 +4466,41 @@ export function buildOpenApiDocument() {
             404: errorResponse('Missing or not visible.', 'Folder not found.'),
             413: errorResponse('Larger than MAX_UPLOAD_BYTES.', 'Upload exceeds 536870912 bytes.'),
             503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages/{stageId}/delivery': {
+        put: {
+          tags: ['projects'],
+          summary: 'Deliver an open stage',
+          description:
+            'RF-FLW-03: the written evidence of what the stage delivered and, optionally, a file ' +
+            "already uploaded (normally to the project's folder) that the caller can read. Needs " +
+            "project.read plus being the stage's assignee, a leader of its area, or holding " +
+            'project.write. A second delivery replaces the first; a rerun starts blank.',
+          parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    note: { type: 'string', maxLength: 4000 },
+                    fileId: { type: ['integer', 'null'], description: 'files.id' },
+                  },
+                  required: ['note'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('No note, or a file the caller cannot read.', 'note is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage in that project.', 'Stage not found for that project.'),
+            409: errorResponse('The stage is not open.', 'Only an open stage takes a delivery.'),
           },
         },
       },

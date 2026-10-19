@@ -31,6 +31,7 @@ const TITLE_MAX = 300;
 const REQUESTER_MAX = 300;
 const NOTE_MAX = 2000;
 const DAYS_MAX = 365;
+const DELIVERY_MAX = 4000;
 
 /** The status a project starts at when the caller names none (RF-EST-01). */
 const DEFAULT_STATUS = "recibido";
@@ -525,6 +526,53 @@ class Projects {
   }
 
   /**
+   * Records what an open stage delivered: the written evidence and, optionally, a file the caller
+   * can read -- normally one just uploaded to the project's folder. A second delivery on the same
+   * attempt replaces the first; a rerun starts blank (RF-FLW-03). The person assigned may deliver
+   * without `project.write`, as may a leader of the stage's area.
+   *
+   * @param {{note: string, fileId?: number|null}} input
+   * @throws {ApiError} 400 on no note or an unreadable file, 403, 404, 409 when the stage is
+   *   not open.
+   */
+  async deliver(projectId, stageId, { note, fileId = null }) {
+    const { id, before } = await this.#ownStage(projectId, stageId);
+    if (before.status !== "active" && before.status !== "waiting_external") {
+      throw ApiError.conflict("Only an open stage takes a delivery.");
+    }
+
+    const actor = currentActor();
+    const allowed =
+      String(before.assigned_to) === String(actor.id) ||
+      actor.role === "admin" ||
+      (await query.getRolePermissionCodes(actor.roleId)).includes("project.write") ||
+      (await query.isUserAreaLeader(actor.id, before.area_id));
+    if (!allowed) {
+      throw ApiError.forbidden("Only the person on the stage or its area's leader delivers it.");
+    }
+
+    const text = requireText(note, "note", DELIVERY_MAX);
+    const file = optionalId(fileId, "fileId");
+    if (file !== null) {
+      try {
+        await documents.getFile(file);
+      } catch (err) {
+        if (err?.statusCode === 404) throw ApiError.badRequest("fileId is not a file you can read.");
+        throw err;
+      }
+    }
+
+    const row = await query.setStageDelivery(id, { note: text, fileId: file, deliveredBy: actor.id });
+    await events.emit({
+      action: "record_updated",
+      target: { table: "project_stages", id },
+      before: deliveryOf(before),
+      after: deliveryOf(row),
+    });
+    return shapeStage(await query.getProjectStage(id));
+  }
+
+  /**
    * Records a sign-off and moves the stage. `approved` completes it; `rejected` completes it
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
    * work stays visible instead of overwriting what happened (§2.6). Needs only `project.write`,
@@ -887,6 +935,15 @@ function definitionOf(stage) {
   };
 }
 
+function deliveryOf(stage) {
+  return {
+    delivery_note: stage.delivery_note,
+    delivery_file_id: stage.delivery_file_id,
+    delivered_by: stage.delivered_by,
+    delivered_at: stage.delivered_at,
+  };
+}
+
 function executionOf(stage) {
   return {
     id: stage.id,
@@ -1013,6 +1070,10 @@ function shapeStage(row) {
     inputNote: row.input_note ?? null,
     outputNote: row.output_note ?? null,
     estimatedDays: row.estimated_days ?? null,
+    deliveryNote: row.delivery_note ?? null,
+    deliveryFileId: row.delivery_file_id ?? null,
+    deliveredBy: row.delivered_by ?? null,
+    deliveredAt: row.delivered_at ?? null,
   };
 }
 

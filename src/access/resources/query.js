@@ -1453,10 +1453,15 @@ class Query {
               'inputs', fs.input_keys, 'outputs', fs.output_keys,
               'inputNote', fs.input_note, 'outputNote', fs.output_note,
               'estimatedDays', fs.estimated_days,
+              'deliveryNote', ps.delivery_note, 'deliveryFileId', df.id,
+              'deliveryFileName', df.name, 'deliveredBy', ps.delivered_by,
+              'deliveredByName', du.full_name, 'deliveredAt', ps.delivered_at,
               'approvals', coalesce(ap.list, '[]'::json)
             ) as stage
           from ${STAGE_FROM}
           left join users au on au.id = ps.assigned_to
+          left join files df on df.id = ps.delivery_file_id and df.deleted_at is null
+          left join users du on du.id = ps.delivered_by
           left join lateral (
             select json_agg(json_build_object(
               'id', v.id, 'decision', v.decision, 'approverUserId', v.approver_user_id,
@@ -3433,6 +3438,19 @@ class Query {
     );
     return row.used;
   }
+  /** Records what a stage attempt delivered, replacing any earlier delivery of the same attempt. */
+  async setStageDelivery(stageId, { note, fileId, deliveredBy }) {
+    const [row] = await this.#rows(
+      `update project_stages
+          set delivery_note = $2, delivery_file_id = $3::bigint,
+              delivered_by = $4::bigint, delivered_at = current_timestamp
+        where id = $1
+        returning *`,
+      [stageId, note, fileId, deliveredBy],
+    );
+    return row ?? null;
+  }
+
 }
 
 export default new Query();
