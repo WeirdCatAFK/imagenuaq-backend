@@ -1,19 +1,5 @@
-// The OpenAPI description of this API, hand-written.
-//
-// Hand-written rather than generated from JSDoc annotations (`swagger-jsdoc`) for two
-// reasons. The annotation form spreads one document across every route file in a YAML
-// dialect embedded in comments, where a typo is a silent omission rather than an error --
-// and this repository already keeps its route table in one place on purpose (`ROUTERS` in
-// src/api.js), for the same reason. A single module is also the only form that can be
-// asserted against: tests/docs.test.js reads this object and fails when a mounted router
-// has no documented path, which is the drift a generator is usually bought to prevent.
-//
-// The cost is that this file is updated by hand when a route changes. That is the trade,
-// and the test is what keeps it honest.
-//
-// OpenAPI 3.1 rather than 3.0: it is the version that agrees with JSON Schema, so a
-// nullable field is `type: ['integer', 'null']` instead of 3.0's bespoke `nullable: true`.
-// swagger-ui-dist 5.x, which swagger-ui-express 5 bundles, renders it.
+// The hand-written OpenAPI 3.1 description of the API. tests/docs.test.js fails when a mounted
+// route is missing from it, so update it with every route change.
 
 // Reusable error body. Every refusal in this API comes out of middlewares/errorHandler.js
 // in this one shape, including the ones Express's body parser raises before our code runs.
@@ -267,10 +253,29 @@ export function buildOpenApiDocument() {
           '`status.manage`.',
       },
       {
+        name: 'documents',
+        description:
+          'The folder tree and its files (RF-ARC-01, RF-ARC-02). Names and folders live in ' +
+          'Postgres, bytes in MinIO keyed by SHA-256, so renames and moves never touch the ' +
+          'bytes. Reads need `document.read`, writes `document.write`, and deleting or resharing ' +
+          'other people’s work `document.manage`, issuing share links `document.share`. Names need not be unique: items are told ' +
+          'apart by id. Which folders a person may ' +
+          'touch comes from owning the folder or an ancestor, or from the nearest ancestor ' +
+          'shared with one of their areas. A folder you cannot read is a 404.',
+      },
+      {
         name: 'data-types',
         description:
           'The catalogue of field types a format may use. Read-only: a type is a coercion ' +
           'rule the server implements, so adding one is a migration.',
+      },
+      {
+        name: 'tasks',
+        description:
+          "Each person's stages, the area inbox and the load panel (RF-TSK-01 to RF-TSK-07). The " +
+          'unit of work is the project stage; there are no free-standing tasks. Reading your own ' +
+          'stages needs `task.read`; handing work out needs `task.write` and leading the ' +
+          "stage's area (admin leads every area). Load is a count of open stages, never hours.",
       },
     ],
     components: {
@@ -307,6 +312,16 @@ export function buildOpenApiDocument() {
                   description: 'Present when not reachable.',
                   example: 'ECONNREFUSED',
                 },
+              },
+              required: ['reachable'],
+            },
+            storage: {
+              type: 'object',
+              description: 'The MinIO bucket file content lives in. Same shape as `database`.',
+              properties: {
+                reachable: { type: 'boolean' },
+                latencyMs: { type: 'integer', example: 4 },
+                error: { type: 'string', example: 'Storage is not open. Call openStorage() first.' },
               },
               required: ['reachable'],
             },
@@ -1235,6 +1250,11 @@ export function buildOpenApiDocument() {
             startedAt: { type: ['string', 'null'], format: 'date-time' },
             endedAt: { type: ['string', 'null'], format: 'date-time' },
             createdAt: { type: 'string', format: 'date-time' },
+            deliveryNote: { type: ['string', 'null'], description: 'RF-FLW-03: the evidence of what this attempt delivered.' },
+            deliveryFileId: { type: ['integer', 'null'], description: 'files.id of the optional file delivered.' },
+            deliveryFileName: { type: ['string', 'null'], description: 'Only in GET /api/projects/{id}.' },
+            deliveredBy: { type: ['integer', 'null'] },
+            deliveredAt: { type: ['string', 'null'], format: 'date-time' },
             inputs: {
               type: 'array',
               items: { type: 'string' },
@@ -1699,6 +1719,197 @@ export function buildOpenApiDocument() {
           },
           required: ['name', 'uses'],
         },
+        Folder: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 12 },
+            parentId: { type: ['integer', 'null'], description: 'Null: a root.' },
+            name: { type: 'string', example: 'Diseño' },
+            ownerId: { type: 'integer' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'parentId', 'name', 'ownerId'],
+        },
+        FolderDetail: {
+          allOf: [
+            { $ref: '#/components/schemas/Folder' },
+            {
+              type: 'object',
+              properties: {
+                access: {
+                  type: 'string',
+                  enum: ['owner', 'write', 'read'],
+                  description: 'What the caller may do here. `owner` includes deleting and sharing.',
+                },
+                folders: { type: 'array', items: { $ref: '#/components/schemas/Folder' } },
+                files: { type: 'array', items: { $ref: '#/components/schemas/FileEntry' } },
+                areas: { type: 'array', items: { $ref: '#/components/schemas/FolderGrant' } },
+              },
+            },
+          ],
+        },
+        FileEntry: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', example: 40 },
+            folderId: { type: 'integer' },
+            authorId: { type: 'integer' },
+            name: { type: 'string', example: 'propuesta final.pdf' },
+            size: { type: 'integer', description: 'Bytes.', example: 204800 },
+            mime: { type: ['string', 'null'], example: 'application/pdf' },
+            hash: {
+              type: 'string',
+              description: 'SHA-256 of the content. Two files with the same bytes share it.',
+            },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'folderId', 'name', 'size', 'hash'],
+        },
+        ShareLink: {
+          type: 'object',
+          description: 'A read-only link to a folder. The token is never listed; only creation returns it.',
+          properties: {
+            id: { type: 'integer' },
+            folderId: { type: 'integer' },
+            authorizer: { type: 'integer', description: 'users.id of who issued it.' },
+            expiresAt: { type: 'string', format: 'date-time' },
+            revokedAt: { type: ['string', 'null'], format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+          },
+          required: ['id', 'folderId', 'authorizer', 'expiresAt'],
+        },
+        InboxItem: {
+          type: 'object',
+          description: 'An open stage an area still has to hand out: nobody is on it.',
+          properties: {
+            id: { type: 'integer', description: 'project_stages.id' },
+            title: { type: 'string' },
+            priority: { type: 'integer', description: "The project's priority." },
+            dueOn: { type: ['string', 'null'], format: 'date' },
+            projectId: { type: 'integer' },
+            projectKey: { type: 'string' },
+            projectTitle: { type: 'string' },
+            phaseName: { type: 'string' },
+          },
+        },
+        Workload: {
+          type: 'object',
+          properties: {
+            from: { type: 'string', format: 'date' },
+            to: { type: 'string', format: 'date' },
+            members: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  userId: { type: 'integer' },
+                  name: { type: 'string' },
+                  isAreaLeader: { type: 'boolean' },
+                  openStages: { type: 'integer' },
+                  awayDays: {
+                    type: 'integer',
+                    description: 'Days in the window an approved absence covers. Never the reason (RF-TSK-07).',
+                  },
+                  awayDates: {
+                    type: 'array',
+                    items: { type: 'string', format: 'date' },
+                    description: 'Those days, YYYY-MM-DD. Never the reason.',
+                  },
+                  stages: { type: 'array', items: { $ref: '#/components/schemas/LoadStage' } },
+                  suggested: { type: 'boolean', description: 'The lightest member not away in the window.' },
+                },
+              },
+            },
+          },
+        },
+        LoadStage: {
+          type: 'object',
+          description: "An open stage a person is on, in any area.",
+          properties: {
+            id: { type: 'integer', description: 'project_stages.id' },
+            title: { type: 'string' },
+            status: { type: 'string', enum: ['pending', 'active', 'waiting_external'] },
+            areaName: { type: 'string' },
+            phaseName: { type: 'string' },
+            projectId: { type: 'integer' },
+            projectKey: { type: 'string' },
+            projectTitle: { type: 'string' },
+            priority: { type: 'integer' },
+            dueOn: { type: ['string', 'null'], format: 'date' },
+          },
+        },
+        TaskOverview: {
+          type: 'object',
+          properties: {
+            from: { type: 'string', format: 'date' },
+            to: { type: 'string', format: 'date' },
+            areas: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  name: { type: 'string' },
+                  unassigned: { type: 'integer', description: 'Open stages with nobody on them.' },
+                  late: { type: 'integer', description: 'Of those, the ones whose project is past due.' },
+                  members: { $ref: '#/components/schemas/Workload/properties/members' },
+                },
+              },
+            },
+          },
+        },
+        Retention: {
+          type: 'object',
+          properties: {
+            months: { type: 'integer', minimum: 1, default: 6 },
+            updatedBy: { type: ['integer', 'null'], readOnly: true },
+            updatedAt: { type: 'string', format: 'date-time', readOnly: true },
+          },
+          required: ['months'],
+        },
+        SharedFolder: {
+          type: 'object',
+          description: 'What a share link shows: names, sizes and types; no owners, authors or hashes.',
+          properties: {
+            expiresAt: { type: 'string', format: 'date-time' },
+            folder: {
+              type: 'object',
+              properties: {
+                id: { type: 'integer' },
+                name: { type: 'string' },
+                folders: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: { id: { type: 'integer' }, name: { type: 'string' } },
+                  },
+                },
+                files: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      id: { type: 'integer' },
+                      name: { type: 'string' },
+                      size: { type: 'integer' },
+                      mime: { type: ['string', 'null'] },
+                      createdAt: { type: 'string', format: 'date-time' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        FolderGrant: {
+          type: 'object',
+          properties: {
+            areaId: { type: 'integer' },
+            areaName: { type: 'string', readOnly: true },
+            level: { type: 'string', enum: ['read', 'write'] },
+          },
+          required: ['areaId', 'level'],
+        },
         Status: {
           type: 'object',
           properties: {
@@ -2086,17 +2297,18 @@ export function buildOpenApiDocument() {
       '/api/health': {
         get: {
           tags: ['service'],
-          summary: 'Database reachability',
+          summary: 'Database and file-store reachability',
           security: [],
           responses: {
             200: {
-              description: 'Postgres answered.',
+              description: 'Postgres and MinIO answered.',
               content: {
                 'application/json': {
                   schema: { $ref: '#/components/schemas/HealthReport' },
                   example: {
                     status: 'ok',
                     database: { reachable: true, latencyMs: 3 },
+                    storage: { reachable: true, latencyMs: 4 },
                     uptime: 412.7,
                   },
                 },
@@ -2104,7 +2316,7 @@ export function buildOpenApiDocument() {
             },
             503: {
               description:
-                'Postgres did not answer. The body is the same shape as the 200 -- the ' +
+                'Postgres or MinIO did not answer. The body is the same shape as the 200 -- the ' +
                 'report is the response, not an error.',
               content: {
                 'application/json': {
@@ -2112,6 +2324,7 @@ export function buildOpenApiDocument() {
                   example: {
                     status: 'degraded',
                     database: { reachable: false, error: 'ECONNREFUSED' },
+                    storage: { reachable: true, latencyMs: 4 },
                     uptime: 412.7,
                   },
                 },
@@ -2163,8 +2376,15 @@ export function buildOpenApiDocument() {
                 'application/json': {
                   schema: {
                     type: 'object',
-                    properties: { user: { $ref: '#/components/schemas/SessionUser' } },
-                    required: ['user'],
+                    properties: {
+                      user: { $ref: '#/components/schemas/SessionUser' },
+                      permissions: {
+                        type: 'array',
+                        items: { type: 'string' },
+                        description: "The role's live permission codes, for the client to show what it may use.",
+                      },
+                    },
+                    required: ['user', 'permissions'],
                   },
                 },
               },
@@ -3767,6 +3987,23 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/projects/{id}/folder': {
+        get: {
+          tags: ['projects'],
+          summary: "The project's folder, created on first use",
+          description:
+            'Every project gets a folder named by its key, and each area with a stage in the ' +
+            'project gets write access to it (RF-ARC-01, RF-ARC-02). Folder access is checked as ' +
+            'in /api/documents, so a project reader outside those areas gets a 404.',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: wrapped('The folder.', 'folder', 'FolderDetail'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project, or its folder is not visible.', 'Folder not found.'),
+          },
+        },
+      },
       '/api/projects/{id}/stages': {
         get: {
           tags: ['projects'],
@@ -4141,6 +4378,602 @@ export function buildOpenApiDocument() {
         },
       },
 
+      '/api/documents/folders': {
+        get: {
+          tags: ['documents'],
+          summary: 'Where browsing starts',
+          description:
+            'The roots the caller owns plus every folder shared with one of their areas. ' +
+            'An admin gets every root.',
+          responses: {
+            200: wrapped('The folders.', 'folders', 'Folder', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['documents'],
+          summary: 'Create a folder',
+          description:
+            'Without `parentId`, a root owned by the caller. With it, a subfolder, which needs ' +
+            'write access to the parent.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', maxLength: 255, example: 'Diseño' },
+                    parentId: { type: ['integer', 'null'] },
+                  },
+                  required: ['name'],
+                },
+              },
+            },
+          },
+          responses: {
+            201: wrapped('The folder.', 'folder', 'Folder'),
+            400: errorResponse('A bad name or parentId.', 'name is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('The parent does not exist or is not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}': {
+        get: {
+          tags: ['documents'],
+          summary: 'A folder with its subfolders, files and area grants',
+          parameters: [pathId('id', 'folders.id')],
+          responses: {
+            200: wrapped('The folder.', 'folder', 'FolderDetail'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing, deleted or not visible.', 'Folder not found.'),
+          },
+        },
+        patch: {
+          tags: ['documents'],
+          summary: 'Rename and/or move a folder',
+          description:
+            'Only the rows change. `parentId: null` makes it a root, which only its owner may ' +
+            'do; moving under another folder needs write access there too.',
+          parameters: [pathId('id', 'folders.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', maxLength: 255 },
+                    parentId: { type: ['integer', 'null'] },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The folder.', 'folder', 'Folder'),
+            400: errorResponse('A bad name, or a move into its own subtree.', 'A folder cannot be moved inside itself.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+        delete: {
+          tags: ['documents'],
+          summary: 'Delete a folder, its subtree and their files',
+          description:
+            'Soft delete. Needs ownership of the folder or an ancestor, or write access plus ' +
+            'the `document.manage` permission (RF-USR-05).',
+          parameters: [pathId('id', 'folders.id')],
+          responses: {
+            200: {
+              description: 'The folder as it was, with counts of what went with it.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      folder: {
+                        allOf: [
+                          { $ref: '#/components/schemas/Folder' },
+                          {
+                            type: 'object',
+                            properties: {
+                              foldersDeleted: { type: 'integer' },
+                              filesDeleted: { type: 'integer' },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}/areas': {
+        put: {
+          tags: ['documents'],
+          summary: 'Replace the areas a folder is shared with',
+          description:
+            'Inherited by everything beneath it until a folder further down carries grants of ' +
+            'its own. Needs ownership, or write access plus `document.manage`.',
+          parameters: [pathId('id', 'folders.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    areas: { type: 'array', items: { $ref: '#/components/schemas/FolderGrant' } },
+                  },
+                  required: ['areas'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The grants now.', 'areas', 'FolderGrant', true),
+            400: errorResponse('A bad grant or an unknown area.', "level must be 'read' or 'write'."),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}/files': {
+        post: {
+          tags: ['documents'],
+          summary: 'Upload a file',
+          description:
+            'The request body is the file itself, streamed, not multipart. Its name goes in ' +
+            '`name`, its type in Content-Type. Needs write access to the folder.',
+          parameters: [
+            pathId('id', 'folders.id'),
+            { name: 'name', in: 'query', required: true, schema: { type: 'string', maxLength: 255 } },
+          ],
+          requestBody: {
+            required: true,
+            content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+          },
+          responses: {
+            201: wrapped('The file.', 'file', 'FileEntry'),
+            400: errorResponse('A bad name.', 'name cannot contain slashes or control characters, or be . or ..'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            413: errorResponse('Larger than MAX_UPLOAD_BYTES.', 'Upload exceeds 536870912 bytes.'),
+            503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/tasks/mine': {
+        get: {
+          tags: ['tasks'],
+          summary: 'My work',
+          description:
+            'RF-TSK-03: the open stages the caller is responsible for, most urgent project first, ' +
+            'with their delivery. A delivered stage stays until its sign-off closes it.',
+          responses: {
+            200: {
+              description: 'The stages.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      stages: { type: 'array', items: { $ref: '#/components/schemas/ProjectStage' } },
+                    },
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/unassigned': {
+        get: {
+          tags: ['tasks'],
+          summary: "An area's inbox",
+          description:
+            "Needs task.write and leading the area (coordination may read any). Unassigned open stages of the area, by urgency, never by arrival (RF-FLW-08).",
+          parameters: [{ name: 'areaId', in: 'query', required: true, schema: { type: 'integer' } }],
+          responses: {
+            200: wrapped('The inbox.', 'items', 'InboxItem', true),
+            400: errorResponse('No area.', 'areaId is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/workload': {
+        get: {
+          tags: ['tasks'],
+          summary: "An area's load per person",
+          description:
+            "Needs task.write and leading the area (coordination may read any). RF-TSK-06, RF-TSK-07, RF-RPT-02. The window defaults to the next 7 days.",
+          parameters: [
+            { name: 'areaId', in: 'query', required: true, schema: { type: 'integer' } },
+            { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } },
+            { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } },
+          ],
+          responses: {
+            200: jsonResponse('The members, lightest first.', 'Workload'),
+            400: errorResponse('A bad window.', 'to must not be earlier than from.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/overview': {
+        get: {
+          tags: ['tasks'],
+          summary: 'Every area the caller hands work out in, at a glance',
+          description:
+            "Needs task.write. Coordination gets every area; a leader, the areas they lead. Each with its inbox count and its team's load, as /api/tasks/workload shapes it.",
+          parameters: [
+            { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } },
+            { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } },
+          ],
+          responses: {
+            200: jsonResponse('The areas, by name.', 'TaskOverview'),
+            400: errorResponse('A bad window.', 'to must not be earlier than from.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/review': {
+        get: {
+          tags: ['tasks'],
+          summary: 'Delivered stages waiting for my sign-off',
+          description:
+            "Needs task.write. RF-FLW-03. Stages delivered and still open, in the areas the caller leads (coordination: all), most urgent project first. Each as /api/tasks/mine shapes it, plus `assignedToName`.",
+          responses: {
+            200: { description: '`{ stages: [...] }`.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/stages/{stageId}/approvals': {
+        post: {
+          tags: ['tasks'],
+          summary: 'Sign a stage off from the review queue',
+          description:
+            "Needs task.write and leading the stage's area (coordination: any). The same sign-off as POST /api/projects/{id}/stages/{stageId}/approvals, without needing project.write.",
+          parameters: [pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['decision'],
+                  properties: {
+                    decision: { type: 'string', enum: ['approved', 'rejected'] },
+                    comment: { type: ['string', 'null'] },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            201: { description: 'As the project sign-off: `{ approval, stage, reopened, opened }`.' },
+            400: errorResponse('A bad decision.', 'decision must be "approved" or "rejected".'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+            409: errorResponse('Not open, or owes values.', 'Only an open stage can be signed off; this one is done.'),
+          },
+        },
+      },
+      '/api/tasks/stages/{stageId}/assignee': {
+        put: {
+          tags: ['tasks'],
+          summary: 'Hand an inbox stage to a member',
+          description:
+            "Needs task.write and leading the stage's area. `userId` null sends it back to the inbox.",
+          parameters: [pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { userId: { type: ['integer', 'null'] } } },
+              },
+            },
+          },
+          responses: {
+            200: { description: '`{ stage: { id, assignedTo } }`.' },
+            400: errorResponse('Not a member of the area.', "The assignee must be a member of the stage's area."),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+            409: errorResponse('The stage is done or cancelled.', 'A done stage cannot be reassigned.'),
+          },
+        },
+      },
+      '/api/projects/{id}/stages/{stageId}/delivery': {
+        put: {
+          tags: ['projects'],
+          summary: 'Deliver an open stage',
+          description:
+            'RF-FLW-03: the written evidence of what the stage delivered and, optionally, a file ' +
+            "already uploaded (normally to the project's folder) that the caller can read. Needs " +
+            "project.read plus being the stage's assignee, a leader of its area, or holding " +
+            'project.write. A second delivery replaces the first; a rerun starts blank.',
+          parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    note: { type: 'string', maxLength: 4000 },
+                    fileId: { type: ['integer', 'null'], description: 'files.id' },
+                  },
+                  required: ['note'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('No note, or a file the caller cannot read.', 'note is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage in that project.', 'Stage not found for that project.'),
+            409: errorResponse('The stage is not open.', 'Only an open stage takes a delivery.'),
+          },
+        },
+      },
+      '/api/documents/retention': {
+        get: {
+          tags: ['documents'],
+          summary: 'How long files live',
+          description:
+            'Months a file lives once its project is closed or archived, or since upload when ' +
+            'it is under no project. Files of open projects never expire. A daily sweep ' +
+            'soft-deletes what is past it, logs `file_expired` and reclaims the bytes.',
+          responses: {
+            200: wrapped('The retention.', 'retention', 'Retention'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        put: {
+          tags: ['documents'],
+          summary: 'Change how long files live',
+          description: 'Needs `document.manage`.',
+          requestBody: jsonBody('Retention'),
+          responses: {
+            200: wrapped('The retention now.', 'retention', 'Retention'),
+            400: errorResponse('Not a positive integer.', 'months must be a positive integer.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/documents/{id}': {
+        get: {
+          tags: ['documents'],
+          summary: "A file's metadata",
+          parameters: [pathId('id', 'files.id')],
+          responses: {
+            200: wrapped('The file.', 'file', 'FileEntry'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+          },
+        },
+        patch: {
+          tags: ['documents'],
+          summary: 'Rename and/or move a file',
+          description: 'Only the row changes. Needs write where it is and where it goes.',
+          parameters: [pathId('id', 'files.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', maxLength: 255 },
+                    folderId: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The file.', 'file', 'FileEntry'),
+            400: errorResponse('A bad name or folderId.', 'name is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+          },
+        },
+        delete: {
+          tags: ['documents'],
+          summary: 'Delete a file',
+          description:
+            'Soft delete; the bytes stay in MinIO. Needs to be the author of the file, own the ' +
+            'folder, or have write access plus `document.manage`.',
+          parameters: [pathId('id', 'files.id')],
+          responses: {
+            200: wrapped('The file as it was.', 'file', 'FileEntry'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+          },
+        },
+      },
+      '/api/documents/{id}/content': {
+        get: {
+          tags: ['documents'],
+          summary: 'Download a file',
+          description: 'Streamed, with Content-Disposition: attachment and the stored type.',
+          parameters: [pathId('id', 'files.id')],
+          responses: {
+            200: {
+              description: 'The bytes.',
+              content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'File not found.'),
+            503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/documents/folders/{id}/links': {
+        get: {
+          tags: ['documents'],
+          summary: 'Working share links on a folder',
+          description:
+            'Not revoked and not expired, newest first. Needs `document.share` and read access.',
+          parameters: [pathId('id', 'folders.id')],
+          responses: {
+            200: wrapped('The links, without tokens.', 'links', 'ShareLink', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+        post: {
+          tags: ['documents'],
+          summary: 'Issue a read-only share link to a folder',
+          description:
+            'Anyone holding the token can browse the folder and everything beneath it and ' +
+            'download its files, without an account, until `expiresAt` (RF-EXT-03). Needs ' +
+            '`document.share` and read access to the folder. The token is in this response ' +
+            'only: it is stored hashed and cannot be shown again.',
+          parameters: [pathId('id', 'folders.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { expiresAt: { type: 'string', format: 'date-time' } },
+                  required: ['expiresAt'],
+                },
+                example: { expiresAt: '2026-11-01T00:00:00-06:00' },
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'The link and its token. Open it at /api/shared/{token}.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      link: {
+                        allOf: [
+                          { $ref: '#/components/schemas/ShareLink' },
+                          { type: 'object', properties: { token: { type: 'string' } } },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            400: errorResponse('expiresAt missing, malformed or past.', 'expiresAt must be in the future.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/links/{id}': {
+        delete: {
+          tags: ['documents'],
+          summary: 'Revoke a share link',
+          description:
+            'Stops it at once instead of waiting for its expiry. Needs `document.share` and ' +
+            'read access to its folder.',
+          parameters: [pathId('id', 'access_tokens.id')],
+          responses: {
+            200: wrapped('The link, revoked.', 'link', 'ShareLink'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Unknown, already revoked, or its folder not visible.', 'Link not found.'),
+          },
+        },
+      },
+      '/api/shared/{token}': {
+        get: {
+          tags: ['documents'],
+          summary: 'Open a share link',
+          description: 'No session: the token is the credential. Read-only; there are no write routes.',
+          security: [],
+          parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'The linked folder.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/SharedFolder' } } },
+            },
+            404: errorResponse(
+              'Unknown, revoked or expired, or its folder was deleted.',
+              'This link does not exist or has expired.',
+            ),
+          },
+        },
+      },
+      '/api/shared/{token}/folders/{id}': {
+        get: {
+          tags: ['documents'],
+          summary: 'A folder beneath a share link',
+          security: [],
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } },
+            pathId('id', 'folders.id'),
+          ],
+          responses: {
+            200: {
+              description: 'The folder.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/SharedFolder' } } },
+            },
+            404: errorResponse('The link does not work, or the folder is not beneath it.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/shared/{token}/files/{id}/content': {
+        get: {
+          tags: ['documents'],
+          summary: 'Download a file through a share link',
+          description: 'Logged as file_downloaded with no user and the link id.',
+          security: [],
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } },
+            pathId('id', 'files.id'),
+          ],
+          responses: {
+            200: {
+              description: 'The bytes.',
+              content: { '*/*': { schema: { type: 'string', format: 'binary' } } },
+            },
+            404: errorResponse('The link does not work, or the file is not beneath it.', 'File not found.'),
+            503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
       '/api/statuses': {
         get: {
           tags: ['statuses'],

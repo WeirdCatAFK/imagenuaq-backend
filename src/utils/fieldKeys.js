@@ -1,10 +1,5 @@
-// A field key: the name a value carries in `requests.data`, `project_field_values` and a
-// stage's declared inputs and outputs (RF-FLW-06). Pure: no database, no HTTP.
-//
-// It lives here rather than in one orchestration module because two of them validate the same
-// declaration -- a project stage and a flow template's stage -- and the template side will be
-// read by the project side when a project starts from a template, so a copy in each would be
-// an import cycle waiting to happen.
+// Checks field keys, the names values are stored under (RF-FLW-06). No database, no HTTP; shared
+// by project stages and flow templates.
 import { ApiError } from "./ApiError.js";
 
 /** The column width of `project_field_values.key`. */

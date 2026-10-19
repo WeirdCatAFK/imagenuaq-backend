@@ -1,18 +1,6 @@
-// Tier 2: the ONLY module in the codebase that writes SQL.
-//
-// Everything above it -- orchestration, routes -- composes these methods; nothing below it
-// knows what a table is. Two things bite anybody adding a method here:
-//
-//   - **Parameters are positional.** `$1, $2` in an array, never `:named` in an object:
-//     postgrejs calls .map() on options.params, so an object throws
-//     "params?.map is not a function" at runtime rather than at parse time.
-//   - **Casts are load-bearing.** Postgres infers a parameter's type from its first use,
-//     and a bare null or an `is not null` test gives it nothing, so it fails the statement
-//     with "could not determine data type of parameter $n" rather than the row.
-//
-// Multi-step writes are data-modifying CTEs, not transactions. A CTE is atomic on its own
-// and keeps the tier boundary intact -- opening a transaction would mean handing a
-// connection up to orchestration, which is what this module exists to prevent.
+// The only module that writes SQL. Parameters are positional (`$1` with an array), and a
+// parameter that may be null needs a cast (`$1::bigint`). Multi-step writes are one SQL
+// statement (a CTE), not a transaction.
 import { getStore } from "../primitives/database.js";
 
 /**
@@ -29,6 +17,9 @@ const STAGE_FROM = `
   join flow_stages fs on fs.id = ps.flow_stage_id
   join flow_phases fp on fp.id = fs.phase_id
   join areas a on a.id = fs.area_id`;
+
+/** A project whose work still counts: not closed, archived or deleted. Expects alias `p`. */
+const LIVE_PROJECT = "p.deleted_at is null and p.closed_at is null and p.archived_at is null";
 
 class Query {
   async #rows(sql, params) {
@@ -1465,10 +1456,15 @@ class Query {
               'inputs', fs.input_keys, 'outputs', fs.output_keys,
               'inputNote', fs.input_note, 'outputNote', fs.output_note,
               'estimatedDays', fs.estimated_days,
+              'deliveryNote', ps.delivery_note, 'deliveryFileId', df.id,
+              'deliveryFileName', df.name, 'deliveredBy', ps.delivered_by,
+              'deliveredByName', du.full_name, 'deliveredAt', ps.delivered_at,
               'approvals', coalesce(ap.list, '[]'::json)
             ) as stage
           from ${STAGE_FROM}
           left join users au on au.id = ps.assigned_to
+          left join files df on df.id = ps.delivery_file_id and df.deleted_at is null
+          left join users du on du.id = ps.delivered_by
           left join lateral (
             select json_agg(json_build_object(
               'id', v.id, 'decision', v.decision, 'approverUserId', v.approver_user_id,
@@ -1798,7 +1794,10 @@ class Query {
   }
 
   /**
-   * Closes a stage and opens what follows it, in one statement.
+   * Closes a stage and opens what follows it, in one statement. A rerun inserts the same
+   * definition at `attempt = max + 1`, so a race collides on `uq_project_stages_attempt`.
+   * The next-phase check reads the statement's snapshot, where the stage being closed is
+   * still open, so it excludes that stage by id.
    *
    * @param {number} stageId
    * @param {{ status?: string, rerun?: boolean }} input
@@ -3067,6 +3066,544 @@ class Query {
         where id = $1 and deleted_at is null
         returning *`,
       [sheetId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * What `userId` may do in a folder. Owning the folder or any ancestor is full control;
+   * otherwise the nearest ancestor carrying `folder_areas` rows decides, and the user's best
+   * level among their areas there is the answer (DATAMODEL.md, `folder_areas`).
+   *
+   * @returns {Promise<{found: boolean, owns: boolean, level: 'read'|'write'|null}>}
+   */
+  async folderAccess(folderId, userId) {
+    const [row] = await this.#rows(
+      `with recursive chain as (
+         select id, parent_id, owner_id, 0 as depth
+           from folders
+          where id = $1 and deleted_at is null
+         union all
+         select f.id, f.parent_id, f.owner_id, c.depth + 1
+           from folders f
+           join chain c on f.id = c.parent_id
+          where c.depth < 100
+       ),
+       granted as (
+         select c.depth, fa.area_id, fa.level
+           from chain c
+           join folder_areas fa on fa.folder_id = c.id
+       )
+       select
+         exists (select 1 from chain) as found,
+         exists (select 1 from chain where owner_id = $2::bigint) as owns,
+         (select case when bool_or(g.level = 'write') then 'write'
+                      when count(*) > 0 then 'read' end
+            from granted g
+            join area_members am on am.area_id = g.area_id and am.user_id = $2::bigint
+           where g.depth = (select min(depth) from granted)) as level`,
+      [folderId, userId],
+    );
+    return row;
+  }
+
+  async createFolder({ parentId, name, ownerId }) {
+    const [row] = await this.#rows(
+      `insert into folders (parent_id, name, owner_id)
+       values ($1::bigint, $2, $3)
+       returning *`,
+      [parentId, name, ownerId],
+    );
+    return row;
+  }
+
+  async getFolder(folderId) {
+    const [row] = await this.#rows(
+      `select * from folders where id = $1 and deleted_at is null`,
+      [folderId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * The folders a user starts browsing from: every live root for an admin (`userId` null);
+   * otherwise the roots they own plus any folder shared with one of their areas.
+   */
+  async listTopFolders(userId) {
+    return this.#rows(
+      `select f.*
+         from folders f
+        where f.deleted_at is null
+          and (($1::bigint is null and f.parent_id is null)
+               or ($1::bigint is not null and f.parent_id is null and f.owner_id = $1::bigint)
+               or exists (select 1
+                            from folder_areas fa
+                            join area_members am on am.area_id = fa.area_id
+                           where fa.folder_id = f.id and am.user_id = $1::bigint))
+        order by f.name, f.id`,
+      [userId],
+    );
+  }
+
+  async listChildFolders(folderId) {
+    return this.#rows(
+      `select * from folders
+        where parent_id = $1 and deleted_at is null
+        order by name, id`,
+      [folderId],
+    );
+  }
+
+  async listFolderFiles(folderId) {
+    return this.#rows(
+      `select * from files
+        where folder_id = $1 and deleted_at is null
+        order by name, id`,
+      [folderId],
+    );
+  }
+
+  /**
+   * Renames and/or moves. `parentId` undefined leaves the parent alone; null makes the
+   * folder a root. Nothing in storage moves -- the tree is only these rows.
+   */
+  async updateFolder(folderId, { name = null, parentId }) {
+    const [row] = await this.#rows(
+      `update folders
+          set name = coalesce($2, name),
+              parent_id = case when $3 then $4::bigint else parent_id end
+        where id = $1 and deleted_at is null
+        returning *`,
+      [folderId, name, parentId !== undefined, parentId ?? null],
+    );
+    return row ?? null;
+  }
+
+  /** Soft-deletes a folder, everything beneath it and every file in that subtree, at once. */
+  async deleteFolder(folderId) {
+    const [row] = await this.#rows(
+      `with recursive subtree as (
+         select id from folders where id = $1 and deleted_at is null
+         union all
+         select f.id from folders f join subtree s on f.parent_id = s.id
+          where f.deleted_at is null
+       ),
+       gone_files as (
+         update files set deleted_at = current_timestamp
+          where folder_id in (select id from subtree) and deleted_at is null
+         returning id
+       ),
+       gone as (
+         update folders set deleted_at = current_timestamp
+          where id in (select id from subtree)
+         returning *
+       )
+       select g.*, (select count(*)::int from gone_files) as files_deleted,
+              (select count(*)::int from gone) - 1 as folders_deleted
+         from gone g
+        where g.id = $1`,
+      [folderId],
+    );
+    return row ?? null;
+  }
+
+  async listFolderAreas(folderId) {
+    return this.#rows(
+      `select fa.folder_id, fa.area_id, fa.level, a.name as area_name
+         from folder_areas fa
+         join areas a on a.id = fa.area_id
+        where fa.folder_id = $1
+        order by a.name`,
+      [folderId],
+    );
+  }
+
+  /**
+   * Replaces a folder's area grants with `grants` ([{areaId, level}]). Rows not in the new
+   * set are deleted and the rest upserted, so no key is both deleted and inserted in the
+   * one statement.
+   */
+  async setFolderAreas(folderId, grants) {
+    return this.#rows(
+      `with wanted as (
+         select (g->>'areaId')::bigint as area_id, g->>'level' as level
+           from jsonb_array_elements($2::jsonb) g
+       ),
+       dropped as (
+         delete from folder_areas
+          where folder_id = $1 and area_id not in (select area_id from wanted)
+       )
+       insert into folder_areas (folder_id, area_id, level)
+       select $1, area_id, level from wanted
+       on conflict (folder_id, area_id) do update set level = excluded.level
+       returning *`,
+      [folderId, JSON.stringify(grants)],
+    );
+  }
+
+  async createFile({ folderId, authorId, hash, name, size, mime }) {
+    const [row] = await this.#rows(
+      `insert into files (folder_id, author_id, hash, name, size, mime)
+       values ($1, $2, $3, $4, $5, $6)
+       returning *`,
+      [folderId, authorId, hash, name, size, mime],
+    );
+    return row;
+  }
+
+  async getFile(fileId) {
+    const [row] = await this.#rows(
+      `select * from files where id = $1 and deleted_at is null`,
+      [fileId],
+    );
+    return row ?? null;
+  }
+
+  /** Renames and/or moves a file. Null leaves that column alone. */
+  async updateFile(fileId, { name = null, folderId = null }) {
+    const [row] = await this.#rows(
+      `update files
+          set name = coalesce($2, name),
+              folder_id = coalesce($3::bigint, folder_id)
+        where id = $1 and deleted_at is null
+        returning *`,
+      [fileId, name, folderId],
+    );
+    return row ?? null;
+  }
+
+  async deleteFile(fileId) {
+    const [row] = await this.#rows(
+      `update files set deleted_at = current_timestamp
+        where id = $1 and deleted_at is null
+        returning *`,
+      [fileId],
+    );
+    return row ?? null;
+  }
+
+  async createFolderLink({ tokenHash, folderId, authorizer, expiresAt }) {
+    const [row] = await this.#rows(
+      `insert into access_tokens (token_hash, folder_id, level, authorizer, expires_at)
+       values ($1, $2, 'read', $3, $4::timestamptz)
+       returning *`,
+      [tokenHash, folderId, authorizer, expiresAt],
+    );
+    return row;
+  }
+
+  /** Links on a folder that still work: not revoked and not expired. */
+  async listFolderLinks(folderId) {
+    return this.#rows(
+      `select * from access_tokens
+        where folder_id = $1 and revoked_at is null and expires_at > current_timestamp
+        order by created_at desc, id desc`,
+      [folderId],
+    );
+  }
+
+  async getLink(linkId) {
+    const [row] = await this.#rows(`select * from access_tokens where id = $1`, [linkId]);
+    return row ?? null;
+  }
+
+  async revokeLink(linkId) {
+    const [row] = await this.#rows(
+      `update access_tokens set revoked_at = current_timestamp
+        where id = $1 and revoked_at is null
+        returning *`,
+      [linkId],
+    );
+    return row ?? null;
+  }
+
+  /** The live folder a working link points at, or null when unknown, revoked, expired or deleted. */
+  async resolveFolderLink(tokenHash) {
+    const [row] = await this.#rows(
+      `select t.id as link_id, t.expires_at, f.*
+         from access_tokens t
+         join folders f on f.id = t.folder_id and f.deleted_at is null
+        where t.token_hash = $1
+          and t.revoked_at is null
+          and t.expires_at > current_timestamp`,
+      [tokenHash],
+    );
+    return row ?? null;
+  }
+
+  /** Whether `folderId` is `rootId` or a live folder somewhere beneath it. */
+  async isWithinFolder(folderId, rootId) {
+    const [row] = await this.#rows(
+      `with recursive chain as (
+         select id, parent_id, 0 as depth
+           from folders
+          where id = $1 and deleted_at is null
+         union all
+         select f.id, f.parent_id, c.depth + 1
+           from folders f
+           join chain c on f.id = c.parent_id
+          where c.depth < 100 and f.deleted_at is null
+       )
+       select exists (select 1 from chain where id = $2::bigint) as within`,
+      [folderId, rootId],
+    );
+    return row.within;
+  }
+
+  /**
+   * Points a project at `folderId` unless it already has one; returns the project's folder id
+   * either way, so two callers racing to create it agree on the winner.
+   */
+  async setProjectFolder(projectId, folderId) {
+    const [row] = await this.#rows(
+      `update projects set folder_id = coalesce(folder_id, $2::bigint)
+        where id = $1
+        returning folder_id`,
+      [projectId, folderId],
+    );
+    return row?.folder_id ?? null;
+  }
+
+  /**
+   * Grants `write` on a project's folder to every area with a stage in the project that has no
+   * grant there yet. Existing grants, including a deliberate downgrade to `read`, are kept.
+   */
+  async addProjectFolderAreas(projectId) {
+    return this.#rows(
+      `insert into folder_areas (folder_id, area_id, level)
+       select distinct p.folder_id, fs.area_id, 'write'
+         from projects p
+         join flow_phases fp on fp.project_id = p.id
+         join flow_stages fs on fs.phase_id = fp.id
+        where p.id = $1 and p.folder_id is not null
+       on conflict (folder_id, area_id) do nothing
+       returning *`,
+      [projectId],
+    );
+  }
+
+  async getRetention() {
+    const [row] = await this.#rows(`select * from file_retention`);
+    return row;
+  }
+
+  async setRetention(months, updatedBy) {
+    const [row] = await this.#rows(
+      `update file_retention
+          set months = $1, updated_by = $2::bigint, updated_at = current_timestamp
+        returning *`,
+      [months, updatedBy],
+    );
+    return row;
+  }
+
+  /**
+   * Soft-deletes every live file past retention as of `now`, and returns the rows. A file under
+   * a project's folder counts from the project's close or archive, so an open project never
+   * loses one; a file under no project counts from its upload.
+   */
+  async expireFiles(now) {
+    return this.#rows(
+      `with recursive months as (
+         select make_interval(months => months) as span from file_retention
+       ),
+       project_tree as (
+         select f.id, coalesce(p.closed_at, p.archived_at) as ended_at, 0 as depth
+           from projects p
+           join folders f on f.id = p.folder_id
+          where p.deleted_at is null
+         union all
+         select f.id, t.ended_at, t.depth + 1
+           from folders f
+           join project_tree t on f.parent_id = t.id
+          where t.depth < 100
+       ),
+       expired as (
+         select fi.id
+           from files fi
+           left join project_tree t on t.id = fi.folder_id
+          where fi.deleted_at is null
+            and case when t.id is null then fi.created_at
+                     else t.ended_at end + (select span from months) < $1::timestamptz
+       )
+       update files set deleted_at = $1::timestamptz
+        where id in (select id from expired)
+       returning *`,
+      [now],
+    );
+  }
+
+  /** Whether any live file row still points at `hash`. */
+  async hashInUse(hash) {
+    const [row] = await this.#rows(
+      `select exists (select 1 from files where hash = $1 and deleted_at is null) as used`,
+      [hash],
+    );
+    return row.used;
+  }
+
+  /** Open stages of live projects assigned to `userId`, most urgent project first. */
+  async listAssignedStages(userId) {
+    return this.#rows(
+      `select ${STAGE_COLUMNS}, p.key as project_key, p.title as project_title,
+              p.priority as project_priority, p.due_on as project_due_on,
+              df.name as delivery_file_name, du.full_name as delivered_by_name
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+         left join files df on df.id = ps.delivery_file_id and df.deleted_at is null
+         left join users du on du.id = ps.delivered_by
+        where ps.assigned_to = $1
+          and ps.status in ('pending', 'active', 'waiting_external')
+          and ${LIVE_PROJECT}
+        order by p.priority desc, p.due_on nulls last, ps.id`,
+      [userId],
+    );
+  }
+
+  /**
+   * Delivered stages still waiting for their sign-off (RF-FLW-03), in the areas `userId` leads, or
+   * in every area when `userId` is null (coordination). Most urgent project first, never by
+   * arrival (RF-FLW-08).
+   */
+  async listToReview(userId) {
+    return this.#rows(
+      `select ${STAGE_COLUMNS}, p.key as project_key, p.title as project_title,
+              p.priority as project_priority, p.due_on as project_due_on,
+              df.name as delivery_file_name, du.full_name as delivered_by_name,
+              au.full_name as assigned_to_name
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+         left join files df on df.id = ps.delivery_file_id and df.deleted_at is null
+         left join users du on du.id = ps.delivered_by
+         left join users au on au.id = ps.assigned_to
+        where ps.delivered_at is not null
+          and ps.status in ('active', 'waiting_external')
+          and ${LIVE_PROJECT}
+          and ($1::bigint is null
+               or exists (select 1 from area_members am
+                           where am.area_id = fs.area_id and am.user_id = $1 and am.is_area_leader))
+        order by p.priority desc, p.due_on nulls last, ps.delivered_at`,
+      [userId],
+    );
+  }
+
+  /**
+   * What `areaId` has to hand out (RF-TSK-01): the open stages of its own with nobody on them,
+   * ranked by their project's priority, never by arrival (RF-FLW-08).
+   */
+  async listUnassigned(areaId) {
+    return this.#rows(
+      `select ps.id, fs.title, p.priority, p.due_on, p.id as project_id,
+              p.key as project_key, p.title as project_title, fp.name as phase_name
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+        where fs.area_id = $1 and ps.assigned_to is null
+          and ps.status in ('pending', 'active', 'waiting_external') and ${LIVE_PROJECT}
+        order by p.priority desc, p.due_on nulls last, ps.id`,
+      [areaId],
+    );
+  }
+
+  /**
+   * Each member of `areaIds`, one row per area they belong to, with their open work everywhere,
+   * not just in that area: a person's load is theirs, whichever area handed it out (RF-TSK-06,
+   * RF-RPT-02). `away_days` counts the days in [from, to] an approved absence covers, read from
+   * `absence_availability` and never from `absences` (RF-TSK-07).
+   */
+  async areaWorkload(areaIds, from, to) {
+    if (areaIds.length === 0) return [];
+    return this.#rows(
+      `select am.area_id, u.id, u.full_name, am.is_area_leader,
+              (select count(*)::int from project_stages ps
+                 join flow_stages fs on fs.id = ps.flow_stage_id
+                 join flow_phases fp on fp.id = fs.phase_id
+                 join projects p on p.id = fp.project_id
+                where ps.assigned_to = u.id
+                  and ps.status in ('pending', 'active', 'waiting_external')
+                  and ${LIVE_PROJECT}) as open_stages,
+              -- Recurring absences count by their first occurrence only, as the view stores them.
+              (select count(distinct day)::int
+                 from absence_availability aa
+                 cross join generate_series($2::date, $3::date, interval '1 day') day
+                where aa.user_id = u.id
+                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_days,
+              (select coalesce(array_agg(distinct to_char(day, 'YYYY-MM-DD')
+                                         order by to_char(day, 'YYYY-MM-DD')), '{}')
+                 from absence_availability aa
+                 cross join generate_series($2::date, $3::date, interval '1 day') day
+                where aa.user_id = u.id
+                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_dates
+         from area_members am
+         join users u on u.id = am.user_id
+        where am.area_id = any($1::bigint[]) and u.deleted_at is null
+        order by u.full_name`,
+      [areaIds, from, to],
+    );
+  }
+
+  /** The open stages each of `userIds` is on, in any area, most urgent first (RF-TSK-06). */
+  async openStagesOf(userIds) {
+    if (userIds.length === 0) return [];
+    return this.#rows(
+      `select ps.id, ps.status, ps.assigned_to, fs.title, a.name as area_name,
+              fp.name as phase_name, p.id as project_id, p.key as project_key,
+              p.title as project_title, p.priority, p.due_on
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+        where ps.assigned_to = any($1::bigint[])
+          and ps.status in ('pending', 'active', 'waiting_external') and ${LIVE_PROJECT}
+        order by p.priority desc, p.due_on nulls last, ps.id`,
+      [userIds],
+    );
+  }
+
+  /**
+   * The areas whose work `userId` hands out, by name: the ones they lead, or every area when
+   * `userId` is null (coordination).
+   */
+  async areasHandedOutBy(userId) {
+    return this.#rows(
+      `select a.id, a.name from areas a
+        where $1::bigint is null
+           or exists (select 1 from area_members am
+                       where am.area_id = a.id and am.user_id = $1 and am.is_area_leader)
+        order by a.name`,
+      [userId],
+    );
+  }
+
+  /** How many open stages each of `areaIds` still has to hand out, and how many of those are late. */
+  async inboxCounts(areaIds) {
+    if (areaIds.length === 0) return [];
+    return this.#rows(
+      `select fs.area_id, count(*)::int as unassigned,
+              count(*) filter (where p.due_on < current_date)::int as late
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+        where fs.area_id = any($1::bigint[]) and ps.assigned_to is null
+          and ps.status in ('pending', 'active', 'waiting_external') and ${LIVE_PROJECT}
+        group by fs.area_id`,
+      [areaIds],
+    );
+  }
+
+  /** Records what a stage attempt delivered, replacing any earlier delivery of the same attempt. */
+  async setStageDelivery(stageId, { note, fileId, deliveredBy }) {
+    const [row] = await this.#rows(
+      `update project_stages
+          set delivery_note = $2, delivery_file_id = $3::bigint,
+              delivered_by = $4::bigint, delivered_at = current_timestamp
+        where id = $1
+        returning *`,
+      [stageId, note, fileId, deliveredBy],
+    );
+    return row ?? null;
+  }
+
+  async setStageAssignee(stageId, userId) {
+    const [row] = await this.#rows(
+      `update project_stages set assigned_to = $2::bigint where id = $1 returning *`,
+      [stageId, userId],
     );
     return row ?? null;
   }

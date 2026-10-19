@@ -1,15 +1,5 @@
-// Works out which database the suite is allowed to touch, and refuses to hand back
-// anything else.
-//
-// The fixtures TRUNCATE users and area_members at the start of every file. That is fine
-// against a scratch database and unforgivable against the one someone has been entering
-// real staff into, and the difference between the two is a single environment variable.
-// So the name is not taken on trust from the environment: it is derived, then checked,
-// and the check throws before anything opens a connection.
-//
-// Deriving rather than configuring is also why there is no DATABASE_URL in .env.test.
-// A second URL there would need the local Postgres password in a committed file, and
-// would drift from .env the first time anyone changed a port.
+// Picks the database and bucket the tests may use, and refuses anything else: the name must end
+// in `_test`, because the tests delete data. Derived from DATABASE_URL, so .env.test holds no URL.
 
 const TEST_DB_NAME = 'imagenuaq_test';
 
@@ -70,4 +60,25 @@ export function useTestDatabase() {
   const url = testDatabaseUrl();
   process.env.DATABASE_URL = url;
   return url;
+}
+
+/**
+ * The bucket the suite stores content in. Fixed rather than configured, and suffixed like
+ * the database, so a case can never write into the bucket real uploads live in.
+ */
+export const TEST_BUCKET = 'imagenuaq-test';
+
+/**
+ * Point the process at the test bucket before storage is opened. `localhost` becomes
+ * 127.0.0.1 for the same IPv6-loopback reason as the database.
+ */
+export function useTestBucket() {
+  if (!TEST_BUCKET.endsWith('-test')) throw new Error(`Refusing to use bucket ${TEST_BUCKET}.`);
+  process.env.MINIO_DOCUMENTS_BUCKET = TEST_BUCKET;
+  if (process.env.MINIO_ENDPOINT) {
+    const url = new URL(process.env.MINIO_ENDPOINT);
+    if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
+    process.env.MINIO_ENDPOINT = url.origin;
+  }
+  return TEST_BUCKET;
 }

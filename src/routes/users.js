@@ -1,13 +1,5 @@
-// Staff accounts.
-//
-// Two blocks, as in routes/areas.js: the reads any signed-in colleague may perform come
-// first, then `router.use(requireRole('admin'))`, then everything that changes a record.
-// A route appended at the bottom is therefore admin-gated by omission rather than left
-// open by mistake, which is the safe direction to be wrong in.
-//
-// 'admin' is roles.name for coordinación/secretaría particular, the third level in
-// RF-USR-02. Area leads are deliberately not included: they direct the work of their area
-// (RF-USR-04) but staffing it is not theirs to decide.
+// Staff accounts. Reads are open to any signed-in user; everything after
+// `requireRole('admin')` is admin-only, so a route added at the bottom is admin-only by default.
 import express, { Router } from 'express';
 
 import users, { PICTURE_TYPES } from '../access/orchestration/users.js';

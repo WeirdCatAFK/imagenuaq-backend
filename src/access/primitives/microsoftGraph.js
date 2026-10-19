@@ -1,40 +1,16 @@
-// Tier 1: the wire to Microsoft -- the identity platform for tokens, Graph for data.
-//
-// This module knows URLs, form encodings and status codes. It does not know what a user
-// is, which account a token belongs to, or where a token is stored: those are
-// orchestration/microsoft.js. Like database.js and storage.js, an error thrown from here
-// means the connection or the remote service failed, not that the caller asked for
-// something wrong -- GraphError carries the status and Microsoft's own error code so the
-// tier above can decide which of those it was.
-//
-// Delegated OAuth 2.0 authorization-code flow, hand-written over fetch. @azure/msal-node
-// was in package.json and would do the same three calls, but it owns the tokens: its cache
-// is an opaque blob per account that it expects to persist and reload wholesale, which
-// fights a schema holding one encrypted refresh token per row that a later import job
-// reads. Three POSTs against a documented endpoint are shorter than the adapter would be.
-//
-// Tokens rotate. Every successful refresh returns a NEW refresh token and the old one is
-// eventually invalidated, so whoever calls refreshTokens() must store what comes back. The
-// primitive says so here because it is the one fact about this API that silently breaks
-// an implementation that ignores it -- weeks later, when the old token stops working.
-//
-// Scopes are the smallest set that reads a workbook someone shares with the signed-in
-// account: `openid profile email` is what makes the token endpoint return an id_token at
-// all -- without `openid` there is no identity to record, whatever else was granted --
-// `offline_access` is what yields a refresh token, `User.Read` the Graph identity,
-// `Files.Read.All` the files, including SharePoint document libraries the person can
-// reach. `Sites.Read.All` is not requested: it is not supported for personal accounts and
-// a `common` tenant admits those.
-//
-// The app registration -- `{ tenantId, clientId, clientSecret }` -- is an argument to
-// every token call, not read from the environment here. Where it comes from (the
-// microsoft_app row, or MS_* in .env as the fallback) is orchestration's decision; this
-// module only knows how to use one.
+// Raw calls to Microsoft sign-in and Graph, over fetch. Every token refresh returns a new
+// refresh token, and the caller must save it. Errors here (GraphError) mean Microsoft or the
+// network failed, not the caller.
 
 const AUTHORITY = "https://login.microsoftonline.com";
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
-export const SCOPES = "openid profile email offline_access User.Read Files.Read.All";
+/**
+ * The smallest set that reads a workbook shared with the signed-in person: `openid` for an
+ * identity, `offline_access` for a refresh token, `Files.Read.All` for OneDrive and SharePoint.
+ * Not `Sites.Read.All`, which personal accounts do not support.
+ */
+export const SCOPES ="openid profile email offline_access User.Read Files.Read.All";
 
 /** The identity platform's error, or Graph's, with what the caller needs to classify it. */
 export class GraphError extends Error {
@@ -96,13 +72,13 @@ export function exchangeCode(app, code) {
 
 /**
  * A fresh access token from a refresh token. The result carries a NEW refresh token;
- * persist it, the one passed in is now on borrowed time.
+ * persist it, the one passed in will stop working.
  *
  * @param {{ tenantId: string, clientId: string, clientSecret: string }} app
  * @param {string} refreshToken
  * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: number,
  *   idToken: string | null, scope: string }>}
- * @throws {GraphError} `code === 'invalid_grant'` means the grant is gone for good --
+ * @throws {GraphError} `code === 'invalid_grant'` means the grant is gone permanently --
  *   revoked, expired, or the password changed -- and the account must be reconnected.
  */
 export function refreshTokens(app, refreshToken) {

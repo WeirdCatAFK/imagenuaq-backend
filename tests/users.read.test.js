@@ -1,11 +1,5 @@
-// The read half of /api/users: the list, one user, and the search. Writes are
-// users.write.test.js; pictures are users.picture.test.js.
-//
-// The case this file exists for is the two shapes. RF-USR-03 lets any colleague see who
-// else is in the organisation, so these reads are open to every signed-in caller -- but
-// contract type and birthday are coordination's business, and a worker must not receive
-// them. Asserting on the KEY SET rather than on values is deliberate: a field that leaks
-// as `null` still leaks its existence, and a value assertion would pass.
+// Reading users. Non-admins must not receive contract type or birthday at all, so cases check
+// which keys are present, not just their values.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

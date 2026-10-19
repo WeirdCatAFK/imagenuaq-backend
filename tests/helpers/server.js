@@ -1,21 +1,21 @@
-// Boots a real API on a real socket for a test file, and tears it down again.
-//
-// Requests go over HTTP rather than through an in-process shim, so helmet, cors and
-// express.json() run as they do in production -- the 400 for malformed JSON and the 413 for
-// an oversized body are the body parser's, not ours.
+// Starts the real API on a real port for a test file, so helmet, CORS and the JSON parser run
+// as in production.
 import Api from '../../src/api.js';
 import { openStore, closeStore } from '../../src/access/primitives/database.js';
-import { useTestDatabase } from './env.js';
+import { openStorage, closeStorage } from '../../src/access/primitives/minioStorage.js';
+import { useTestDatabase, useTestBucket } from './env.js';
 
 /**
- * Starts the API on a free port against the test database. api.js does not open the pool,
- * so this does; without it every route answers 500.
+ * Starts the API on a free port against the test database and the test bucket. api.js
+ * opens neither, so this does; without them every route answers 500.
  *
  * @returns {Promise<Server>}
  */
 export async function startServer() {
   useTestDatabase();
+  useTestBucket();
   openStore();
+  await openStorage();
   return listen();
 }
 
@@ -92,5 +92,6 @@ class Server {
   async close() {
     await this.api.stop();
     await closeStore();
+    closeStorage();
   }
 }

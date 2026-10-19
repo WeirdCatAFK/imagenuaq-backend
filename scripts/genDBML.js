@@ -1,18 +1,6 @@
 #!/usr/bin/env node
-// Snapshots the live Postgres schema as DBML, once per migration.
-// Usage: npm run dbml [-- --db <url>] [-- --out <path>]
-// Output: dbml/<migration>.dbml (the schema as of that migration) and dbml/current.dbml
-//
-// Runs automatically after migrate:up / :down / :redo via npm's post hooks, so the snapshots
-// track the database rather than someone's memory. The per-migration files share the basename
-// of the .sql that produced them, so `migrations/1788369848184_initial-schema.sql` pairs with
-// `dbml/1788369848184_initial-schema.dbml` and the two directories sort alike. Diff any two to
-// see what happened between them; `current.dbml` is the stable name to open in ChartDB
-// (https://chart.weirdcat.uk/, Import DBML).
-//
-// The npm script passes --no-deprecation: @dbml/connector's introspection reuses one pg client
-// across overlapping queries, and the resulting warning fires on every migration and is not
-// ours to fix.
+// Writes the live schema as DBML: dbml/<migration>.dbml and dbml/current.dbml. Runs after every
+// migrate command. Usage: npm run dbml [-- --db <url>] [-- --out <path>]
 
 import { importer } from '@dbml/core';
 import { Parser as ChartDBParser } from '@dbml/core-chartdb';

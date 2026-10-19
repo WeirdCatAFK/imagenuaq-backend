@@ -1,7 +1,5 @@
-// Request-side half of src/access/orchestration/auth.js. Nothing here decides anything: it
-// reads the header, hands the token to the orchestration layer and puts the result on the
-// request. Keeping the verification rules over there means the token's contents are
-// described in exactly one file, and this one cannot drift from what login signs.
+// Reads the bearer token and puts the user on `req.user`. The rules for what a valid token is
+// live in orchestration/auth.js.
 import auth from '../access/orchestration/auth.js';
 import { ApiError } from '../utils/ApiError.js';
 

@@ -1,5 +1,5 @@
-// Tier 3: the field data-type catalogue. Read-only through the API; types are added by
-// migration because each one carries a coercion in utils/fieldValues.js.
+// Lists the field data types. Read-only: a new type is added by migration, together with its
+// conversion rule in utils/fieldValues.js.
 import query from "../resources/query.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { cleanText } from "../../utils/validate.js";

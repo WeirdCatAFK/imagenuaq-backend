@@ -1,8 +1,4 @@
-// RF-USR-07: who created, modified or deleted each relevant record. The trail is written by
-// a subscriber to the domain events orchestration emits (src/utils/events.js ->
-// src/access/orchestration/audit.js), so these cases drive the real endpoints over HTTP and
-// then read `logs` directly -- asserting on the rows rather than on the emit calls is what
-// makes them a test of the trail and not of the plumbing.
+// The audit trail (RF-USR-07). Cases call the real endpoints, then read `logs` directly.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

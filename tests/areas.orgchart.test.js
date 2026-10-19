@@ -1,6 +1,5 @@
-// The hierarchy and the chart it draws. The shape asserted here is the contract with
-// react-organizational-chart on the frontend: every node carries its own `children`, so
-// <Tree>/<TreeNode> recurse over the response with no reshaping.
+// The area hierarchy and the org chart. Every node carries its own `children`, which is the
+// shape the frontend's chart component reads as is.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

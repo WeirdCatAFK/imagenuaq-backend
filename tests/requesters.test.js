@@ -1,6 +1,4 @@
-// The requesting party is a string (RF-SOL-07); this is the autocomplete that keeps it from
-// becoming four spellings of one faculty. Rows are inserted directly: /api/requests does
-// not exist yet.
+// The requester autocomplete (RF-SOL-07). Rows are inserted directly.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 

@@ -1,7 +1,5 @@
-// The intake: requests and the one crossing into a project (RF-SOL-03 … RF-SOL-08, RF-PRY-01).
-//
-// Two blocks, `request.read` then `request.write`. Converting also needs `project.write`, since
-// it creates a project.
+// Requests and their conversion into a project (RF-SOL-03 to RF-SOL-08, RF-PRY-01). Reads need
+// `request.read`, writes `request.write`; converting also needs `project.write`.
 import { Router } from "express";
 
 import requests from "../access/orchestration/requests.js";

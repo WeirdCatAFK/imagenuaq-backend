@@ -1,8 +1,5 @@
-// Saving and clearing a book's mapping (RF-MIG-02). Validation and the transformation itself are
-// `columnMap.test.js`'s business, pure and fast; what belongs here is the endpoint: whether it
-// refuses what it should, what it stores, and the guards. The two routes that read the workbook
-// live -- preview and import -- are exercised only as far as their guards, for the reason
-// `spreadsheets.guard.test.js` gives: reaching them needs the network.
+// Saving and clearing a workbook's column map (RF-MIG-02). The mapping rules themselves are
+// tested in columnMap.test.js; preview and import are tested only up to their checks.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 

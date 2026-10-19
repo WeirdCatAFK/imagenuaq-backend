@@ -1,32 +1,7 @@
 #!/usr/bin/env node
-// Reads a registered workbook with the real credentials and prints what it actually holds.
-// Usage: npm run sheets:probe               -- lists the registered books
-//        npm run sheets:probe -- 1          -- probes sheet 1
-//        npm run sheets:probe -- 1 --rows 8 -- with more sample rows
-//
-// Why this exists as a script.
-//
-// The test suite stays offline on purpose: `tests/spreadsheets.guard.test.js` covers the
-// Graph-touching routes as guard-only, and the import is tested by feeding `importRows()`
-// fixture rows. That keeps the suite deterministic and runnable with no tenant, which is what
-// makes it worth running. But the questions that actually block a mapping are about the real
-// book: what are its headers, does `sheets.table_name` resolve to a table or a worksheet, and
-// do its dates arrive as Excel serials or as strings somebody typed? Those cannot be answered
-// by a fixture. This answers them by looking.
-//
-// It is also the tool for "the book will not read". A registration holds ids that were never
-// verified (POST /api/spreadsheets does not call Graph, by decision), so the first honest test
-// of a registration is a read, and the failure it produces here carries Graph's own message
-// rather than a 502 from the API.
-//
-// The gate is `DATABASE_URL`, as in createAdmin.js: whoever can reach the database can already
-// decrypt the refresh tokens with MS_TOKEN_KEY. The actor is therefore synthetic
-// (`{ role: 'admin' }`) -- `Microsoft.accessTokenFor()` checks ownership, and outside a request
-// there is nobody to be.
-//
-// Like every Graph call, this **rotates the refresh token** (Microsoft rotates on use), so the
-// stored one changes. That is normal and the reason the write goes through
-// `accessTokenFor()` rather than around it.
+// Reads a registered workbook with real credentials and prints its headers and sample rows.
+// Usage: npm run sheets:probe [-- <sheetId> [--rows N]]. Like any Graph read, it rotates the
+// account's stored refresh token.
 import { openStore, closeStore } from "../src/access/primitives/database.js";
 import query from "../src/access/resources/query.js";
 import microsoft from "../src/access/orchestration/microsoft.js";

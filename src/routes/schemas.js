@@ -1,9 +1,5 @@
-// Request formats (RF-SOL-01): a schema is the identity, its versions are the immutable
-// field lists, and a clone is how a new format starts from an existing one.
-//
-// Reads are open to any session -- a form has to know its fields, and a sheet mapping
-// has to list the targets. Writes are `schema.manage`, coordination's grant. The
-// publisher of a version is the session, never a body field (orchestration/schemas.js).
+// Request formats (RF-SOL-01): the format, its unchangeable versions, and cloning. Reads need a
+// session; writes need `schema.manage`. The publisher is the session, never a body field.
 import { Router } from "express";
 
 import schemas from "../access/orchestration/schemas.js";

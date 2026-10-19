@@ -1,10 +1,5 @@
-// Test data, built through the same code the API uses wherever that is possible.
-//
-// Fixtures go through query.js rather than hand-written INSERTs so that a schema change
-// breaks the suite in one place instead of thirty. The exceptions are the few statements
-// below that read a row back or soft-delete one: those are assertions about state the API
-// has no endpoint for, and inventing endpoints to make them testable would be the tail
-// wagging the dog.
+// Test data, created through query.js (not hand-written INSERTs) so a schema change breaks one
+// place. Raw SQL only where the API has no endpoint for the state being checked.
 import bcrypt from 'bcrypt';
 
 import query from '../../src/access/resources/query.js';
@@ -50,6 +45,12 @@ export const TEST_STATUS_PREFIX = 'zztest_';
  * reference; a new table a test writes to belongs here in that order.
  */
 const UNSEEDED_TABLES = [
+  'absences',
+  'event_participants',
+  'events',
+  'access_tokens',
+  'folder_areas',
+  'files',
   'area_members',
   'logs',
   'approvals',
@@ -59,6 +60,7 @@ const UNSEEDED_TABLES = [
   'flow_phases',
   'requests',
   'projects',
+  'folders',
   'workflow_versions',
   'workflows',
   'sheet_imports',
@@ -81,6 +83,7 @@ export async function resetCases(keepEmails = []) {
     [`${TEST_PREFIX}%`],
   );
   for (const table of UNSEEDED_TABLES) await sql(`delete from ${table}`);
+  await sql('update file_retention set months = 6, updated_by = null');
   await sql('delete from statuses where area_id is not null or code like $1', [
     `${TEST_STATUS_PREFIX}%`,
   ]);

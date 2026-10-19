@@ -164,17 +164,6 @@ Table "logs" {
   Note: 'CHECK logs_target_complete: num_nonnulls(target_table, target_id) = ANY (ARRAY[0, 2])'
 }
 
-Table "storage_volumes" {
-  "id" int8 [pk, not null, increment]
-  "label" varchar(100) [unique, not null]
-  "location" varchar(500)
-  "is_writable" bool [not null, default: true]
-  "max_storage" int8
-  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-  Note: '''One row per mounted disk, identified by label. The mount path is not authoritative here: it comes from STORAGE_VOLUMES in the environment, because the same disk mounts at a different path inside the container than on the host.
-CHECK storage_volumes_max_storage_positive: (max_storage IS NULL) OR (max_storage > 0)'''
-}
-
 Table "folders" {
   "id" int8 [pk, not null, increment]
   "parent_id" int8
@@ -184,8 +173,6 @@ Table "folders" {
   "deleted_at" timestamptz
 
   Indexes {
-    (parent_id, name) [type: btree, unique, name: "uq_folders_parent_name"]
-    (owner_id, name) [type: btree, unique, name: "uq_folders_root_name"]
     owner_id [type: btree, name: "idx_folders_owner_id"]
     parent_id [type: btree, name: "idx_folders_parent_id"]
   }
@@ -205,28 +192,13 @@ Table "files" {
   "deleted_at" timestamptz
 
   Indexes {
-    (folder_id, name) [type: btree, unique, name: "uq_files_folder_name"]
     author_id [type: btree, name: "idx_files_author_id"]
     folder_id [type: btree, name: "idx_files_folder_id"]
     hash [type: btree, name: "idx_files_hash"]
   }
-  Note: '''One row per appearance of content in the tree. hash is deliberately not unique: two rows sharing it share one physical file on disk, which is what deduplication means.
+  Note: '''One row per appearance of content in the tree. hash is deliberately not unique: two rows sharing it share one object in MinIO (content/ab/cd/<hash>), which is what deduplication means. name is not unique within a folder either: the id is the identity.
 CHECK files_hash_is_hex: hash ~ \'^[0-9a-f]{64}$\'::text
 CHECK files_size_nonneg: size >= 0'''
-}
-
-Table "file_locations" {
-  "hash" bpchar(64) [not null]
-  "storage_volume_id" int8 [not null]
-  "verified_at" timestamptz
-  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
-
-  Indexes {
-    (hash, storage_volume_id) [pk, type: btree, name: "file_locations_pkey"]
-    storage_volume_id [type: btree, name: "idx_file_locations_volume"]
-  }
-  Note: '''Which volumes hold a given piece of content, keyed by hash rather than file id because the bytes are shared. Placement is recorded here and never derived from the hash: deriving it would reshuffle every existing file the moment a disk is added.
-CHECK file_locations_hash_is_hex: hash ~ \'^[0-9a-f]{64}$\'::text'''
 }
 
 Table "folder_areas" {
@@ -511,6 +483,10 @@ Table "project_stages" {
   "ended_at" timestamptz
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "flow_stage_id" int8 [not null, note: 'La definicion que este intento ejecuta. Siempre de un proyecto, nunca de una plantilla.']
+  "delivery_note" text [note: 'RF-FLW-03: la evidencia de lo entregado, escrita por quien hizo la etapa.']
+  "delivery_file_id" int8 [note: 'Archivo opcional de la entrega, en la carpeta del proyecto.']
+  "delivered_by" int8
+  "delivered_at" timestamptz
 
   Indexes {
     (flow_stage_id, attempt) [type: btree, unique, name: "uq_project_stages_attempt"]
@@ -696,6 +672,15 @@ CHECK flow_stages_output_keys_is_array: jsonb_typeof(output_keys) = \'array\'::t
 CHECK flow_stages_estimated_days_positive: (estimated_days IS NULL) OR (estimated_days > 0)'''
 }
 
+Table "file_retention" {
+  "id" bool [pk, not null, default: true]
+  "months" int4 [not null, default: 6]
+  "updated_by" int8
+  "updated_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: '''One row: how many months a file lives once its project is closed or archived, or since upload outside any project.
+CHECK file_retention_months_positive: months > 0'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -748,7 +733,7 @@ Ref "fk_events_created_by_users_id":"users"."id" < "events"."created_by"
 
 Ref "fk_events_event_type_id_event_types_id":"event_types"."id" < "events"."event_type_id"
 
-Ref "file_locations_storage_volume_id_fkey":"storage_volumes"."id" < "file_locations"."storage_volume_id"
+Ref "file_retention_updated_by_fkey":"users"."id" < "file_retention"."updated_by" [delete: set null]
 
 Ref "files_author_id_fkey":"users"."id" < "files"."author_id"
 
@@ -793,6 +778,10 @@ Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "pr
 Ref "project_field_values_project_id_fkey":"projects"."id" < "project_field_values"."project_id" [delete: cascade]
 
 Ref "project_stages_assigned_to_fkey":"users"."id" < "project_stages"."assigned_to"
+
+Ref "project_stages_delivered_by_fkey":"users"."id" < "project_stages"."delivered_by" [delete: set null]
+
+Ref "project_stages_delivery_file_id_fkey":"files"."id" < "project_stages"."delivery_file_id" [delete: set null]
 
 Ref "project_stages_event_id_fkey":"events"."id" < "project_stages"."event_id"
 

@@ -1,10 +1,4 @@
-// Editing and removing staff accounts, and the revocation that removal now carries.
-//
-// The case this file exists for is the last describe block: before `token_version`, a
-// deleted account kept a working session for up to seven days and the only lever was
-// rotating JWT_SECRET, which signs everybody out. An endpoint that reported success while
-// leaving the account usable would be worse than no endpoint at all, so the proof that it
-// does not is a test and not a comment.
+// Editing and deleting staff accounts. Deleting must also end the person's sessions at once.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

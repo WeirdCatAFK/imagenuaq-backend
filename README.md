@@ -4,9 +4,9 @@ Setup
 
 ```bash
 npm install
-cp .env.example .env          # set DATABASE_URL
-docker compose up -d db       # Postgres on the port in .env
-npm run migrate:up            # apply migrations
+cp .env.example .env          # every value must be set; compose.yaml has no fallbacks
+docker compose up -d db minio minio-init   # main.js refuses to start without the bucket
+npm run migrate:up            # apply migrations, then regenerate dbml/
 npm run dev                   # node --watch
 npm test                      # see Tests below
 ```
@@ -87,7 +87,7 @@ git diff --no-index dbml/1788369848184_initial-schema.dbml dbml/1788380071225_up
 ```
 
 The file the migration lands on is rewritten every time, so rolling back and re-applying is
-idempotent. If a snapshot already exists and does not match the live schema, the generator
+safe to repeat. If a snapshot already exists and does not match the live schema, the generator
 warns and overwrites: that means an already-applied migration was edited, or the database
 drifted from its own history.
 
@@ -98,9 +98,16 @@ PR. `.gitattributes` pins them to LF — they are compared byte for byte, and a 
 would read as drift on every fresh clone.
 
 The snapshot drops `pgmigrations` on purpose — it is node-pg-migrate's ledger, not part of
-the data model. One thing DBML genuinely cannot express is a **partial** index: the
-`WHERE area_id IS NOT NULL` predicate on `event_participants`'s two unique indexes is lost,
-and they read as plain unique indexes.
+the data model. DBML cannot express partial indexes, `EXCLUDE` constraints, views or
+indexes over an expression, so the `.sql` is the truth about every index and the snapshot
+is a diagram: the `WHERE` predicates of `uq_users_email_live` or `event_participants`'s
+unique indexes are lost, and `absence_availability` is not in it at all.
+
+`dbml/` does not pair one-to-one with `migrations/`. The `post` hook runs **once** per
+`migrate:up`, so a batch of pending migrations leaves a snapshot only for the last; and a
+migration committed but not yet applied on this machine has none. `npm run migrate:status`
+decides which case you are in: if nothing is pending, `current.dbml` matches the database
+whatever gaps `dbml/` has; if something is, the `.sql` is the only truth.
 
 To view it: open [ChartDB](https://chart.weirdcat.uk/) and use **Import DBML** with
 `dbml/current.dbml`. ChartDB is a static frontend — it keeps diagrams in the browser's
@@ -113,9 +120,12 @@ database — the migration is always written by a person.
 
 #### Why the output is written for an older DBML
 
-We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects three things
+We render with `@dbml/core` 10, but ChartDB bundles 3.14, and its parser rejects things
 the newer renderer emits — a snapshot containing any of them is valid DBML that fails on
-import with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites all three:
+import with a syntax error. `downgradeForChartDB()` in `scripts/genDBML.js` rewrites them;
+its JSDoc is the full list, which also covers expression indexes and expression defaults
+(`nextval()` behind `requests.folio`) that parse but break ChartDB's re-export, caught by
+`assertChartDBCanRender()`. The first three:
 
 - **`Checks { … }` blocks** become `CHECK <name>: <expression>` lines in the table's note, so
   `event_participants`'s `num_nonnulls(area_id, user_id) = 1` is still on the diagram.
@@ -134,48 +144,40 @@ emitting something else 3.14 cannot read, the error names the line and points at
 
 ## File storage
 
-`access/primitives/storage.js` is a content-addressed store spread over several
-mounted disks. The arrangement is inverted from the obvious one: **Postgres is the
-filesystem, and the disks are a dumb bag of bytes keyed by SHA-256.** Identity is the
-content; the path is metadata on a row. The two axes then move independently — renaming a
-folder is one row update and nothing on disk moves, and draining a dying disk copies bytes
-without changing any path.
+`access/primitives/minioStorage.js` is a content-addressed store in one MinIO bucket. The
+arrangement is inverted from the obvious one: **Postgres is the filesystem, and MinIO is a
+dumb bag of bytes keyed by SHA-256.** Identity is the content; the name and folder are
+metadata on a row. Renaming or moving a folder is one row update and nothing in the bucket
+moves. The `/api/documents` routes (`orchestration/documents.js`) are the tree on top of it, and
+`/api/shared/:token` opens a read-only, expiring share link to one folder without a session.
 
 ```
-<mount>/.imagenuaq-volume   {"label":"main"} — verified at startup
-<mount>/tmp/                in-flight uploads; same filesystem, so rename(2) is atomic
-<mount>/content/ab/cd/<hash>  64 hex chars. No extension. No filename.
+tmp/<uuid>              in-flight uploads, removed once the hash is known
+content/ab/cd/<hash>    64 hex chars. No extension. No filename.
 ```
 
-Two levels of fanout because a flat directory reaches millions of entries, where
-`readdir`, rsync and backup tools all degrade. No filename on disk because one piece of content has many
-names — that is what dedup means — so writing one here would pick an arbitrary winner and
-create a second, disagreeing source of truth. The name belongs to the `files` row and comes
-back as `Content-Disposition`.
+No filename in the key because one piece of content has many names — that is what dedup
+means — so writing one here would pick an arbitrary winner and create a second, disagreeing
+source of truth. The name belongs to the `files` row and comes back as
+`Content-Disposition`.
 
-Four things worth knowing before building on it:
+Things worth knowing before building on it:
 
-- **Bytes first, row second.** `putContent` writes and returns where the bytes landed; it
-  never touches the database. Commit the `files` and `file_locations` rows only after it resolves. A crash in
-  between leaves orphaned content for a sweeper to reclaim, whereas the reverse order leaves
-  a `files` row pointing at bytes that do not exist — a permanent 500.
-- **There is no update.** Different content is a different hash and therefore a different
-  content. Renames and moves happen on the `files` row, never here.
-- **Placement is recorded, not derived.** Content goes to whichever writable volume has the
-  most free space, and the database remembers which. Deriving it from the hash (`hash % n`)
-  would reshuffle everything already stored the moment a disk is added.
-- **The marker file is load-bearing.** A disk that fails to mount leaves an empty directory
-  on the root filesystem, and the service would otherwise write into it while recording
-  that content as living on a disk that is not there. `openVolumes()` refuses to start
-  without a matching `.imagenuaq-volume`. Initialise a genuinely new disk once, by hand,
-  with `initVolume()` — it is deliberately not automatic.
+- **Bytes first, row second.** `putContent` streams the upload into the bucket, hashing it
+  on the way, and returns the hash; it never touches the database. Insert the `files` row
+  only after it resolves. A crash in between leaves orphaned content for a sweeper to
+  reclaim, whereas the reverse order leaves a `files` row pointing at bytes that do not
+  exist — a permanent 500.
+- **There is no update.** Different content is a different hash. Renames and moves happen
+  on the `files` row, never here.
+- **Placement is MinIO's.** The bucket is erasure-coded across four disks
+  (`MINIO_DISK1..4`), so the database records no placement.
+- **The bucket is checked at startup.** `openStorage()` refuses to start when the bucket is
+  missing; `compose.yaml`'s `minio-init` creates it. The server image is MinIO AIStor and
+  needs `minio.license` (git-ignored) in this directory, or wherever `MINIO_LICENSE` points.
 
-Two costs this design has, stated plainly. **The database is now as critical as the
-disks**: lose it and the disks hold correctly-named but meaningless bytes. And **multi-disk
-is not redundancy** — one disk failing permanently loses that fraction of the corpus with
-no partial recovery, so either ZFS/SnapRAID sits underneath or `file_locations` grows a
-second row per hash. The schema supports the second without change; nothing implements it
-yet.
+The cost of this design: **the database is now as critical as the
+bucket** — lose it and MinIO holds correctly-hashed but meaningless bytes. Back up both.
 
 ## Endpoints
 
@@ -183,7 +185,7 @@ yet.
 | ------ | ------------------------- | ------------ | --------------------------------------------------------- |
 | GET    | `/`                     | —           | Readiness ping, no database involved                      |
 | GET    | `/api/docs`             | —           | Swagger UI;`/api/docs/openapi.json` is the raw document |
-| GET    | `/api/health`           | —           | 200 while Postgres answers, 503 once it stops             |
+| GET    | `/api/health`           | —           | 200 while Postgres and MinIO answer, 503 once either stops |
 | POST   | `/api/auth/login`       | —           | `{ email, password }` → `{ token, user }`            |
 | GET    | `/api/auth/me`          | session      | The subject of the presented token                        |
 | POST   | `/api/auth/activate`    | invite token | `{ token, password }` → `{ token, user }`            |
@@ -221,7 +223,7 @@ tree — but the seeded organisation is one: `coordinacion-root` renames the see
 /api/areas` that omits `parentAreaId` hangs the new area under whatever `DEFAULT_AREA` in
 `.env` names (matched by name, accent included). An explicit `parentAreaId: null` asks for
 a root. When the variable is unset or matches no area there is simply no default, and the
-area is a root — that fallback is silent by decision. Each area has at most one parent — that is the primary key — which is what makes the
+area is a root — that fallback is silent on purpose. Each area has at most one parent — that is the primary key — which is what makes the
 result renderable: every node carries its own `children`, and the frontend's
 `react-organizational-chart` recurses over the response with no reshaping. `depth` is
 computed by the recursive walk rather than stored, because depth is a consequence of where
@@ -230,7 +232,7 @@ an area currently hangs and a stored copy would go stale on every re-parent.
 Cycles deeper than one hop are refused by `PUT /api/areas/:id/parent`, not by the table:
 `area_hierarchy` can only CHECK that an area is not its own parent. The read query carries
 the recursive CTE's `CYCLE` clause so a loop written straight into the database through
-`psql` truncates one branch instead of hanging the request — that is a seatbelt, not the
+`psql` truncates one branch instead of hanging the request — that is a safety net, not the
 guard. A second write path to that table owes the same check.
 
 ### Roles and permissions
@@ -268,9 +270,10 @@ writes). `/api/roles` and the writes of `/api/users` stay on the `admin` role na
 purpose: they edit the grants everything else reads, and a grant that can revoke itself is
 a lockout.
 
-Renaming a role is heavier than it looks. `requireRole()` compares `roles.name`, and every
-token already issued carries the old name for up to seven days, because nothing re-reads the
-database on a verified token. A rename locks those holders out until they log in again.
+`admin` is the one role the code names by string (`requireRole('admin')` and the record
+checks in `documents.js`, `microsoft.js`, `routes/users.js`), so it cannot be renamed or
+deleted. Any other rename takes effect on the holders' next request: `verifyToken()` reads
+the role from the user row, not from the token.
 
 ### API documentation
 
@@ -322,7 +325,7 @@ ADMIN_PASSWORD=... npm run admin:create -- --email a@uaq.mx --name "Nombre Apell
 
 Run against an address that already exists it **promotes that user to admin and resets
 their password**, which is the recovery path when every admin is locked out. It is a script
-and not an endpoint deliberately: in a lockout the admin rows are still present and valid,
+and not an endpoint on purpose: in a lockout the admin rows are still present and valid,
 so a route gated on “no admins exist” would refuse to help in the one situation it was for.
 The gate is possession of `DATABASE_URL` — whoever has that can already do this with
 `psql`; the script only makes it correct, at the same bcrypt cost the server verifies with.
@@ -336,7 +339,7 @@ unset or matches nothing. A `--area` that matches nothing is refused instead.
 
 Either way it leaves the `admin` role holding **every** permission in the catalogue. The
 seed grants all of them, but grants are edited at runtime, so an admin can strip their own
-role and a code added later is granted to nobody; both are the lockout in a different coat.
+role and a code added later is granted to nobody; both lock admins out just the same.
 What it restores is written to the audit trail with no actor.
 
 ## Tests
@@ -345,9 +348,23 @@ What it restores is written to the audit trail with no actor.
 npm test
 ```
 
-Every endpoint above, driven through real HTTP. `pretest` creates
-`imagenuaq_test` and migrates it, so `npm test` is the only command to remember; the
-database container has to be up.
+Every endpoint above, driven through real HTTP. `pretest` creates `imagenuaq_test` and
+migrates it, and creates the `imagenuaq-test` bucket, so both the `db` and `minio`
+containers have to be up. One file, once `pretest` has run at least once:
+
+```bash
+node --env-file-if-exists=.env --env-file-if-exists=.env.test --test tests/roles.test.js
+```
+
+**A full run takes about five minutes, and it must not be piped.** `npm test | tail` hangs:
+once the reader exits the runner blocks writing to stdout at 0% CPU and never spawns a file,
+which looks like a slow run rather than a dead one. Redirect instead
+(`npm test > run.log 2>&1`) and read the log.
+
+**Two runs must never overlap.** They share the one test database and `resetCases()`
+deletes by predicate, so a second run deletes the first one's fixtures. The symptom is a
+file that fails in a full run (`Key (user_id)=(1) is not present in table "users"`) and
+passes on its own; re-run that one file before suspecting the code.
 
 The runner is Node's own (`node --test`) with `node:assert` and `fetch`, so the suite adds
 no dependencies. Each file boots the app with `new Api({ port: 0 })` and talks to it over a
@@ -362,22 +379,23 @@ rather than trusted. Point `TEST_DATABASE_URL` somewhere else to override, subje
 same check.
 
 Files run serially (`--test-concurrency=1`) because they share that database and each one
-truncates `users` and `area_members` before every case. The catalogs seeded by
-`catalog-bootstrap` survive, and fixtures look roles and areas up **by name** -- the ids
-differ between databases.
+empties it before every case. The catalogs seeded by `catalog-bootstrap` survive, and
+fixtures look roles and areas up **by name** -- the ids differ between databases.
+`reset()` deletes rather than `TRUNCATE ... CASCADE`: the cascade followed
+`schema_versions.published_by` into the seeded starter formats and emptied them. A table a
+test writes to that `resetCases()` does not know goes into `UNSEEDED_TABLES` in
+`tests/helpers/fixtures.js`, in foreign-key order.
 
 Most of the runtime is bcrypt: cost 12, roughly a second per login on a laptop, paid
-honestly on every login the suite performs. Fixtures hash once per process and reuse the
+in full on every login the suite performs. Fixtures hash once per process and reuse the
 digest.
 
-What the suite is for, beyond regressions: the behaviours it pins are the ones the code
-comments argue for and a plausible refactor would quietly undo -- the `purpose` claim that
-keeps an invite from working as a session, the single login message that denies an
-email-enumeration oracle, the ordering that makes a spent invite a 409 rather than a 400,
+What the suite is for, beyond regressions: it pins the behaviours
+a plausible refactor would quietly undo -- the `purpose` claim that
+keeps an invite from working as a session, the single login message that hides
+which emails have accounts, the ordering that makes a spent invite a 409 rather than a 400,
 the CTE that writes `area_members` with the user, and the partial index that frees a
 soft-deleted address. Each was checked by breaking it and confirming the suite fails.
-
-There is still no linter.
 
 ## Adding a resource
 
@@ -385,3 +403,29 @@ A migration in `migrations/`, SQL in `access/resources/query.js`, rules
 in `access/orchestration/<name>.js`, a router in `routes/<name>.js`, then one line in the
 `ROUTERS` map in `src/api.js`, and its paths in `src/swagger.js` — `tests/docs.test.js`
 fails on a route that is mounted and not described.
+
+`auth` is the worked example of the whole stack; copy its shape rather than `health`'s,
+which is thin enough to mislead. A router never imports `query.js`, and **routes do not
+catch**: every refusal is an `ApiError` thrown from orchestration, so a `try/catch` in a
+handler only turns a deliberate 401 into a 500. Declare static paths (`/orgchart`,
+`/field-keys`) before `/:id`, which would otherwise capture them. A new permission or audit
+action code is a migration, and a new permission is granted to `admin` in that same
+migration (DATAMODEL.md §5.9).
+
+## Conventions
+
+- **Two kinds of comment only:** a 1–3 line header saying what the file does and the one
+  thing you would get wrong, and JSDoc directly above a declaration for any rule a caller
+  could break. Plain words, no history. `npm run lint` enforces the two kinds
+  (`eslint-rules/comment-policy.js`); SQL comments in query strings and migrations are fine.
+  Design reasoning goes in `DATAMODEL.md`, cited from the code by its `RF-*`.
+- Code, comments and this README are English; `DATAMODEL.md`, `src/access/ACCESS.md` and
+  migration prose are Spanish. Keep each file in the language it already uses.
+- A migration opens with a prose block: what the previous shape could not express, why the
+  obvious fix is wrong, the `RF-*` that force it and the `DATAMODEL.md` section it closes.
+  Its Down really reverses its Up, and an applied migration is never edited — fix forward.
+- Migrations run from the host against `DATABASE_URL`, never inside the server
+  container: `node-pg-migrate` and `pg` are devDependencies, absent from the image.
+- `dev` is the integration branch, not `main`. Branches are `I<n>-<topic>`
+  (`I8-archivos`), merged to `dev` by PR. Commit subjects are `<area>/<summary>` with area
+  `api/`, `db/`, `api-db/`, `fix/` or `docs/`.

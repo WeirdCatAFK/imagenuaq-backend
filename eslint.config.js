@@ -1,6 +1,5 @@
-// Lint configuration. For now it enforces one thing, the comment policy in
-// eslint-rules/comment-policy.js. swagger.js is excluded: it is a hand-written OpenAPI
-// document, not code.
+// Lint setup. It checks one thing, the comment rule in eslint-rules/comment-policy.js.
+// swagger.js is skipped: it is a hand-written API description, not code.
 import { defineConfig, globalIgnores } from "eslint/config";
 
 import commentPolicy from "./eslint-rules/comment-policy.js";

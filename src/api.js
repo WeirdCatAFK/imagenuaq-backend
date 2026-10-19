@@ -1,5 +1,5 @@
-// Mounts the API. Separate from main.js so it can be started on its own, embedded in a
-// larger backend, or built by a test that never binds a port.
+// Builds the Express app and mounts every router in ROUTERS. Separate from main.js so tests can
+// start it without the rest.
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -20,6 +20,9 @@ import projectsRouter from './routes/projects.js';
 import workflowsRouter from './routes/workflows.js';
 import requestsRouter from './routes/requests.js';
 import contractTypesRouter from './routes/contractTypes.js';
+import documentsRouter from './routes/documents.js';
+import sharedRouter from './routes/shared.js';
+import tasksRouter from './routes/tasks.js';
 import docsRouter from './routes/docs.js';
 import { requestContext } from './middlewares/context.js';
 import { notFound } from './middlewares/notFound.js';
@@ -47,9 +50,18 @@ export const ROUTERS = {
   projects: projectsRouter,
   workflows: workflowsRouter,
   'contract-types': contractTypesRouter,
+  documents: documentsRouter,
+  shared: sharedRouter,
+  tasks: tasksRouter,
   docs: docsRouter,
 
 };
+
+/**
+ * Routes that stream the request body themselves. express.json() must leave them unread,
+ * or uploading a .json file would store an empty one.
+ */
+const RAW_BODY_ROUTES = /^\/api\/documents\/folders\/\d+\/files(\?|$)/;
 
 export default class Api {
   /**
@@ -73,7 +85,11 @@ export default class Api {
     this.app.use(helmet());
     this.app.use(cors({ origin: this.corsOrigin }));
     this.app.use(morgan(this.logFormat));
-    this.app.use(express.json());
+    this.app.use(
+      express.json({
+        type: (req) => Boolean(req.is('application/json')) && !RAW_BODY_ROUTES.test(req.originalUrl),
+      }),
+    );
 
     this.app.use(requestContext);
 

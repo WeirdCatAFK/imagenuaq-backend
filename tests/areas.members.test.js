@@ -1,6 +1,5 @@
-// Membership of an area, and leadership of it. Both live on `area_members` rather than on
-// `areas`, because somebody can lead one area and be an ordinary member of another --
-// the conclusion the schema-proofing migration reached when it dropped areas.lead_user_id.
+// Area membership and leadership. Both live on `area_members`, since a person can lead one
+// area and be a plain member of another.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

@@ -1,35 +1,14 @@
-// What a captured value becomes, per data type. Pure: no database, no HTTP.
-//
-// The same value arrives three ways -- typed into a form, sent by an API client, read out of an
-// Excel cell -- and all three have to end up as the same thing in `requests.data`, or the
-// inbox shows one date as `45000` and another as `15/03/2023`. So the coercion lives here and
-// the three callers share it: `orchestration/requests.js`, `orchestration/projects.js` and the
-// sheet import.
-//
-// **The type decides the coercion, never the rule.** A column map may say what format a date
-// string is written in, but not that a `quantity` should be parsed as a date. That is why
-// `coerce()` takes the `data_types.code` first and the options second.
-//
-// **Excel numbers are the interesting case.** A real date in a worksheet arrives from Graph as
-// a serial number -- days since 1899-12-30, with the time as a fraction -- while a date somebody
-// typed as text arrives as a string. Both are accepted: a number goes through the serial
-// conversion, a string through `format`.
-//
-// The 1899-12-30 epoch is what makes every modern date come out right, and it is a consequence
-// of the 1900 leap-year bug Excel keeps for compatibility: it counts a 1900-02-29 that never
-// existed. The cost is that serials 1 to 60 -- January and February 1900 -- land a day off under
-// that epoch, so they are **refused** rather than answered with the wrong day. A tracker whose
-// delivery date is in 1900 has a typo, not a date.
-//
-// Nothing here throws: every function answers `{ value, error }` or `{ data, errors }`, because
-// the import needs to report twenty bad rows rather than stop at the first, and the API needs
-// to answer with every complaint at once.
+// Converts captured values by data type, so a form, an API call and an Excel cell all store the
+// same thing. No database, no HTTP; returns errors instead of throwing.
 
 /** Excel's day zero. 1899-12-30, because the 1900 leap-year bug shifts everything by one. */
 const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30);
 const MS_PER_DAY = 86_400_000;
 
-/** 61 is 1900-03-01, the first serial the epoch above maps correctly (see the header). */
+/**
+ * 61 is 1900-03-01, the first serial the epoch above maps correctly. Serials 1 to 60 land a day
+ * off, so they are refused rather than turned into the wrong date: a 1900 date is a typo.
+ */
 const MIN_EXCEL_SERIAL = 61;
 /** 2958465 is 9999-12-31; past it the value is not a date anybody typed. */
 const MAX_EXCEL_SERIAL = 2_958_465;
@@ -217,7 +196,9 @@ function number(raw) {
 
 /**
  * A date out of an Excel serial, an ISO string or a written order named by `format`.
- * Returns `YYYY-MM-DD`, or an ISO instant when the type wants the time too.
+ * Returns `YYYY-MM-DD`, or an ISO instant when the type wants the time too. A written year
+ * must have four digits and is set with setUTCFullYear(): `Date.UTC` reads 0-99 as 1900+n, so
+ * Excel's displayed `1/8/26` would otherwise import as 1926.
  */
 function date(raw, options, withTime) {
   if (typeof raw === "number" || /^\d+(\.\d+)?$/.test(text(raw))) {

@@ -1,33 +1,6 @@
-// Tier 3: the registry of workbooks that stay alive during the transition (RF-MIG-01).
-//
-// A `sheets` row is a workbook, the table or worksheet inside it, and the Microsoft
-// account whose access reads it. This module registers and removes those rows, offers the Graph
-// reads the registry needs -- resolving a pasted link into the drive/item pair Graph wants, and
-// reading a header row so a person can see they registered the right thing -- and maps a book
-// onto a format so its rows can become requests.
-//
-// **A book is registered before it is mapped**, and a row with `schema_version_id` and
-// `column_map` empty reads as "not yet mapped". `utils/columnMap.js` owns what a map means; this
-// module owns when it may be saved and what an import does with it.
-//
-// **An import is not a transaction, on purpose.** Rows are independent: one that cannot be read
-// is reported and the run continues, because stopping at the first bad row in a tracker of
-// hundreds means nobody ever finishes an import. The run's report is a `sheet_imports` row, so
-// "why did this row not come in" is answerable after the response is gone.
-//
-// **Nothing is written back to the sheet.** The account is connected read-only and the Graph
-// client has only GET; syncing the project's status into the Excel is its own increment, needing
-// another consent from the account's owner. So a book is imported once with its state -- the map
-// translates its status column -- and the work lives here from then on.
-//
-// Registering does NOT call Graph. resolve() returns the ids and the caller sends them
-// back, so a registration is a plain insert that can be tested without the network and
-// that survives a Microsoft outage. The cost, stated: a client can register ids it made
-// up, and the row fails the first time it is read. The alternative -- verifying on every
-// insert -- makes the registry unusable exactly when the outage is Microsoft's.
-//
-// Which accounts may be used is microsoft.js's rule (owner or admin), asked through
-// usableAccount() so the two modules cannot disagree on it.
+// Registered Excel workbooks, their column maps and imports (RF-MIG-01). Registering does not
+// call Microsoft, so it works offline. An import skips bad rows and records what happened in
+// `sheet_imports`; nothing is ever written back to the workbook.
 import query from "../resources/query.js";
 import {
   resolveShareLink,
@@ -664,7 +637,7 @@ function shapeSheet(row) {
   };
 }
 
-/** A constraint violation into the refusal the caller earned; anything else untouched. */
+/** A constraint violation into the matching 4xx error; anything else untouched. */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     return ApiError.conflict("That table is already registered.");

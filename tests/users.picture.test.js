@@ -1,10 +1,5 @@
-// Profile pictures, stored as bytes on the users row.
-//
-// Two things here are worth more than the round trip. The type travels with the bytes --
-// bytea alone cannot tell a browser whether it is looking at a PNG or a JPEG, and the
-// CHECK constraint keeps the pair from ever being half-set. And the audit trail records
-// only THAT a picture changed: audit.js redacts by column name and `profile_picture`
-// matches none of its patterns, so an unguarded emit would put the image in `logs`.
+// Profile pictures, stored as bytes plus their type on the users row. The audit trail must
+// record that the picture changed, never the image.
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

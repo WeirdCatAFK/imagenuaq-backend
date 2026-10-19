@@ -1,41 +1,9 @@
-// Tier 3: projects, their stages, the sign-offs that move them and the values they carry
-// (RF-PRY-02, RF-FLW-01, RF-FLW-03, RF-FLW-06).
-//
-// **A stage is a definition plus its executions** (`flow-templates`, DATAMODEL.md §2.17). The
-// definition -- area, title, what it needs and owes -- is a `flow_stages` row inside one of the
-// project's `flow_phases`; each attempt at it is a `project_stages` row. `query.js` joins the
-// two and hands them up under the old column names, so a stage here still reads as one row
-// with `project_id`, `area_id`, `title` and `seq` (the phase). Editing the title, the keys or
-// the notes changes the definition, and so every attempt; status, assignee and dates belong
-// to one attempt.
-//
-// Four rules from DATAMODEL.md hold here and are easy to break:
-//
-//   - **A project has no current stage.** The active stage is the set of `project_stages`
-//     rows with `status = 'active'` (§2.1). Stages in one phase run in parallel.
-//   - **`status_id` and `status_since` move together**, in the same UPDATE (§2.7). The
-//     history goes to `logs`, not to a table of its own.
-//   - **A stage repeats by `attempt`** (§2.6): a rejected sign-off closes the row and opens
-//     the same definition again, so what happened stays readable.
-//   - **Approving the last open stage of a phase opens the next phase** (RF-FLW-04, §2.12):
-//     its pending stages become active in the statement that closes this one.
-//
-// **A stage declares what it needs and what it owes.** `inputs` are the field keys whoever
-// works it needs to have at hand; `outputs` are the keys it is expected to produce. Only the
-// outputs are enforced, and only on an approval: a stage cannot be signed off while a key it
-// declared has no value (RF-FLW-06). That is what makes the print shop find the order number --
-// design could not close without capturing it. Inputs are informational, because a value that
-// never arrived is why a stage waits on a third party (RF-FLW-07), not a capture error.
-//
-// Stages are created by hand here, each phase as `Fase <seq>` the first time a stage names
-// that seq. Starting a project from a flow template (`orchestration/workflows.js`) is the next
-// increment; it copies the template's definitions into the project's own phases.
-//
-// A sign-off needs `project.write` and nothing more: the permission is the policy. Gating it
-// on membership of the stage's area was considered and declined -- RF-FLW-03 asks for the
-// decision to be recorded with its author, not for a second authorisation model.
+// Projects, their stages, sign-offs and the values passed between stages (RF-PRY-02, RF-FLW-01,
+// RF-FLW-03, RF-FLW-06). A stage is never marked done by hand: only an approval closes it, and
+// only once every output it declared has a value.
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
+import documents from "./documents.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -63,6 +31,7 @@ const TITLE_MAX = 300;
 const REQUESTER_MAX = 300;
 const NOTE_MAX = 2000;
 const DAYS_MAX = 365;
+const DELIVERY_MAX = 4000;
 
 /** The status a project starts at when the caller names none (RF-EST-01). */
 const DEFAULT_STATUS = "recibido";
@@ -102,7 +71,7 @@ class Projects {
   async create({
     key, title, description = null, requester = null, schemaVersionId = null, statusId = null,
     priority = 0, hasCost = false, carriedOver = false, startsOn = null, dueOn = null,
-    folderId = null, eventCollectionId = null, fieldValues = [], stages = [], requestIds = [],
+    eventCollectionId = null, fieldValues = [], stages = [], requestIds = [],
     requestFlow = null,
   }) {
     const normalisedStages = normaliseStages(stages);
@@ -120,7 +89,6 @@ class Projects {
       carriedOver: requireBoolean(carriedOver, "carriedOver"),
       startsOn: optionalDate(startsOn, "startsOn"),
       dueOn: optionalDate(dueOn, "dueOn"),
-      folderId: optionalId(folderId, "folderId"),
       eventCollectionId: optionalId(eventCollectionId, "eventCollectionId"),
       statusId: await this.#resolveStatus(statusId, areaSources),
       fieldValues: normaliseFieldValues(fieldValues),
@@ -156,7 +124,25 @@ class Projects {
       if (stage.status === "active") await emitStage("stage_activated", stage);
     }
 
+    await documents.ensureProjectFolder({ id: row.id, key: row.key, folderId: null });
     return this.getById(row.id);
+  }
+
+  /**
+   * The project's folder with its contents, created on first use (RF-ARC-01). Folder access
+   * is decided by documents.js, so a project reader outside the project's areas gets a 404.
+   *
+   * @throws {ApiError} 404
+   */
+  async getFolder(projectId) {
+    const row = await query.getProject(requireId(projectId, "projectId"));
+    if (!row) throw ApiError.notFound("Project not found.");
+    const folderId = await documents.ensureProjectFolder({
+      id: row.id,
+      key: row.key,
+      folderId: row.folder_id,
+    });
+    return documents.getFolder(folderId);
   }
 
   /** @throws {ApiError} 404 */
@@ -408,7 +394,8 @@ class Projects {
     inputNote = null, outputNote = null, estimatedDays = null,
   }) {
     const id = requireId(projectId, "projectId");
-    if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    const project = await query.getProject(id);
+    if (!project) throw ApiError.notFound("Project not found.");
 
     const state = requireStageStatus(status);
     if (state === "waiting_external") {
@@ -452,6 +439,7 @@ class Projects {
       });
       if (stage.status === "active") await emitStage("stage_activated", stage);
 
+      await documents.ensureProjectFolder({ id, key: project.key, folderId: project.folder_id });
       return shapeStage(await query.getProjectStage(stage.id));
     } catch (err) {
       throw translate(err);
@@ -538,9 +526,58 @@ class Projects {
   }
 
   /**
+   * Records what an open stage delivered: the written evidence and, optionally, a file the caller
+   * can read -- normally one just uploaded to the project's folder. A second delivery on the same
+   * attempt replaces the first; a rerun starts blank (RF-FLW-03). The person assigned may deliver
+   * without `project.write`, as may a leader of the stage's area.
+   *
+   * @param {{note: string, fileId?: number|null}} input
+   * @throws {ApiError} 400 on no note or an unreadable file, 403, 404, 409 when the stage is
+   *   not open.
+   */
+  async deliver(projectId, stageId, { note, fileId = null }) {
+    const { id, before } = await this.#ownStage(projectId, stageId);
+    if (before.status !== "active" && before.status !== "waiting_external") {
+      throw ApiError.conflict("Only an open stage takes a delivery.");
+    }
+
+    const actor = currentActor();
+    const allowed =
+      String(before.assigned_to) === String(actor.id) ||
+      actor.role === "admin" ||
+      (await query.getRolePermissionCodes(actor.roleId)).includes("project.write") ||
+      (await query.isUserAreaLeader(actor.id, before.area_id));
+    if (!allowed) {
+      throw ApiError.forbidden("Only the person on the stage or its area's leader delivers it.");
+    }
+
+    const text = requireText(note, "note", DELIVERY_MAX);
+    const file = optionalId(fileId, "fileId");
+    if (file !== null) {
+      try {
+        await documents.getFile(file);
+      } catch (err) {
+        if (err?.statusCode === 404) throw ApiError.badRequest("fileId is not a file you can read.");
+        throw err;
+      }
+    }
+
+    const row = await query.setStageDelivery(id, { note: text, fileId: file, deliveredBy: actor.id });
+    await events.emit({
+      action: "record_updated",
+      target: { table: "project_stages", id },
+      before: deliveryOf(before),
+      after: deliveryOf(row),
+    });
+    return shapeStage(await query.getProjectStage(id));
+  }
+
+  /**
    * Records a sign-off and moves the stage. `approved` completes it; `rejected` completes it
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
-   * work stays visible instead of overwriting what happened (§2.6).
+   * work stays visible instead of overwriting what happened (§2.6). Callers check who may sign:
+   * the project route asks only for `project.write`, and `tasks.signOff` lets the stage's area
+   * leader sign from the review queue (RF-FLW-03 asks for the author to be recorded).
    *
    * @param {{decision: 'approved'|'rejected', comment?: string, evidenceFileId?: number}} input
    * @throws {ApiError} 400 on a bad decision or unknown evidence file, 404, 409 when the
@@ -898,6 +935,15 @@ function definitionOf(stage) {
   };
 }
 
+function deliveryOf(stage) {
+  return {
+    delivery_note: stage.delivery_note,
+    delivery_file_id: stage.delivery_file_id,
+    delivered_by: stage.delivered_by,
+    delivered_at: stage.delivered_at,
+  };
+}
+
 function executionOf(stage) {
   return {
     id: stage.id,
@@ -1024,6 +1070,10 @@ function shapeStage(row) {
     inputNote: row.input_note ?? null,
     outputNote: row.output_note ?? null,
     estimatedDays: row.estimated_days ?? null,
+    deliveryNote: row.delivery_note ?? null,
+    deliveryFileId: row.delivery_file_id ?? null,
+    deliveredBy: row.delivered_by ?? null,
+    deliveredAt: row.delivered_at ?? null,
   };
 }
 
@@ -1050,7 +1100,7 @@ function shapeFieldValue(row) {
   };
 }
 
-/** A constraint violation into the refusal the caller earned; anything else untouched. */
+/** A constraint violation into the matching 4xx error; anything else untouched. */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     if (err.constraint === "uq_projects_key") {

@@ -1,29 +1,6 @@
-// Tier 3: flow templates (RF-FLW-02, RF-PRY-06) -- the reusable flows coordination draws in
-// the designer and a project will start from.
-//
-// **A flow is ordered phases, not a graph** (`flow-templates`, DATAMODEL.md §2.1, §2.17). A
-// phase's stages work in parallel (RF-FLW-09); the next phase begins when the previous one is
-// done. A stage names the area that does it, what it needs and what it delivers -- field keys,
-// the same declaration a project stage carries (RF-FLW-06) -- plus free-text notes for a
-// person to read, the working days it is expected to take, and optionally the person who
-// usually does it.
-//
-// **Versions are immutable, like request formats** (§2.2). Saving in the designer publishes a
-// new version with the whole content; nothing already published is edited, and a trigger
-// refuses it if something tries. A project that started from version 3 keeps its own copy, so
-// publishing version 4 moves nothing that is under way.
-//
-// **The default person must be an active member of the stage's area when the version is
-// published**, which is the only moment the check can be made honestly -- people change
-// areas. A clone re-checks it and quietly drops anyone who no longer qualifies rather than
-// refusing the whole copy; the person was a suggestion, not a commitment.
-//
-// **Keys are checked for form, not against the published vocabulary**, the same as a project
-// stage's. The reserved finance keys (`requiere_factura`) live in no format, and a template
-// may name a value that the next format introduces. The designer suggests the vocabulary
-// (`GET /api/schemas/field-keys`) so reuse is the easy path.
-//
-// The publisher is the session, never a body field.
+// Flow templates (RF-FLW-02, RF-PRY-06): ordered phases whose stages run in parallel. Published
+// versions never change; saving publishes a new one. A stage's default person must belong to
+// its area when the version is published.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
@@ -239,7 +216,7 @@ class Workflows {
 }
 
 /**
- * Checks a template's phases and returns them canonical -- trimmed, keys deduplicated, notes
+ * Checks a template's phases and returns them cleaned up -- trimmed, keys deduplicated, notes
  * null when blank -- in the shape `query.js` stores: `[{name, stages: [{areaId, title,
  * defaultAssigneeId, inputs, outputs, inputNote, outputNote, estimatedDays}]}]`. Order is
  * position in the arrays. Each refusal names the phase and stage it is about.
@@ -402,7 +379,7 @@ function shapeVersion(row) {
   };
 }
 
-/** A constraint violation into the refusal the caller earned; anything else untouched. */
+/** A constraint violation into the matching 4xx error; anything else untouched. */
 function translate(err) {
   if (err?.code === UNIQUE_VIOLATION) {
     if (err.constraint === "uq_workflows_code") {

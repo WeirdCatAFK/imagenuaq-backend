@@ -1,5 +1,5 @@
-// Its own file, because node:test gives each file its own process and the pool is a
-// module-level singleton. Opening it in any other file would leak into this one.
+// Health with the database down. Its own file because each test file runs in its own process
+// and the pool is module-wide.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 

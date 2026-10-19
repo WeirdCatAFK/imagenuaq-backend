@@ -1,9 +1,5 @@
-// Pure: no server, no database, no Graph.
-//
-// The headers and the first row come from the real tracker (`FORMATO DE SOLICITUD 002 HOJA
-// MEMBRETADA`), read with `npm run sheets:probe -- 1`. That is why the awkward parts are here:
-// a header with a trailing colon, a header Forms suffixed with `1`, a date that arrives as the
-// serial 46030.4107 and a quantity that arrives empty.
+// No server, no database. The headers and first row come from a real tracker, read with
+// `npm run sheets:probe -- 1`, which is why they are awkward.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 

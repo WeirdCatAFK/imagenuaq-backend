@@ -1,15 +1,5 @@
-// Sessions, and the record behind one.
-//
-// Two blocks, as in routes/users.js: the public routes that produce a session come first
-// (login, and activate, whose credential is the invite itself), then `router.use(
-// authenticate)`, then everything under /me. A route appended at the bottom therefore
-// needs a session by omission.
-//
-// /me is where a person edits their OWN record. The write half of routes/users.js is
-// admin-only and stays that way -- staffing decisions are coordination's (RF-USR-02) --
-// but a person's name, address, birthday, picture and password are theirs, and RF-USR-06
-// (do not edit what is not yours) cuts both ways. The id is never a parameter here: it is
-// read from the session, so there is no path by which one person reaches another's row.
+// Login, invite activation and /me, where a person edits their own record. Public routes come
+// first, then authenticate(); the id under /me always comes from the session, never the path.
 import express, { Router } from 'express';
 
 import auth from '../access/orchestration/auth.js';
@@ -42,8 +32,8 @@ router.post('/activate', async (req, res) => {
 
 router.use(authenticate);
 
-router.get('/me', (req, res) => {
-  res.json({ user: req.user });
+router.get('/me', async (req, res) => {
+  res.json({ user: req.user, permissions: await auth.permissionsFor(req.user.roleId) });
 });
 
 router.get('/me/profile', async (req, res) => {

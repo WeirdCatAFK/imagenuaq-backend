@@ -34,173 +34,67 @@ services:
       # what the database is published as on the host.
       DATABASE_URL: postgres://${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
 
-      #------------------
-      # MINIO
-      # -----------------
-
-      # Dentro de Docker NO usamos localhost.
-      # "minio" es el nombre del servicio.
+      # Same override reason: `localhost` in .env is the host; on the Compose network MinIO
+      # is the `minio` service, on its container port.
       MINIO_ENDPOINT: http://minio:9000
-
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
-
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
-
-      # Bucket para documentos permanentes.
-      MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:-documentos}
-
-      # Bucket para documentos temporales.
-      MINIO_TEMP_BUCKET: ${MINIO_TEMP_BUCKET:-temporales}
-
-
-      # Same override reason: the paths in .env are host paths, and each disk is
-      # bind-mounted below at /srv/storage/<label>. The labels are what storage_volumes
-      # holds and what must not drift; only the paths differ between host and container,
-      # which is exactly why the database stores the label and never the path.
-      STORAGE_VOLUMES: main:/srv/storage/main,cold:/srv/storage/cold
-    # Each disk keeps its own .imagenuaq-volume marker, so a mount that silently fails to
-    # come up makes the server refuse to start instead of filling the container's own
-    # filesystem with blobs it will later look for on a disk.
-    volumes:
-      - ${STORAGE_MAIN_PATH:?set STORAGE_MAIN_PATH in .env (see .env.example)}:/srv/storage/main
-      - ${STORAGE_COLD_PATH:?set STORAGE_COLD_PATH in .env (see .env.example)}:/srv/storage/cold
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (see .env.example)}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
+      MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:?set MINIO_DOCUMENTS_BUCKET in .env (see .env.example)}
     ports:
       - "${PORT:?set PORT in .env (see .env.example)}:${PORT:?set PORT in .env (see .env.example)}"
-    # Wait for the healthcheck, not just for the container to exist: Postgres accepts
-    # connections only after its init scripts finish, and main.js opens the pool at once.
+    # Wait for the healthchecks, not just for the containers to exist: main.js opens the pool
+    # and checks the bucket at once, and refuses to start if either is missing.
     depends_on:
       db:
         condition: service_healthy
-
       minio:
         condition: service_healthy
-
       minio-init:
         condition: service_completed_successfully
 
-  # ======================
-  # MINIO AISTOR
-  # ======================
+  # File content, keyed by SHA-256 (src/access/primitives/minioStorage.js). One server over four
+  # disks: MinIO erasure-codes across them, which is why the database records no placement.
   minio:
-
     image: quay.io/minio/aistor/minio:RELEASE.2026-09-07T08-39-31Z
-
     restart: unless-stopped
-
-    command:
-      - minio
-      - server
-
-      # Un solo servidor físico,
-      # pero utilizando varios discos.
-      - /data1
-      - /data2
-      - /data3
-      - /data4
-
-      - --console-address
-      - ":9001"
-
-      - --license
-      - /minio.license
-
+    command: ["minio", "server", "/data1", "/data2", "/data3", "/data4",
+              "--console-address", ":9001", "--license", "/minio.license"]
     environment:
-
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
-
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
-
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (see .env.example)}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
     volumes:
-
-      # ==========================
-      # DISCOS FÍSICOS
-      # ==========================
-
-      # Disco físico 1
-      - ${MINIO_DISK1:?set MINIO_DISK1 in .env}:/data1
-
-      # Disco físico 2
-      - ${MINIO_DISK2:?set MINIO_DISK2 in .env}:/data2
-
-      # Disco físico 3
-      - ${MINIO_DISK3:?set MINIO_DISK3 in .env}:/data3
-
-      # Disco físico 4
-      - ${MINIO_DISK4:?set MINIO_DISK4 in .env}:/data4
-
-      # Licencia de AIStor
-      - ./minio.license:/minio.license:ro
-
+      - ${MINIO_DISK1:?set MINIO_DISK1 in .env (see .env.example)}:/data1
+      - ${MINIO_DISK2:?set MINIO_DISK2 in .env (see .env.example)}:/data2
+      - ${MINIO_DISK3:?set MINIO_DISK3 in .env (see .env.example)}:/data3
+      - ${MINIO_DISK4:?set MINIO_DISK4 in .env (see .env.example)}:/data4
+      - ${MINIO_LICENSE:?set MINIO_LICENSE in .env (see .env.example)}:/minio.license:ro
+    # The API port is published so `npm run dev` and `npm test` on the host can reach it; the
+    # console is the web UI.
     ports:
-
-      # API S3
-      - "${MINIO_API_PORT:-9000}:9000"
-
-      # Consola web
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
-
+      - "${MINIO_API_PORT:?set MINIO_API_PORT in .env (see .env.example)}:9000"
+      - "${MINIO_CONSOLE_PORT:?set MINIO_CONSOLE_PORT in .env (see .env.example)}:9001"
     healthcheck:
-      test:
-        [
-          "CMD",
-          "curl",
-          "-f",
-          "http://localhost:9000/minio/health/live"
-        ]
-
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 30s
 
-
-  # ===================================
-  # CONFIGURACIÓN INICIAL DE MINIO
-  # ===================================
-  #
-  # Este contenedor:
-  #
-  # 1. Espera a que MinIO esté disponible.
-  # 2. Crea el bucket documentos.
-  # 3. Crea el bucket temporales.
-  # 4. Configura la expiración de temporales.
-  #
-  # Se ejecuta y termina.
-  #
-  # No guarda archivos.
-  #
-  # =======================================
+  # Runs once and exits: creates the documents bucket if it is missing (minio/init/setup.sh).
   minio-init:
-
     image: quay.io/minio/aistor/mc:RELEASE.2026-09-06T02-44-40Z
-
     restart: "no"
-
     depends_on:
-
       minio:
         condition: service_healthy
-
     environment:
-
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
-
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
-
-      MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:-documentos}
-
-      MINIO_TEMP_BUCKET: ${MINIO_TEMP_BUCKET:-temporales}
-
-      MINIO_TEMP_EXPIRATION_DAYS: ${MINIO_TEMP_EXPIRATION_DAYS:-180}
-
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (see .env.example)}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
+      MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:?set MINIO_DOCUMENTS_BUCKET in .env (see .env.example)}
     volumes:
       - ./minio/init/setup.sh:/setup.sh:ro
+    entrypoint: ["/bin/sh", "/setup.sh"]
 
-    entrypoint:
-      - /bin/sh
-      - /setup.sh
-
-    
   db:
     image: postgres:${POSTGRES_VERSION:?set POSTGRES_VERSION in .env (see .env.example)}-alpine
     restart: unless-stopped

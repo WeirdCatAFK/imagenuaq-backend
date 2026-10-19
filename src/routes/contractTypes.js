@@ -1,7 +1,4 @@
-// The contract-scheme catalogue, at /api/contract-types.
-//
-// One route, one guard. Everything about why there is no POST here is in
-// access/orchestration/contractTypes.js.
+// The contract types, at /api/contract-types. Read-only; orchestration/contractTypes.js says why.
 import { Router } from "express";
 
 import contractTypes from "../access/orchestration/contractTypes.js";

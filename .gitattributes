@@ -1,3 +1,6 @@
 # Snapshots are generated with LF and compared byte for byte against the live schema.
 # Letting git rewrite them to CRLF makes every fresh clone look like the database drifted.
 *.dbml text eol=lf
+
+# Shell scripts run inside Linux containers; a CRLF checkout on Windows breaks `set -e`.
+*.sh text eol=lf
