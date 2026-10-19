@@ -681,6 +681,17 @@ Table "file_retention" {
 CHECK file_retention_months_positive: months > 0'''
 }
 
+Table "period_closures" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(200) [not null]
+  "starts_on" date [not null]
+  "ends_on" date [not null]
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: '''RF-CAL-03: la ventana de cierre de semestre en que no se ejecutan proyectos con costo. Solo marca, no bloquea.
+CHECK period_closures_range: ends_on >= starts_on'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -772,6 +783,8 @@ Ref "logs_area_id_fkey":"areas"."id" < "logs"."area_id"
 Ref "microsoft_accounts_user_id_fkey":"users"."id" < "microsoft_accounts"."user_id"
 
 Ref "microsoft_app_updated_by_fkey":"users"."id" < "microsoft_app"."updated_by"
+
+Ref "period_closures_created_by_fkey":"users"."id" < "period_closures"."created_by" [delete: set null]
 
 Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "project_field_values"."produced_by_stage_id"
 
