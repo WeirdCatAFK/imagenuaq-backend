@@ -277,6 +277,15 @@ export function buildOpenApiDocument() {
           'stages needs `task.read`; handing work out needs `task.write` and leading the ' +
           "stage's area (admin leads every area). Load is a count of open stages, never hours.",
       },
+      {
+        name: 'calendar',
+        description:
+          'Stages, absences, global events and semester closure windows over a span of days ' +
+          '(RF-CAL-02, RF-CAL-03, RF-CAL-05). Reading needs `calendar.read`: coordination may see ' +
+          'every area, anyone else their own areas, themselves and the global events. Stage events ' +
+          'are kept by the server and absences never carry the reason. Global events and closure ' +
+          'windows are written under `calendar.write`.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -1332,6 +1341,7 @@ export function buildOpenApiDocument() {
             statusSince: { type: 'string', format: 'date-time' },
             priority: { type: 'integer', description: 'Higher is more urgent (RF-FLW-08).' },
             hasCost: { type: 'boolean', description: 'RF-PRY-07.' },
+            inClosure: { type: 'boolean', description: 'RF-CAL-03: costed and inside a closure window. A mark, not a block.' },
             carriedOver: { type: 'boolean', description: 'RF-PRY-08.' },
             startsOn: { type: ['string', 'null'], format: 'date' },
             dueOn: { type: ['string', 'null'], format: 'date' },
@@ -1856,6 +1866,73 @@ export function buildOpenApiDocument() {
                 },
               },
             },
+          },
+        },
+        CalendarEvent: {
+          type: 'object',
+          description: 'One occurrence. A repeating event comes once per occurrence in the span.',
+          properties: {
+            id: { type: 'integer', description: 'The event; repeated across its occurrences.' },
+            kind: { type: 'string', enum: ['stage', 'absence', 'global', 'note', 'due', 'other'] },
+            day: { type: 'string', format: 'date', description: 'Only on `due`: the due date of the project, with no time.' },
+            noteScope: {
+              type: 'string',
+              enum: ['personal', 'area', 'global'],
+              description: 'Only on notes. A personal note reaches its author alone, coordination included.',
+            },
+            mine: { type: 'boolean', description: 'Only on notes: the reader wrote it.' },
+            type: { type: 'string', example: 'festivo' },
+            title: { type: 'string' },
+            startsAt: { type: 'string', format: 'date-time' },
+            endsAt: { type: 'string', format: 'date-time', description: 'Exclusive; an all-day event ends at the next midnight.' },
+            allDay: { type: 'boolean' },
+            rule: { type: ['string', 'null'], example: 'FREQ=YEARLY' },
+            seriesStartsAt: { type: 'string', format: 'date-time', description: 'Where the series begins, for moving it.' },
+            editable: { type: 'boolean', description: 'A global event, which calendar.write may move.' },
+            stageId: { type: ['integer', 'null'] },
+            projectId: { type: ['integer', 'null'] },
+            projectKey: { type: ['string', 'null'] },
+            hasCost: { type: 'boolean' },
+            inClosure: { type: 'boolean', description: 'RF-CAL-03: a costed project inside a closure window.' },
+            areaId: { type: ['integer', 'null'] },
+            areaName: { type: ['string', 'null'] },
+            userId: { type: ['integer', 'null'] },
+            userName: { type: ['string', 'null'] },
+          },
+        },
+        CalendarEventInput: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['festivo', 'general'], default: 'general' },
+            title: { type: 'string', maxLength: 300 },
+            description: { type: 'string' },
+            allDay: { type: 'boolean', default: false },
+            startsAt: { type: 'string', format: 'date-time' },
+            endsAt: { type: 'string', format: 'date-time' },
+            rule: {
+              type: ['string', 'null'],
+              description: 'Only FREQ=YEARLY or FREQ=WEEKLY;BYDAY=MO,TU,... Anything else is a 400.',
+            },
+            until: { type: ['string', 'null'], format: 'date-time', description: 'Last occurrence of a repeating event.' },
+          },
+        },
+        CalendarNote: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            day: { type: 'string', format: 'date' },
+            text: { type: 'string', maxLength: 300 },
+            scope: { type: 'string', enum: ['personal', 'area', 'global'], default: 'personal' },
+            areaId: { type: ['integer', 'null'], description: 'Required for an area note: one the author is in.' },
+          },
+        },
+        PeriodClosure: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            name: { type: 'string', maxLength: 200, example: 'Cierre 2026-2' },
+            startsOn: { type: 'string', format: 'date' },
+            endsOn: { type: 'string', format: 'date' },
           },
         },
         Retention: {
@@ -4645,6 +4722,159 @@ export function buildOpenApiDocument() {
             200: { description: '`{ stages: [...] }`.' },
             401: UNAUTHORIZED,
             403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/calendar': {
+        get: {
+          tags: ['calendar'],
+          summary: 'What happens on a span of days',
+          description:
+            'Needs calendar.read. `scope=mine` is the caller\'s own stages and absences; `area` everything of their areas (or of `areaId`); `all` every area, coordination only. Global events and the closure windows come with every scope. At most 92 days.',
+          parameters: [
+            { name: 'from', in: 'query', required: true, schema: { type: 'string', format: 'date' } },
+            { name: 'to', in: 'query', required: true, schema: { type: 'string', format: 'date' } },
+            { name: 'scope', in: 'query', schema: { type: 'string', enum: ['mine', 'area', 'all'], default: 'area' } },
+            { name: 'areaId', in: 'query', schema: { type: 'integer' } },
+            { name: 'userId', in: 'query', schema: { type: 'integer' } },
+          ],
+          responses: {
+            200: {
+              description: '`{ from, to, events: CalendarEvent[], closures: PeriodClosure[] }`.',
+            },
+            400: errorResponse('A bad span or scope.', 'A calendar read covers at most 92 days.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/calendar/events': {
+        post: {
+          tags: ['calendar'],
+          summary: 'Create a global event',
+          description: 'Needs calendar.write. A festivo or general event that everyone sees, once or repeating.',
+          requestBody: jsonBody('CalendarEventInput'),
+          responses: {
+            201: { description: 'The event.' },
+            400: errorResponse('A bad payload or an unsupported rule.', 'endsAt must be after startsAt.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/calendar/events/{eventId}': {
+        parameters: [pathId('eventId', 'A global event.')],
+        patch: {
+          tags: ['calendar'],
+          summary: 'Change or move a global event',
+          description: 'Needs calendar.write. Stage and absence events are not global and answer 404.',
+          requestBody: jsonBody('CalendarEventInput'),
+          responses: {
+            200: { description: 'The event.' },
+            400: errorResponse('A bad payload.', 'endsAt must be after startsAt.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Not a global event.', 'Global event not found.'),
+          },
+        },
+        delete: {
+          tags: ['calendar'],
+          summary: 'Delete a global event',
+          responses: {
+            204: { description: 'Deleted.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Not a global event.', 'Global event not found.'),
+          },
+        },
+      },
+      '/api/calendar/notes': {
+        post: {
+          tags: ['calendar'],
+          summary: 'Stick a note on a day',
+          description:
+            'Needs calendar.read. personal: only the author reads it; area: the members of an area the author is in; global: everyone, coordination only.',
+          requestBody: jsonBody('CalendarNote'),
+          responses: {
+            201: { description: 'The note.' },
+            400: errorResponse('A bad payload.', 'day is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/calendar/notes/{noteId}': {
+        parameters: [pathId('noteId', 'A note.')],
+        patch: {
+          tags: ['calendar'],
+          summary: 'Rewrite a note or move it to another day',
+          description: 'Only its author; coordination may also change a global note.',
+          requestBody: jsonBody('CalendarNote'),
+          responses: {
+            200: { description: 'The note.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such note.', 'Note not found.'),
+          },
+        },
+        delete: {
+          tags: ['calendar'],
+          summary: 'Remove a note',
+          responses: {
+            204: { description: 'Removed.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such note.', 'Note not found.'),
+          },
+        },
+      },
+      '/api/calendar/closures': {
+        get: {
+          tags: ['calendar'],
+          summary: 'Every semester closure window',
+          description: 'Needs calendar.read. RF-CAL-03.',
+          responses: {
+            200: wrapped('Earliest first.', 'items', 'PeriodClosure', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['calendar'],
+          summary: 'Add a closure window',
+          description: 'Needs calendar.write. Windows never overlap; costed projects inside one are marked, not blocked.',
+          requestBody: jsonBody('PeriodClosure'),
+          responses: {
+            201: { description: 'The window.' },
+            400: errorResponse('A bad payload.', 'startsOn and endsOn are required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('It overlaps another window.', 'That window overlaps another closure window.'),
+          },
+        },
+      },
+      '/api/calendar/closures/{closureId}': {
+        parameters: [pathId('closureId', 'A closure window.')],
+        patch: {
+          tags: ['calendar'],
+          summary: 'Change or move a closure window',
+          requestBody: jsonBody('PeriodClosure'),
+          responses: {
+            200: { description: 'The window.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such window.', 'Closure window not found.'),
+            409: errorResponse('It overlaps another window.', 'That window overlaps another closure window.'),
+          },
+        },
+        delete: {
+          tags: ['calendar'],
+          summary: 'Delete a closure window',
+          responses: {
+            204: { description: 'Deleted.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such window.', 'Closure window not found.'),
           },
         },
       },

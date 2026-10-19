@@ -197,6 +197,21 @@ describe("a request's flow", () => {
       const left = await sql("select count(*)::int as n from flow_phases where request_id = $1", [mine.id]);
       assert.equal(left[0].n, 0, "the request no longer owns phases");
 
+      const onCalendar = await sql(
+        `select ps.status, ps.event_id is not null as has_event
+           from project_stages ps
+           join flow_stages fs on fs.id = ps.flow_stage_id
+           join flow_phases fp on fp.id = fs.phase_id
+          where fp.project_id = $1
+          order by ps.status`,
+        [project.id],
+      );
+      assert.deepEqual(
+        onCalendar.map((s) => [s.status, s.has_event]),
+        [["active", true], ["active", true], ["pending", false]],
+        "the stages that start on converting are on the calendar (RF-CAL-02)",
+      );
+
       const logs = await logsFor("project_stages", project.stages[0].id);
       assert.deepEqual(logs.map((l) => l.action), ["stage_activated"]);
     });

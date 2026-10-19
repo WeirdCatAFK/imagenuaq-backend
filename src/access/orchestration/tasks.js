@@ -6,7 +6,7 @@ import projects from "./projects.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { cleanText, requireId, optionalId } from "../../utils/validate.js";
+import { optionalDate, requireId, optionalId } from "../../utils/validate.js";
 
 /** The window the load panel counts absences over when the caller names none: this week. */
 const WINDOW_DAYS = 7;
@@ -243,15 +243,6 @@ function parseWindow({ from, to }) {
   const end = optionalDate(to, "to") ?? isoDate(new Date(Date.parse(start) + (WINDOW_DAYS - 1) * 86_400_000));
   if (end < start) throw ApiError.badRequest("to must not be earlier than from.");
   return { start, end };
-}
-
-function optionalDate(value, field) {
-  const text = cleanText(value);
-  if (text === null) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(text))) {
-    throw ApiError.badRequest(`${field} must be a date as YYYY-MM-DD.`);
-  }
-  return text;
 }
 
 function isoDate(date) {
