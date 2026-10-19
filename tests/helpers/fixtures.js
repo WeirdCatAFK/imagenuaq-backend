@@ -45,6 +45,9 @@ export const TEST_STATUS_PREFIX = 'zztest_';
  * reference; a new table a test writes to belongs here in that order.
  */
 const UNSEEDED_TABLES = [
+  'absences',
+  'event_participants',
+  'events',
   'access_tokens',
   'folder_areas',
   'files',

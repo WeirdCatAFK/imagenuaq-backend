@@ -18,6 +18,9 @@ const STAGE_FROM = `
   join flow_phases fp on fp.id = fs.phase_id
   join areas a on a.id = fs.area_id`;
 
+/** A project whose work still counts: not closed, archived or deleted. Expects alias `p`. */
+const LIVE_PROJECT = "p.deleted_at is null and p.closed_at is null and p.archived_at is null";
+
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
@@ -3438,6 +3441,125 @@ class Query {
     );
     return row.used;
   }
+
+  /** Open stages of live projects assigned to `userId`, most urgent project first. */
+  async listAssignedStages(userId) {
+    return this.#rows(
+      `select ${STAGE_COLUMNS}, p.key as project_key, p.title as project_title,
+              p.priority as project_priority, p.due_on as project_due_on,
+              df.name as delivery_file_name, du.full_name as delivered_by_name
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+         left join files df on df.id = ps.delivery_file_id and df.deleted_at is null
+         left join users du on du.id = ps.delivered_by
+        where ps.assigned_to = $1
+          and ps.status in ('pending', 'active', 'waiting_external')
+          and ${LIVE_PROJECT}
+        order by p.priority desc, p.due_on nulls last, ps.id`,
+      [userId],
+    );
+  }
+
+  /**
+   * What `areaId` has to hand out (RF-TSK-01): the open stages of its own with nobody on them,
+   * ranked by their project's priority, never by arrival (RF-FLW-08).
+   */
+  async listUnassigned(areaId) {
+    return this.#rows(
+      `select ps.id, fs.title, p.priority, p.due_on, p.id as project_id,
+              p.key as project_key, p.title as project_title, fp.name as phase_name
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+        where fs.area_id = $1 and ps.assigned_to is null
+          and ps.status in ('pending', 'active', 'waiting_external') and ${LIVE_PROJECT}
+        order by p.priority desc, p.due_on nulls last, ps.id`,
+      [areaId],
+    );
+  }
+
+  /**
+   * Each member of `areaIds`, one row per area they belong to, with their open work everywhere,
+   * not just in that area: a person's load is theirs, whichever area handed it out (RF-TSK-06,
+   * RF-RPT-02). `away_days` counts the days in [from, to] an approved absence covers, read from
+   * `absence_availability` and never from `absences` (RF-TSK-07).
+   */
+  async areaWorkload(areaIds, from, to) {
+    if (areaIds.length === 0) return [];
+    return this.#rows(
+      `select am.area_id, u.id, u.full_name, am.is_area_leader,
+              (select count(*)::int from project_stages ps
+                 join flow_stages fs on fs.id = ps.flow_stage_id
+                 join flow_phases fp on fp.id = fs.phase_id
+                 join projects p on p.id = fp.project_id
+                where ps.assigned_to = u.id
+                  and ps.status in ('pending', 'active', 'waiting_external')
+                  and ${LIVE_PROJECT}) as open_stages,
+              -- Recurring absences count by their first occurrence only, as the view stores them.
+              (select count(distinct day)::int
+                 from absence_availability aa
+                 cross join generate_series($2::date, $3::date, interval '1 day') day
+                where aa.user_id = u.id
+                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_days,
+              (select coalesce(array_agg(distinct to_char(day, 'YYYY-MM-DD')
+                                         order by to_char(day, 'YYYY-MM-DD')), '{}')
+                 from absence_availability aa
+                 cross join generate_series($2::date, $3::date, interval '1 day') day
+                where aa.user_id = u.id
+                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_dates
+         from area_members am
+         join users u on u.id = am.user_id
+        where am.area_id = any($1::bigint[]) and u.deleted_at is null
+        order by u.full_name`,
+      [areaIds, from, to],
+    );
+  }
+
+  /** The open stages each of `userIds` is on, in any area, most urgent first (RF-TSK-06). */
+  async openStagesOf(userIds) {
+    if (userIds.length === 0) return [];
+    return this.#rows(
+      `select ps.id, ps.status, ps.assigned_to, fs.title, a.name as area_name,
+              fp.name as phase_name, p.id as project_id, p.key as project_key,
+              p.title as project_title, p.priority, p.due_on
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+        where ps.assigned_to = any($1::bigint[])
+          and ps.status in ('pending', 'active', 'waiting_external') and ${LIVE_PROJECT}
+        order by p.priority desc, p.due_on nulls last, ps.id`,
+      [userIds],
+    );
+  }
+
+  /**
+   * The areas whose work `userId` hands out, by name: the ones they lead, or every area when
+   * `userId` is null (coordination).
+   */
+  async areasHandedOutBy(userId) {
+    return this.#rows(
+      `select a.id, a.name from areas a
+        where $1::bigint is null
+           or exists (select 1 from area_members am
+                       where am.area_id = a.id and am.user_id = $1 and am.is_area_leader)
+        order by a.name`,
+      [userId],
+    );
+  }
+
+  /** How many open stages each of `areaIds` still has to hand out, and how many of those are late. */
+  async inboxCounts(areaIds) {
+    if (areaIds.length === 0) return [];
+    return this.#rows(
+      `select fs.area_id, count(*)::int as unassigned,
+              count(*) filter (where p.due_on < current_date)::int as late
+         from ${STAGE_FROM}
+         join projects p on p.id = fp.project_id
+        where fs.area_id = any($1::bigint[]) and ps.assigned_to is null
+          and ps.status in ('pending', 'active', 'waiting_external') and ${LIVE_PROJECT}
+        group by fs.area_id`,
+      [areaIds],
+    );
+  }
+
   /** Records what a stage attempt delivered, replacing any earlier delivery of the same attempt. */
   async setStageDelivery(stageId, { note, fileId, deliveredBy }) {
     const [row] = await this.#rows(
@@ -3451,6 +3573,13 @@ class Query {
     return row ?? null;
   }
 
+  async setStageAssignee(stageId, userId) {
+    const [row] = await this.#rows(
+      `update project_stages set assigned_to = $2::bigint where id = $1 returning *`,
+      [stageId, userId],
+    );
+    return row ?? null;
+  }
 }
 
 export default new Query();

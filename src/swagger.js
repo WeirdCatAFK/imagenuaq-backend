@@ -269,6 +269,14 @@ export function buildOpenApiDocument() {
           'The catalogue of field types a format may use. Read-only: a type is a coercion ' +
           'rule the server implements, so adding one is a migration.',
       },
+      {
+        name: 'tasks',
+        description:
+          "Each person's stages, the area inbox and the load panel (RF-TSK-01 to RF-TSK-07). The " +
+          'unit of work is the project stage; there are no free-standing tasks. Reading your own ' +
+          'stages needs `task.read`; handing work out needs `task.write` and leading the ' +
+          "stage's area (admin leads every area). Load is a count of open stages, never hours.",
+      },
     ],
     components: {
       securitySchemes: {
@@ -1769,6 +1777,86 @@ export function buildOpenApiDocument() {
             createdAt: { type: 'string', format: 'date-time' },
           },
           required: ['id', 'folderId', 'authorizer', 'expiresAt'],
+        },
+        InboxItem: {
+          type: 'object',
+          description: 'An open stage an area still has to hand out: nobody is on it.',
+          properties: {
+            id: { type: 'integer', description: 'project_stages.id' },
+            title: { type: 'string' },
+            priority: { type: 'integer', description: "The project's priority." },
+            dueOn: { type: ['string', 'null'], format: 'date' },
+            projectId: { type: 'integer' },
+            projectKey: { type: 'string' },
+            projectTitle: { type: 'string' },
+            phaseName: { type: 'string' },
+          },
+        },
+        Workload: {
+          type: 'object',
+          properties: {
+            from: { type: 'string', format: 'date' },
+            to: { type: 'string', format: 'date' },
+            members: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  userId: { type: 'integer' },
+                  name: { type: 'string' },
+                  isAreaLeader: { type: 'boolean' },
+                  openStages: { type: 'integer' },
+                  awayDays: {
+                    type: 'integer',
+                    description: 'Days in the window an approved absence covers. Never the reason (RF-TSK-07).',
+                  },
+                  awayDates: {
+                    type: 'array',
+                    items: { type: 'string', format: 'date' },
+                    description: 'Those days, YYYY-MM-DD. Never the reason.',
+                  },
+                  stages: { type: 'array', items: { $ref: '#/components/schemas/LoadStage' } },
+                  suggested: { type: 'boolean', description: 'The lightest member not away in the window.' },
+                },
+              },
+            },
+          },
+        },
+        LoadStage: {
+          type: 'object',
+          description: "An open stage a person is on, in any area.",
+          properties: {
+            id: { type: 'integer', description: 'project_stages.id' },
+            title: { type: 'string' },
+            status: { type: 'string', enum: ['pending', 'active', 'waiting_external'] },
+            areaName: { type: 'string' },
+            phaseName: { type: 'string' },
+            projectId: { type: 'integer' },
+            projectKey: { type: 'string' },
+            projectTitle: { type: 'string' },
+            priority: { type: 'integer' },
+            dueOn: { type: ['string', 'null'], format: 'date' },
+          },
+        },
+        TaskOverview: {
+          type: 'object',
+          properties: {
+            from: { type: 'string', format: 'date' },
+            to: { type: 'string', format: 'date' },
+            areas: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  name: { type: 'string' },
+                  unassigned: { type: 'integer', description: 'Open stages with nobody on them.' },
+                  late: { type: 'integer', description: 'Of those, the ones whose project is past due.' },
+                  members: { $ref: '#/components/schemas/Workload/properties/members' },
+                },
+              },
+            },
+          },
         },
         Retention: {
           type: 'object',
@@ -4466,6 +4554,109 @@ export function buildOpenApiDocument() {
             404: errorResponse('Missing or not visible.', 'Folder not found.'),
             413: errorResponse('Larger than MAX_UPLOAD_BYTES.', 'Upload exceeds 536870912 bytes.'),
             503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+          },
+        },
+      },
+      '/api/tasks/mine': {
+        get: {
+          tags: ['tasks'],
+          summary: 'My work',
+          description:
+            'RF-TSK-03: the open stages the caller is responsible for, most urgent project first, ' +
+            'with their delivery. A delivered stage stays until its sign-off closes it.',
+          responses: {
+            200: {
+              description: 'The stages.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      stages: { type: 'array', items: { $ref: '#/components/schemas/ProjectStage' } },
+                    },
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/unassigned': {
+        get: {
+          tags: ['tasks'],
+          summary: "An area's inbox",
+          description:
+            "Needs task.write and leading the area (coordination may read any). Unassigned open stages of the area, by urgency, never by arrival (RF-FLW-08).",
+          parameters: [{ name: 'areaId', in: 'query', required: true, schema: { type: 'integer' } }],
+          responses: {
+            200: wrapped('The inbox.', 'items', 'InboxItem', true),
+            400: errorResponse('No area.', 'areaId is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/workload': {
+        get: {
+          tags: ['tasks'],
+          summary: "An area's load per person",
+          description:
+            "Needs task.write and leading the area (coordination may read any). RF-TSK-06, RF-TSK-07, RF-RPT-02. The window defaults to the next 7 days.",
+          parameters: [
+            { name: 'areaId', in: 'query', required: true, schema: { type: 'integer' } },
+            { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } },
+            { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } },
+          ],
+          responses: {
+            200: jsonResponse('The members, lightest first.', 'Workload'),
+            400: errorResponse('A bad window.', 'to must not be earlier than from.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/overview': {
+        get: {
+          tags: ['tasks'],
+          summary: 'Every area the caller hands work out in, at a glance',
+          description:
+            "Needs task.write. Coordination gets every area; a leader, the areas they lead. Each with its inbox count and its team's load, as /api/tasks/workload shapes it.",
+          parameters: [
+            { name: 'from', in: 'query', schema: { type: 'string', format: 'date' } },
+            { name: 'to', in: 'query', schema: { type: 'string', format: 'date' } },
+          ],
+          responses: {
+            200: jsonResponse('The areas, by name.', 'TaskOverview'),
+            400: errorResponse('A bad window.', 'to must not be earlier than from.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/tasks/stages/{stageId}/assignee': {
+        put: {
+          tags: ['tasks'],
+          summary: 'Hand an inbox stage to a member',
+          description:
+            "Needs task.write and leading the stage's area. `userId` null sends it back to the inbox.",
+          parameters: [pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { type: 'object', properties: { userId: { type: ['integer', 'null'] } } },
+              },
+            },
+          },
+          responses: {
+            200: { description: '`{ stage: { id, assignedTo } }`.' },
+            400: errorResponse('Not a member of the area.', "The assignee must be a member of the stage's area."),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+            409: errorResponse('The stage is done or cancelled.', 'A done stage cannot be reassigned.'),
           },
         },
       },
