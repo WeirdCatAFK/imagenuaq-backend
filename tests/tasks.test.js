@@ -228,7 +228,7 @@ describe("/api/tasks", () => {
     const [eventType] = await sql("select id from event_types where code = 'ausencia'");
     const [event] = await sql(
       `insert into events (event_type_id, title, starts_at, ends_at, all_day)
-       values ($1, 'Fuera', '2026-11-03', '2026-11-05', true) returning id`,
+       values ($1, 'Fuera', '2026-11-03 00:00-06', '2026-11-05 00:00-06', true) returning id`,
       [eventType.id],
     );
     await sql("insert into event_participants (event_id, user_id) values ($1, $2)", [event.id, beto.id]);

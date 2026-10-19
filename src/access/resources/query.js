@@ -3526,13 +3526,15 @@ class Query {
                  from absence_availability aa
                  cross join generate_series($2::date, $3::date, interval '1 day') day
                 where aa.user_id = u.id
-                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_days,
+                  and (day::date)::timestamp at time zone 'America/Mexico_City' < aa.ends_at
+                  and (day::date + 1)::timestamp at time zone 'America/Mexico_City' > aa.starts_at) as away_days,
               (select coalesce(array_agg(distinct to_char(day, 'YYYY-MM-DD')
                                          order by to_char(day, 'YYYY-MM-DD')), '{}')
                  from absence_availability aa
                  cross join generate_series($2::date, $3::date, interval '1 day') day
                 where aa.user_id = u.id
-                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_dates
+                  and (day::date)::timestamp at time zone 'America/Mexico_City' < aa.ends_at
+                  and (day::date + 1)::timestamp at time zone 'America/Mexico_City' > aa.starts_at) as away_dates
          from area_members am
          join users u on u.id = am.user_id
         where am.area_id = any($1::bigint[]) and u.deleted_at is null
