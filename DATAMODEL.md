@@ -14,7 +14,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | Módulo                           | Tablas                                                                                                                                                                                                                                   | Estado                                                                               |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | USR                               | `users`, `roles`, `areas`, `area_hierarchy`, `area_members`, `contract_types`, `permissions`, `role_permissions`                                                                                                         | Implementado                                                                         |
-| CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
+| CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history`, `period_closures` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
 | ARC                               | `folders`, `files`, `folder_areas`, `access_tokens`                                                                                                                                                                             | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`, **todas con API**: `schemas` (§2.2), `statuses` (`RF-EST-02`), `requests` con su conversión (§2.13), `projects` con etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11) |
@@ -765,6 +765,62 @@ cambia quién puede llamarlo por esa ruta.
 `project_members` tampoco se creó: quién trabaja en un proyecto (`RF-TSK-04`) sale de los
 responsables de sus etapas.
 
+### 2.19 El calendario lee `events`; la etapa escribe el suyo
+
+Todo lo que ocupa tiempo ya era una fila de `events`, y el calendario (`RF-CAL-02`, `RF-CAL-05`)
+no agrega otra tabla para mostrarlo. Lo que faltaba era quién la llenara.
+
+**La etapa en curso es un evento.** Un disparador sobre `project_stages` le crea el suyo al
+activarse: del día en que arrancó a la fecha de entrega del proyecto (o un día, si no tiene),
+de tipo `proyecto`, con el área de la etapa y su responsable como participantes, dentro de la
+colección del proyecto (`projects.event_collection_id`, que se crea la primera vez). Reasignar
+cambia el participante; terminar o cancelar cierra el evento en `ended_at`; mover la fecha del
+proyecto mueve el fin de sus etapas abiertas. Es un disparador y no código de orquestación
+porque las etapas se crean y avanzan por cinco caminos —convertir, agregar, avanzar, repetir
+tras un rechazo, editar— y ninguno debe olvidarlo. El evento es derivado: el calendario no lo
+deja mover, porque mueve la etapa solo de nombre.
+
+Una etapa que ya terminó también tiene su evento, de su inicio a su fin: así se llenaron las
+anteriores al calendario. El nombre que se muestra no es el que se guardó al crearlo: se
+compone al leer, con la llave del proyecto y el título actual de la etapa, para que renombrarla
+no deje una barra con el nombre viejo. Una etapa abierta de un proyecto concluido o archivado
+no se muestra.
+
+**La fecha de entrega del proyecto es una marca, no un evento** (`RF-CAL-02`, «entregas
+próximas»). Sale de `projects.due_on` de los proyectos vivos al leer, con la misma visibilidad:
+un proyecto es de quien lo creó y de las áreas y personas de sus etapas. No se guarda, así que
+cambiar la fecha la mueve sin nada que sincronizar.
+
+**Un evento sin participantes es global.** Los festivos y avisos que la coordinación da de alta
+los ve todo el mundo; no se crea un área ficticia ni se enumeran todas. La API solo edita
+eventos globales de tipo `festivo` o `general`, de modo que una etapa o una ausencia nunca se
+tocan por esa ruta.
+
+**Quién ve qué.** La coordinación ve todo. Cualquier otro con `calendar.read` ve los eventos
+globales, los suyos y los de las áreas a las que pertenece y lo que cuelga de ellas en
+`area_hierarchy`, incluidos los de sus compañeros. Las ausencias entran por
+`absence_availability` y nunca por `absences` (`RF-AUS-12`): el calendario dice quién falta,
+no por qué.
+
+**Las notas son post-its, y la personal es privada.** Una nota es un evento de tipo `nota`
+pegado a un día. Quien la escribe decide quién la lee: solo él (su participante es él mismo),
+un área a la que pertenece (participante el área) o, si es coordinación, todos (sin
+participantes). La nota personal es la excepción a la regla de visibilidad: no la ve un
+compañero de área ni la coordinación, solo su autor (`events.created_by`). Escribir notas pide
+`calendar.read`, no `calendar.write`; cambiarla o moverla, ser su autor.
+
+**La recurrencia se expande en SQL, en un subconjunto.** `calendar_occurrences(desde, hasta)`
+genera las ocurrencias de la ventana con `generate_series` y aplica `event_exceptions`. Entiende
+`FREQ=YEARLY` y `FREQ=WEEKLY;BYDAY=…`, con el fin en `recurrence_until` y no en `UNTIL`; la API
+rechaza cualquier otra regla al guardar. Es lo que piden los festivos y los horarios, y evita
+una dependencia de RFC 5545 completa. Una ocurrencia movida desde fuera de la ventana hacia
+dentro no aparece, porque se busca por su inicio original.
+
+**La ventana de cierre marca, no bloquea** (`RF-CAL-03`). `period_closures` guarda cada ventana
+con una exclusión que impide que dos se traslapen. Un proyecto con costo cuyas fechas tocan una
+ventana sale con `inClosure` en el tablero, en su ficha y en el calendario; nada se rechaza,
+porque la coordinación decide qué se arrastra al siguiente periodo (`carried_over`).
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -806,7 +862,9 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
 | RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13) + `sheets.column_map` y `sheet_imports` (§2.16) | ✔ |
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
-| RF-CAL-03                       | `period_closures` + `projects.has_cost`                                                                         | ◑ |
+| RF-CAL-02                       | `events` + `event_participants`; la etapa escribe el suyo por disparador (§2.19)                              | ✔ |
+| RF-CAL-03                       | `period_closures` + `projects.has_cost`; marca, no bloquea (§2.19)                                            | ✔ |
+| RF-CAL-05                       | `absence_availability` como capa del calendario; falta el conmutador con el módulo de ausencias (I11)         | ◑ |
 | RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   | ✔ |
 | RF-USR-03, RF-USR-04            | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella | ✔ |
 | RF-USR-05, RF-USR-10            | `permissions` + `role_permissions` (§5.2)                                                                      | ✔ |
@@ -1435,6 +1493,21 @@ Qué eventos integran una colección.
 | `id` | bigint | no | identidad | Llave primaria |
 | `event_id` | bigint | no | | → `events.id` |
 | `collection_id` | bigint | no | | → `event_collections.id`. Único junto con `event_id` |
+
+#### `period_closures`
+
+La ventana administrativa de cierre de semestre (`RF-CAL-03`): mientras dura no se ejecutan
+proyectos con costo. Solo marca (§2.19). Dos ventanas no pueden traslaparse (`EXCLUDE` sobre
+`daterange(starts_on, ends_on, '[]')`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(200) | no | | Nombre visible, p. ej. `Cierre 2026-2` |
+| `starts_on` | date | no | | Primer día de la ventana |
+| `ends_on` | date | no | | Último día, incluido. No antes de `starts_on` |
+| `created_by` | bigint | sí | | Quién la dio de alta → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta del registro |
 
 #### `absences`
 

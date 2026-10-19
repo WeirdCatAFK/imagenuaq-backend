@@ -6,6 +6,7 @@ import { ApiError } from "./ApiError.js";
 export const UNIQUE_VIOLATION = "23505";
 export const FOREIGN_KEY_VIOLATION = "23503";
 export const CHECK_VIOLATION = "23514";
+export const EXCLUSION_VIOLATION = "23P01";
 
 /**
  * Trims a string and turns a blank one into null. Anything that is not a string is null.
@@ -118,4 +119,19 @@ export function optionalBoolean(value, field) {
   if (value === true || value === "true") return true;
   if (value === false || value === "false") return false;
   throw ApiError.badRequest(`${field} must be a boolean.`);
+}
+
+/**
+ * A YYYY-MM-DD date, or null when blank.
+ *
+ * @returns {string | null}
+ * @throws {ApiError} 400 on any other shape or an impossible date.
+ */
+export function optionalDate(value, field) {
+  const text = cleanText(value);
+  if (text === null) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(text))) {
+    throw ApiError.badRequest(`${field} must be a date as YYYY-MM-DD.`);
+  }
+  return text;
 }

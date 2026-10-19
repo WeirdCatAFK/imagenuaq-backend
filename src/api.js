@@ -23,6 +23,7 @@ import contractTypesRouter from './routes/contractTypes.js';
 import documentsRouter from './routes/documents.js';
 import sharedRouter from './routes/shared.js';
 import tasksRouter from './routes/tasks.js';
+import calendarRouter from './routes/calendar.js';
 import docsRouter from './routes/docs.js';
 import { requestContext } from './middlewares/context.js';
 import { notFound } from './middlewares/notFound.js';
@@ -53,6 +54,7 @@ export const ROUTERS = {
   documents: documentsRouter,
   shared: sharedRouter,
   tasks: tasksRouter,
+  calendar: calendarRouter,
   docs: docsRouter,
 
 };

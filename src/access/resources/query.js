@@ -21,6 +21,43 @@ const STAGE_FROM = `
 /** A project whose work still counts: not closed, archived or deleted. Expects alias `p`. */
 const LIVE_PROJECT = "p.deleted_at is null and p.closed_at is null and p.archived_at is null";
 
+/**
+ * A costed project whose dates touch a semester-closure window (RF-CAL-03): marked, never
+ * blocked. Undated ends fall back to its creation and today. Expects alias `p`.
+ */
+const IN_CLOSURE = `(p.has_cost and exists (
+  select 1 from period_closures pc
+   where daterange(pc.starts_on, pc.ends_on, '[]') && daterange(
+     least(coalesce(p.starts_on, p.created_at::date), coalesce(p.due_on, current_date)),
+     greatest(coalesce(p.starts_on, p.created_at::date), coalesce(p.due_on, current_date)), '[]')))`;
+
+/**
+ * The CTEs a calendar read starts from, after `with recursive`: the areas `$3` belongs to and
+ * everything below them, the people in those areas, and each occurrence in the days `$1`..`$2`.
+ */
+const CALENDAR_SCOPE = `
+  viewer_areas as (
+      select area_id as id from area_members where user_id = $3::bigint
+    union
+      select h.child_area_id from viewer_areas v join area_hierarchy h on h.parent_area_id = v.id
+  ),
+  viewer_people as (select user_id from area_members where area_id in (select id from viewer_areas)),
+  occurrences as (
+    select * from calendar_occurrences(
+      $1::date::timestamp at time zone 'America/Mexico_City',
+      ($2::date + 1)::timestamp at time zone 'America/Mexico_City')
+  )`;
+
+const CLOSURE_COLUMNS = `id, name, to_char(starts_on, 'YYYY-MM-DD') as starts_on,
+  to_char(ends_on, 'YYYY-MM-DD') as ends_on, created_at`;
+
+/** Events an admin edits by hand: of type festivo or general and with no participants. */
+const GLOBAL_EVENT_FROM = `events e join event_types et on et.id = e.event_type_id
+  and et.code in ('festivo', 'general')
+  and not exists (select 1 from event_participants ep where ep.event_id = e.id)`;
+const GLOBAL_EVENT_COLUMNS = `e.id, et.code as type, e.title, e.description, e.all_day, e.starts_at,
+  e.ends_at, e.rule, e.recurrence_until, e.created_at`;
+
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
@@ -1430,7 +1467,7 @@ class Query {
   async getProject(projectId) {
     const [row] = await this.#rows(
       `select
-        p.*,
+        p.*, ${IN_CLOSURE} as in_closure,
         s.code as status_code, s.label as status_label, s.is_terminal as status_is_terminal,
         u.full_name as created_by_name,
         coalesce(stages.list, '[]'::json) as stages,
@@ -1514,7 +1551,7 @@ class Query {
     return this.#rows(
       `select
         p.id, p.key, p.title, p.requester, p.status_id, p.status_since, p.priority,
-        p.has_cost, p.carried_over, p.starts_on, p.due_on,
+        p.has_cost, p.carried_over, p.starts_on, p.due_on, ${IN_CLOSURE} as in_closure,
         p.closed_at, p.archived_at, p.created_at, p.created_by,
         count(*) over () as total,
         s.code as status_code, s.label as status_label,
@@ -3526,13 +3563,15 @@ class Query {
                  from absence_availability aa
                  cross join generate_series($2::date, $3::date, interval '1 day') day
                 where aa.user_id = u.id
-                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_days,
+                  and (day::date)::timestamp at time zone 'America/Mexico_City' < aa.ends_at
+                  and (day::date + 1)::timestamp at time zone 'America/Mexico_City' > aa.starts_at) as away_days,
               (select coalesce(array_agg(distinct to_char(day, 'YYYY-MM-DD')
                                          order by to_char(day, 'YYYY-MM-DD')), '{}')
                  from absence_availability aa
                  cross join generate_series($2::date, $3::date, interval '1 day') day
                 where aa.user_id = u.id
-                  and day < aa.ends_at and day + interval '1 day' > aa.starts_at) as away_dates
+                  and (day::date)::timestamp at time zone 'America/Mexico_City' < aa.ends_at
+                  and (day::date + 1)::timestamp at time zone 'America/Mexico_City' > aa.starts_at) as away_dates
          from area_members am
          join users u on u.id = am.user_id
         where am.area_id = any($1::bigint[]) and u.deleted_at is null
@@ -3606,6 +3645,269 @@ class Query {
       [stageId, userId],
     );
     return row ?? null;
+  }
+  /**
+   * Every occurrence that touches the days `from`..`to` (YYYY-MM-DD, both included) of the events
+   * `viewerId` may see (RF-CAL-02): global ones, their own, and those of the areas they belong to
+   * and everything below them. A null viewer sees all. Absences are left to `calendarAbsences`,
+   * which reads them through the view that hides the reason. A note is narrower: a personal one only
+   * to `actorId`, its author, whoever the viewer is; an area one to that area's viewers.
+   */
+  async calendarEvents({ from, to, viewerId, actorId, areaId = null, userId = null }) {
+    return this.#rows(
+      `with recursive ${CALENDAR_SCOPE}
+       select e.id, o.starts_at, o.ends_at, e.all_day,
+              case when ps.id is null then e.title else p.key || ' · ' || fs.title end as title,
+              e.description, et.code as type,
+              e.rule, e.recurrence_until, e.starts_at as series_starts_at, e.ends_at as series_ends_at,
+              e.created_by,
+              not exists (select 1 from event_participants ep where ep.event_id = e.id) as is_global,
+              ps.id as stage_id, ps.status as stage_status, fp.project_id, p.key as project_key,
+              p.title as project_title, p.has_cost, coalesce(${IN_CLOSURE}, false) as in_closure,
+              coalesce(fs.area_id, na.id) as area_id, coalesce(a.name, na.name) as area_name,
+              ps.assigned_to as user_id, u.full_name as user_name
+         from occurrences o
+         join events e on e.id = o.event_id
+         join event_types et on et.id = e.event_type_id
+         left join project_stages ps on ps.event_id = e.id
+         left join flow_stages fs on fs.id = ps.flow_stage_id
+         left join flow_phases fp on fp.id = fs.phase_id
+         left join projects p on p.id = fp.project_id
+         left join areas a on a.id = fs.area_id
+         left join users u on u.id = ps.assigned_to
+         left join lateral (
+           select na.id, na.name from event_participants ep join areas na on na.id = ep.area_id
+            where et.code = 'nota' and ep.event_id = e.id limit 1
+         ) na on true
+        where et.code <> 'ausencia'
+          and (et.code <> 'proyecto' or (ps.id is not null and p.deleted_at is null))
+          and (ps.id is null
+               or ps.status not in ('pending', 'active', 'waiting_external')
+               or (p.closed_at is null and p.archived_at is null))
+          and (et.code <> 'nota'
+               or e.created_by = $6::bigint
+               or (na.id is null and not exists (select 1 from event_participants ep where ep.event_id = e.id))
+               or (na.id is not null and ($3::bigint is null or na.id in (select id from viewer_areas))))
+          and (not exists (select 1 from event_participants ep where ep.event_id = e.id)
+               or exists (select 1 from event_participants ep
+                           where ep.event_id = e.id
+                             and ($3::bigint is null
+                                  or ep.user_id = $3::bigint
+                                  or ep.area_id in (select id from viewer_areas)
+                                  or ep.user_id in (select user_id from viewer_people))
+                             and ($4::bigint is null
+                                  or ep.area_id = $4::bigint
+                                  or ep.user_id in (select user_id from area_members where area_id = $4::bigint))
+                             and ($5::bigint is null or ep.user_id = $5::bigint)))
+        order by o.starts_at, e.id`,
+      [from, to, viewerId, areaId, userId, actorId],
+    );
+  }
+
+  /**
+   * The live projects due on the days `from`..`to` (RF-CAL-02, «entregas próximas»), read from
+   * `projects.due_on` rather than stored as events, so they never go stale. Scoped like
+   * `calendarEvents`: a project is the viewer's when they created it or one of its stages is in
+   * their areas or theirs.
+   */
+  async calendarDues({ from, to, viewerId, areaId = null, userId = null }) {
+    return this.#rows(
+      `with recursive ${CALENDAR_SCOPE}
+       select p.id, p.key, p.title, to_char(p.due_on, 'YYYY-MM-DD') as due_on, p.priority, p.has_cost,
+              ${IN_CLOSURE} as in_closure
+         from projects p
+        where ${LIVE_PROJECT}
+          and p.due_on between $1::date and $2::date
+          and ($3::bigint is null
+               or p.created_by = $3::bigint
+               or exists (select 1 from ${STAGE_FROM}
+                           where fp.project_id = p.id
+                             and (fs.area_id in (select id from viewer_areas) or ps.assigned_to = $3::bigint)))
+          and ($4::bigint is null
+               or exists (select 1 from ${STAGE_FROM} where fp.project_id = p.id and fs.area_id = $4::bigint))
+          and ($5::bigint is null
+               or exists (select 1 from ${STAGE_FROM} where fp.project_id = p.id and ps.assigned_to = $5::bigint))
+        order by p.due_on, p.priority desc`,
+      [from, to, viewerId, areaId, userId],
+    );
+  }
+
+  /**
+   * Who is away on the days `from`..`to`, from `absence_availability` only (RF-CAL-05, RF-AUS-12):
+   * dates and person, never the reason. Scoped like `calendarEvents`.
+   */
+  async calendarAbsences({ from, to, viewerId, areaId = null, userId = null }) {
+    return this.#rows(
+      `with recursive ${CALENDAR_SCOPE}
+       select av.event_id as id, o.starts_at, o.ends_at, av.all_day, av.user_id,
+              u.full_name as user_name, av.area_id, a.name as area_name
+         from absence_availability av
+         join occurrences o on o.event_id = av.event_id
+         left join users u on u.id = av.user_id
+         left join areas a on a.id = av.area_id
+        where ($3::bigint is null
+               or av.user_id = $3::bigint
+               or av.area_id in (select id from viewer_areas)
+               or av.user_id in (select user_id from viewer_people))
+          and ($4::bigint is null
+               or av.area_id = $4::bigint
+               or av.user_id in (select user_id from area_members where area_id = $4::bigint))
+          and ($5::bigint is null or av.user_id = $5::bigint)
+        order by o.starts_at, av.event_id`,
+      [from, to, viewerId, areaId, userId],
+    );
+  }
+
+  /** The closure windows that touch `from`..`to`, or every one when both are null. */
+  async listClosures(from = null, to = null) {
+    return this.#rows(
+      `select ${CLOSURE_COLUMNS} from period_closures
+        where $1::date is null or daterange(starts_on, ends_on, '[]') && daterange($1::date, $2::date, '[]')
+        order by starts_on`,
+      [from, to],
+    );
+  }
+
+  async insertClosure({ name, startsOn, endsOn, createdBy }) {
+    const [row] = await this.#rows(
+      `insert into period_closures (name, starts_on, ends_on, created_by)
+       values ($1, $2::date, $3::date, $4::bigint)
+       returning ${CLOSURE_COLUMNS}`,
+      [name, startsOn, endsOn, createdBy],
+    );
+    return row;
+  }
+
+  async updateClosure(closureId, { name, startsOn, endsOn }) {
+    const [row] = await this.#rows(
+      `update period_closures
+          set name = coalesce($2, name), starts_on = coalesce($3::date, starts_on),
+              ends_on = coalesce($4::date, ends_on)
+        where id = $1
+        returning ${CLOSURE_COLUMNS}`,
+      [closureId, name, startsOn, endsOn],
+    );
+    return row ?? null;
+  }
+
+  async deleteClosure(closureId) {
+    const rows = await this.#rows("delete from period_closures where id = $1 returning id", [closureId]);
+    return rows.length > 0;
+  }
+
+  /** A global event (no participants) of type `typeCode`; null when the type does not exist. */
+  async insertGlobalEvent({ typeCode, title, description, allDay, startsAt, endsAt, rule, until, createdBy }) {
+    const [row] = await this.#rows(
+      `insert into events (event_type_id, title, description, all_day, starts_at, ends_at, rule,
+                           recurrence_until, created_by)
+       select id, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7, $8::timestamptz, $9::bigint
+         from event_types where code = $1
+       returning id`,
+      [typeCode, title, description, allDay, startsAt, endsAt, rule, until, createdBy],
+    );
+    return row ? this.getGlobalEvent(row.id) : null;
+  }
+
+  /** A global event, or null when `eventId` is missing or is not one an admin may edit. */
+  async getGlobalEvent(eventId) {
+    const [row] = await this.#rows(
+      `select ${GLOBAL_EVENT_COLUMNS} from ${GLOBAL_EVENT_FROM} where e.id = $1`,
+      [eventId],
+    );
+    return row ?? null;
+  }
+
+  /** Changes a global event; a null field keeps its value, except `rule` and `until`, which are set as given. */
+  async updateGlobalEvent(eventId, { typeCode, title, description, allDay, startsAt, endsAt, rule, until }) {
+    const rows = await this.#rows(
+      `update events
+          set event_type_id = coalesce((select id from event_types where code = $2), event_type_id),
+              title = coalesce($3, title), description = coalesce($4, description),
+              all_day = coalesce($5, all_day), starts_at = coalesce($6::timestamptz, starts_at),
+              ends_at = coalesce($7::timestamptz, ends_at), rule = $8,
+              recurrence_until = $9::timestamptz
+        where id = (select e.id from ${GLOBAL_EVENT_FROM} where e.id = $1)
+        returning id`,
+      [eventId, typeCode, title, description, allDay, startsAt, endsAt, rule, until],
+    );
+    return rows.length > 0 ? this.getGlobalEvent(eventId) : null;
+  }
+
+  async deleteGlobalEvent(eventId) {
+    const [row] = await this.#rows(
+      `with target as (select e.id from ${GLOBAL_EVENT_FROM} where e.id = $1),
+            gone_exceptions as (delete from event_exceptions where event_id in (select id from target)),
+            gone_links as (delete from collection_events where event_id in (select id from target))
+       delete from events where id in (select id from target) returning id`,
+      [eventId],
+    );
+    return row !== undefined;
+  }
+
+  /**
+   * A note on the day `day` (YYYY-MM-DD, in Querétaro's time). `scope` says who reads it: its
+   * author (`personal`), the members of `areaId` (`area`) or everyone (`global`, no participants).
+   */
+  async insertNote({ day, text, scope, areaId, authorId }) {
+    const [row] = await this.#rows(
+      `with made as (
+         insert into events (event_type_id, title, all_day, starts_at, ends_at, created_by)
+         select id, $2, true,
+                $1::date::timestamp at time zone 'America/Mexico_City',
+                ($1::date + 1)::timestamp at time zone 'America/Mexico_City',
+                $5::bigint
+           from event_types where code = 'nota'
+         returning id
+       ),
+       who as (
+         insert into event_participants (event_id, user_id, area_id)
+         select made.id,
+                case when $3 = 'personal' then $5::bigint end,
+                case when $3 = 'area' then $4::bigint end
+           from made
+          where $3 <> 'global'
+       )
+       select id from made`,
+      [day, text, scope, areaId, authorId],
+    );
+    return this.getNote(row.id);
+  }
+
+  /** A note with who wrote it and who it is for, or null when `eventId` is not a note. */
+  async getNote(eventId) {
+    const [row] = await this.#rows(
+      `select e.id, e.title, e.created_by, e.starts_at,
+              to_char(e.starts_at at time zone 'America/Mexico_City', 'YYYY-MM-DD') as day,
+              (select ep.area_id from event_participants ep where ep.event_id = e.id and ep.area_id is not null limit 1) as area_id,
+              exists (select 1 from event_participants ep where ep.event_id = e.id and ep.user_id is not null) as personal
+         from events e join event_types et on et.id = e.event_type_id and et.code = 'nota'
+        where e.id = $1`,
+      [eventId],
+    );
+    return row ?? null;
+  }
+
+  /** Rewrites a note or moves it to another day; a null field keeps its value. */
+  async updateNote(eventId, { text, day }) {
+    await this.#rows(
+      `update events
+          set title = coalesce($2, title),
+              starts_at = coalesce($3::date::timestamp at time zone 'America/Mexico_City', starts_at),
+              ends_at = coalesce(($3::date + 1)::timestamp at time zone 'America/Mexico_City', ends_at)
+        where id = $1`,
+      [eventId, text, day],
+    );
+    return this.getNote(eventId);
+  }
+
+  async deleteNote(eventId) {
+    await this.#rows(
+      `with gone_people as (delete from event_participants where event_id = $1),
+            gone_exceptions as (delete from event_exceptions where event_id = $1),
+            gone_links as (delete from collection_events where event_id = $1)
+       delete from events where id = $1`,
+      [eventId],
+    );
   }
 }
 
