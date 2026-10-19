@@ -483,6 +483,10 @@ Table "project_stages" {
   "ended_at" timestamptz
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "flow_stage_id" int8 [not null, note: 'La definicion que este intento ejecuta. Siempre de un proyecto, nunca de una plantilla.']
+  "delivery_note" text [note: 'RF-FLW-03: la evidencia de lo entregado, escrita por quien hizo la etapa.']
+  "delivery_file_id" int8 [note: 'Archivo opcional de la entrega, en la carpeta del proyecto.']
+  "delivered_by" int8
+  "delivered_at" timestamptz
 
   Indexes {
     (flow_stage_id, attempt) [type: btree, unique, name: "uq_project_stages_attempt"]
@@ -774,6 +778,10 @@ Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "pr
 Ref "project_field_values_project_id_fkey":"projects"."id" < "project_field_values"."project_id" [delete: cascade]
 
 Ref "project_stages_assigned_to_fkey":"users"."id" < "project_stages"."assigned_to"
+
+Ref "project_stages_delivered_by_fkey":"users"."id" < "project_stages"."delivered_by" [delete: set null]
+
+Ref "project_stages_delivery_file_id_fkey":"files"."id" < "project_stages"."delivery_file_id" [delete: set null]
 
 Ref "project_stages_event_id_fkey":"events"."id" < "project_stages"."event_id"
 
