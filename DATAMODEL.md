@@ -757,6 +757,11 @@ Reparte quien tiene `task.write` y es líder del área de la etapa (la coordinac
 solo a integrantes de esa área; escribe el mismo `project_stages.assigned_to` que la ficha del
 proyecto edita con `project.write`. Ver las etapas propias pide `task.read`.
 
+El visto bueno sigue el mismo criterio desde «Mis tareas»: el líder del área de la etapa (la
+coordinación, cualquiera) ve las etapas entregadas que esperan su firma y las aprueba o las
+devuelve con `task.write`, sin necesitar `project.write`. Es el mismo `approve` de §2.6; solo
+cambia quién puede llamarlo por esa ruta.
+
 `project_members` tampoco se creó: quién trabaja en un proyecto (`RF-TSK-04`) sale de los
 responsables de sus etapas.
 
