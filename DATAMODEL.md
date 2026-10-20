@@ -535,6 +535,16 @@ misma regla, no otra —los valores ya capturados son del tipo viejo y cambiarlo
 mentira—. El nombre y la indicación sí se pueden cambiar, porque son etiquetas y no cambian lo
 que el valor es.
 
+**Un dato que ningún formato pide se registra aparte.** Una etapa puede entregar algo que la
+solicitud nunca captura —el costo total, el número de guía—. Antes, el diseñador de flujos dejaba
+escribir esa clave suelta: el proyecto la mostraba cruda, como texto, y no ofrecía dónde
+capturarla, así que el visto bueno que la exigía no se podía dar. Ahora `field_keys` la registra
+con su nombre y su tipo (`POST /api/schemas/field-keys`, para quien diseña formatos, flujos o
+etapas de un proyecto), la clave sale del nombre, y `GET /api/schemas/field-keys` la lista junto
+con las de los formatos (`source: registered`). La regla es la misma: una clave registrada no
+puede publicarse en un formato con otro tipo. Las dos claves del pedido de finanzas (§2.15) viven
+ahí también.
+
 ### 2.14 La etapa declara lo que recibe y lo que entrega
 
 `stage-io-and-finance` le dio a la etapa dos arreglos: `inputs`, las claves de
@@ -1945,6 +1955,20 @@ capturan a mano los folios que generan el SIN y el sistema financiero (`RF-MIG-0
 | `produced_by_stage_id` | bigint | sí | | Qué etapa lo generó → `project_stages.id`. Es lo que un JSONB acumulado no puede decir |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta |
 | `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Última corrección |
+
+#### `field_keys`
+
+Las claves de datos que ningún formato declara (§2.13b): lo que una etapa pide o entrega sin que
+la solicitud lo capture. El vocabulario las une con las de los formatos.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `key` | varchar(100) | no | | Llave primaria. `snake_case`, sale del nombre |
+| `name` | varchar(200) | no | | Nombre visible |
+| `type` | varchar(50) | no | | Tipo del valor → `data_types.code`. No cambia |
+| `note` | text | sí | | Indicación para quien lo captura |
+| `created_by` | bigint | sí | | Quién lo registró → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta del registro |
 
 ### 7.6 MIG — importación de los rastreadores de Excel
 

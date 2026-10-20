@@ -9,6 +9,7 @@ import {
   UNIQUE_VIOLATION,
   FOREIGN_KEY_VIOLATION,
   requireText,
+  optionalText,
   requireId,
 } from "../../utils/validate.js";
 
@@ -108,14 +109,48 @@ class Schemas {
    * constructor de formatos ofrece para que una clave se reuse en vez de reinventarse.
    */
   async listFieldKeys() {
-    return (await query.listFieldKeys()).map((row) => ({
-      key: row.key,
-      name: row.name,
-      type: row.type,
-      note: row.note,
-      schemaCount: row.schema_count,
-      schemas: row.schemas ?? [],
-    }));
+    return (await query.listFieldKeys()).map(shapeFieldKey);
+  }
+
+  /**
+   * Registers a key no format declares, so a stage can ask for or deliver it with a name and a type
+   * (DATAMODEL §2.13b, RF-FLW-06). Without `key`, it is made from the name. A key that already
+   * exists with the same type is returned as it is; with another type, it is refused.
+   *
+   * @param {{key?: string, name: string, type: string, note?: string}} input
+   * @throws {ApiError} 400 on a bad key, name or type, 409 when the key exists with another type.
+   */
+  async createFieldKey(input) {
+    const body = input ?? {};
+    const name = requireText(body.name, "name", 200);
+    const key = typeof body.key === "string" && body.key.trim() !== "" ? body.key.trim() : keyFromName(name);
+    if (!FIELD_CODE.test(key)) {
+      throw ApiError.badRequest("key must be snake_case: a lowercase letter, then letters, digits or _ (100 max).");
+    }
+    const type = typeof body.type === "string" ? body.type.trim().toLowerCase() : "";
+    const dataType = type === "" ? null : await query.getDataType(type);
+    if (!dataType || !dataType.is_active) {
+      throw ApiError.badRequest(`Data type "${type}" does not exist or is inactive.`);
+    }
+
+    const known = (await fieldVocabulary()).get(key);
+    if (known !== undefined) {
+      if (known.type !== type) {
+        throw ApiError.conflict(`"${key}" already exists as "${known.type}" (${known.name}); reuse it or pick another name.`);
+      }
+      return shapeFieldKey(known);
+    }
+
+    const row = await query.insertFieldKey({
+      key,
+      name,
+      type,
+      note: optionalText(body.note, "note", 2000),
+      createdBy: currentActor().id,
+    });
+    const created = row ?? (await fieldVocabulary()).get(key);
+    await events.emit({ action: "record_created", after: { table: "field_keys", ...created } });
+    return shapeFieldKey({ ...created, source: "registered", schema_count: 0, schemas: [] });
   }
 
   /** Every version of a schema, newest first. @throws {ApiError} 404. */
@@ -283,6 +318,31 @@ export async function validateFields(fields, vocabulary = null) {
 }
 
 /** `code` -> its published definition, for the consistency check above. */
+/** One entry of the vocabulary as the API returns it. */
+function shapeFieldKey(row) {
+  return {
+    key: row.key,
+    name: row.name,
+    type: row.type,
+    note: row.note ?? "",
+    source: row.source ?? "format",
+    schemaCount: row.schema_count ?? 0,
+    schemas: row.schemas ?? [],
+  };
+}
+
+/** A key made from a person's name for it: "Costo total" → `costo_total`, accents dropped. */
+function keyFromName(name) {
+  const key = name
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 100);
+  return /^[a-z]/.test(key) ? key : `dato_${key}`.slice(0, 100);
+}
+
 async function fieldVocabulary() {
   const rows = await query.listFieldKeys();
   return new Map(rows.map((row) => [row.key, row]));

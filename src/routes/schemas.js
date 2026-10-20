@@ -1,9 +1,10 @@
-// Request formats (RF-SOL-01): the format, its unchangeable versions, and cloning. Reads need a
-// session; writes need `schema.manage`. The publisher is the session, never a body field.
+// Request formats (RF-SOL-01): the format, its unchangeable versions, cloning, and the vocabulary of
+// data keys. Reads need a session; writes need `schema.manage`, except registering a key, which whoever
+// designs a flow or a project's stages may also do. The publisher is the session, never a body field.
 import { Router } from "express";
 
 import schemas from "../access/orchestration/schemas.js";
-import { authenticate, requirePermission } from "../middlewares/auth.js";
+import { authenticate, requireAnyPermission, requirePermission } from "../middlewares/auth.js";
 import { idParam } from "../utils/params.js";
 
 const router = Router();
@@ -14,6 +15,14 @@ router.use(authenticate);
 router.get("/field-keys", async (_req, res) => {
   res.json({ fieldKeys: await schemas.listFieldKeys() });
 });
+
+router.post(
+  "/field-keys",
+  requireAnyPermission("schema.manage", "workflow.manage", "project.write"),
+  async (req, res) => {
+    res.status(201).json({ fieldKey: await schemas.createFieldKey(req.body) });
+  },
+);
 
 router.get("/versions/:versionId", async (req, res) => {
   res.json({ version: await schemas.getVersion(idParam(req, "versionId", "version id")) });

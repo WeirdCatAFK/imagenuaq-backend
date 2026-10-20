@@ -2083,6 +2083,11 @@ export function buildOpenApiDocument() {
             name: { type: 'string', description: 'Its most recent name.', example: 'Número de orden' },
             type: { type: 'string', description: 'A data_types.code. Fixed once published.', example: 'text' },
             note: { type: 'string', example: 'Lo genera diseño y lo ocupa facturación de imprenta' },
+            source: {
+              type: 'string',
+              enum: ['format', 'registered'],
+              description: 'Declared by a format, or registered on its own for a stage to ask for or deliver.',
+            },
             schemaCount: { type: 'integer', description: 'How many formats declare it.', example: 2 },
             schemas: {
               type: 'array',
@@ -5420,10 +5425,43 @@ export function buildOpenApiDocument() {
             'What the format builder reads to autofill a key that already exists instead of ' +
             'letting somebody re-invent it. Keys from retired versions are included -- they have ' +
             'captured data under them, so they are still part of the system\'s vocabulary. ' +
-            'Publishing a field whose key exists with another type is refused.',
+            'Publishing a field whose key exists with another type is refused. Also lists the keys ' +
+            'registered on their own (`source: registered`), which no format declares.',
           responses: {
             200: wrapped('The vocabulary, by key.', 'fieldKeys', 'FieldKey', true),
             401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['schemas'],
+          summary: 'Register a data key no format declares',
+          description:
+            'Needs one of schema.manage, workflow.manage or project.write. For a value a stage asks for ' +
+            'or delivers that no request form has, such as a total cost. Without `key` it is made from ' +
+            'the name. An existing key with the same type is returned as it is.',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['name', 'type'],
+                  properties: {
+                    key: { type: 'string', example: 'costo_total' },
+                    name: { type: 'string', example: 'Costo total' },
+                    type: { type: 'string', example: 'currency' },
+                    note: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            201: wrapped('The key, registered or already there.', 'fieldKey', 'FieldKey'),
+            400: errorResponse('A bad name, key or type.', 'Data type "x" does not exist or is inactive.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The key exists with another type.', '"costo_total" already exists as "text" (Costo total); reuse it or pick another name.'),
           },
         },
       },

@@ -70,3 +70,25 @@ export const requirePermission = (...codes) => {
     next();
   };
 };
+
+/**
+ * Like requirePermission(), but any one of the codes is enough: for an action that belongs to
+ * several jobs, as registering a data key does to whoever designs a form, a flow or a project's stages.
+ */
+export const requireAnyPermission = (...codes) => {
+  return async (req, _res, next) => {
+    if (!req.user) {
+      throw new Error('requireAnyPermission() used without authenticate() before it.');
+    }
+
+    if (!req.permissions) {
+      req.permissions = new Set(await auth.permissionsFor(req.user.roleId));
+    }
+
+    if (!codes.some((code) => req.permissions.has(code))) {
+      throw ApiError.forbidden(`Needs one of these permissions: ${codes.join(', ')}.`);
+    }
+
+    next();
+  };
+};

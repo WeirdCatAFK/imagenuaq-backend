@@ -97,6 +97,7 @@ export async function resetCases(keepEmails = []) {
     [`${TEST_SCHEMA_PREFIX}%`],
   );
   await sql('delete from schemas where code like $1', [`${TEST_SCHEMA_PREFIX}%`]);
+  await sql("delete from field_keys where key not in ('requiere_factura', 'requiere_cotizacion')");
   await sql(
     `delete from role_permissions
       where role_id in (select id from roles where name like $1)`,

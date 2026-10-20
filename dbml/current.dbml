@@ -692,6 +692,17 @@ Table "period_closures" {
 CHECK period_closures_range: ends_on >= starts_on'''
 }
 
+Table "field_keys" {
+  "key" varchar(100) [pk, not null]
+  "name" varchar(200) [not null]
+  "type" varchar(50) [not null]
+  "note" text
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: '''DATAMODEL 2.13b: claves de datos que ningún formato declara, con su nombre y su tipo. El vocabulario las une con las de los formatos.
+CHECK field_keys_key_shape: (key)::text ~ \'^[a-z][a-z0-9_]{0,99}$\'::text'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -743,6 +754,10 @@ Ref "fk_event_participants_user_id_users_id":"users"."id" < "event_participants"
 Ref "fk_events_created_by_users_id":"users"."id" < "events"."created_by"
 
 Ref "fk_events_event_type_id_event_types_id":"event_types"."id" < "events"."event_type_id"
+
+Ref "field_keys_created_by_fkey":"users"."id" < "field_keys"."created_by" [delete: set null]
+
+Ref "field_keys_type_fkey":"data_types"."code" < "field_keys"."type"
 
 Ref "file_retention_updated_by_fkey":"users"."id" < "file_retention"."updated_by" [delete: set null]
 

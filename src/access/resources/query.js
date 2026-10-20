@@ -2444,8 +2444,9 @@ class Query {
   }
 
   /**
-   * The field vocabulary: every key ever published, with its most recent definition and where it
-   * is used.
+   * The field vocabulary: every key ever published in a format, with its most recent definition and
+   * where it is used, plus the keys registered in `field_keys` that no format declares
+   * (`source` says which).
    */
   async listFieldKeys() {
     return this.#rows(
@@ -2470,14 +2471,30 @@ class Query {
         order by key, published_at desc, version_id desc
       )
       select
-        u.key, u.name, u.type, u.note,
+        u.key, u.name, u.type, u.note, 'format' as source,
         (select count(distinct c.schema_id) from campos c where c.key = u.key)::int as schema_count,
         (select json_agg(distinct s.name)
            from campos c join schemas s on s.id = c.schema_id
           where c.key = u.key) as schemas
       from ultima u
-      order by u.key`,
+      union all
+      select k.key, k.name, k.type, coalesce(k.note, ''), 'registered', 0, '[]'::json
+        from field_keys k
+       where not exists (select 1 from ultima u where u.key = k.key)
+      order by key`,
     );
+  }
+
+  /** Registers a key no format declares; null when it was already registered. */
+  async insertFieldKey({ key, name, type, note, createdBy }) {
+    const [row] = await this.#rows(
+      `insert into field_keys (key, name, type, note, created_by)
+       values ($1, $2, $3, $4, $5::bigint)
+       on conflict (key) do nothing
+       returning key, name, type, coalesce(note, '') as note`,
+      [key, name, type, note, createdBy],
+    );
+    return row ?? null;
   }
 
   /** Identity-level edit: name and active flag. Versions are never touched. */
