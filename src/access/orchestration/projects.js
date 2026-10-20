@@ -129,8 +129,8 @@ class Projects {
   }
 
   /**
-   * The project's folder with its contents, created on first use (RF-ARC-01). Folder access
-   * is decided by documents.js, so a project reader outside the project's areas gets a 404.
+   * The project's folder with its contents, created on first use (RF-ARC-01). Anyone may read
+   * it; documents.js decides who writes, by the areas with a stage in the project.
    *
    * @throws {ApiError} 404
    */

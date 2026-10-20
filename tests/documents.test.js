@@ -251,13 +251,151 @@ describe("/api/documents", () => {
     });
   });
 
-  describe("who may touch which folder", () => {
-    test("an unshared folder is invisible to a colleague", async () => {
+  describe("empty folders and search", () => {
+    const search = (params, token = tokens.owner) =>
+      server.get(`/api/documents/search?${new URLSearchParams(params)}`, { token });
+
+    test("a folder is empty until a file lies somewhere beneath it", async () => {
       const folder = await root();
+      const full = (await createFolder({ parentId: folder.id, name: "Con archivo" })).body.folder;
+      const deep = (await createFolder({ parentId: full.id, name: "Adentro" })).body.folder;
+      await upload(deep.id, "a.bin", randomBytes(10));
+      const hollow = (await createFolder({ parentId: folder.id, name: "Sin archivo" })).body.folder;
+      await createFolder({ parentId: hollow.id, name: "Vacía" });
+
+      const listing = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.owner });
+      const top = await server.get("/api/documents/folders", { token: tokens.owner });
+
+      assert.deepEqual(
+        listing.body.folder.folders.map((f) => [f.name, f.empty]),
+        [["Con archivo", false], ["Sin archivo", true]],
+      );
+      assert.equal(top.body.folders.find((f) => f.id === folder.id).empty, false);
+    });
+
+    test("a folder whose only file was deleted is empty again", async () => {
+      const folder = await root();
+      const sub = (await createFolder({ parentId: folder.id, name: "Diseño" })).body.folder;
+      const file = (await upload(sub.id, "a.bin", randomBytes(10))).body.file;
+      await server.delete(`/api/documents/${file.id}`, { token: tokens.owner });
+
+      const listing = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.owner });
+
+      assert.equal(listing.body.folder.folders[0].empty, true);
+    });
+
+    test("finds a file by part of its name, whatever the case, with the path to it", async () => {
+      const tag = randomBytes(4).toString("hex");
+      const folder = await root(`Proyectos ${tag}`);
+      const sub = (await createFolder({ parentId: folder.id, name: "Diseño" })).body.folder;
+      const file = (await upload(sub.id, `Cartel FINAL ${tag}.pdf`, randomBytes(10))).body.file;
+      await upload(sub.id, "otro.bin", randomBytes(10));
+
+      const res = await search({ q: `final ${tag}` }, tokens.admin);
+
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body.files.map((f) => f.id), [file.id]);
+      assert.deepEqual(res.body.files[0].path, [
+        { id: folder.id, name: `Proyectos ${tag}` },
+        { id: sub.id, name: "Diseño" },
+      ]);
+    });
+
+    test("within a folder, the path starts there and nothing outside it shows", async () => {
+      const tag = randomBytes(4).toString("hex");
+      const folder = await root();
+      const sub = (await createFolder({ parentId: folder.id, name: "Diseño" })).body.folder;
+      const deep = (await createFolder({ parentId: sub.id, name: "Cartel" })).body.folder;
+      const inside = (await upload(deep.id, `${tag}.pdf`, randomBytes(10))).body.file;
+      await upload(folder.id, `${tag}.png`, randomBytes(10));
+
+      const res = await search({ q: tag, folderId: sub.id });
+
+      assert.deepEqual(res.body.files.map((f) => f.id), [inside.id]);
+      assert.deepEqual(res.body.files[0].path, [
+        { id: sub.id, name: "Diseño" },
+        { id: deep.id, name: "Cartel" },
+      ]);
+    });
+
+    test("anyone may search everything, but not with a blank query", async () => {
+      assert.equal((await search({ q: "a" })).status, 200);
+      assert.equal((await search({ q: " " })).status, 400);
+    });
+
+    test("searching within a folder that does not exist is a 404", async () => {
+      const res = await search({ q: "a", folderId: 999_999_999 });
+
+      assert.equal(res.status, 404);
+    });
+
+    test("a colleague finds files in folders their area was never given", async () => {
+      const tag = randomBytes(4).toString("hex");
+      const folder = await root();
+      const web = (await createFolder({ parentId: folder.id, name: "Web" })).body.folder;
+      await share(web.id, [{ areaId: areaY.id, level: "write" }]);
+      const first = (await upload(folder.id, `${tag}-a.bin`, randomBytes(10))).body.file;
+      const second = (await upload(web.id, `${tag}-b.bin`, randomBytes(10))).body.file;
+
+      const res = await search({ q: tag }, tokens.colleague);
+
+      assert.deepEqual(res.body.files.map((f) => f.id), [first.id, second.id]);
+    });
+
+    test("finds a project's folder by its title or key, but not within a folder", async () => {
+      const tag = randomBytes(4).toString("hex");
+      const project = (await server.post("/api/projects", {
+        token: tokens.admin,
+        body: { title: `Campaña ${tag}` },
+      })).body.project;
+
+      const byTitle = await search({ q: `campaña ${tag}` }, tokens.admin);
+      const byKey = await search({ q: project.key }, tokens.admin);
+      const within = await search({ q: tag, folderId: project.folderId }, tokens.admin);
+
+      assert.deepEqual(byTitle.body.folders.map((f) => f.id), [project.folderId]);
+      assert.equal(byTitle.body.folders[0].project.title, `Campaña ${tag}`);
+      assert.deepEqual(byTitle.body.folders[0].path, [{ id: project.folderId, name: project.key }]);
+      assert.ok(byKey.body.folders.some((f) => f.id === project.folderId));
+      assert.deepEqual(within.body.folders, []);
+    });
+
+    test("% and _ in the query match themselves", async () => {
+      const folder = await root();
+      const literal = (await upload(folder.id, "a_b%.bin", randomBytes(10))).body.file;
+      await upload(folder.id, "axbz.bin", randomBytes(10));
+
+      const res = await search({ q: "a_b%", folderId: folder.id });
+
+      assert.deepEqual(res.body.files.map((f) => f.id), [literal.id]);
+    });
+
+    test("a deleted file, or one in a deleted folder, is not found", async () => {
+      const tag = randomBytes(4).toString("hex");
+      const folder = await root();
+      const sub = (await createFolder({ parentId: folder.id, name: "Diseño" })).body.folder;
+      const gone = (await upload(folder.id, `${tag}-a.bin`, randomBytes(10))).body.file;
+      await upload(sub.id, `${tag}-b.bin`, randomBytes(10));
+      await server.delete(`/api/documents/${gone.id}`, { token: tokens.owner });
+      await server.delete(`/api/documents/folders/${sub.id}`, { token: tokens.owner });
+
+      const res = await search({ q: tag, folderId: folder.id });
+
+      assert.deepEqual(res.body.files, []);
+    });
+  });
+
+  describe("who may touch which folder", () => {
+    test("anyone reads an unshared folder, but cannot write in it", async () => {
+      const folder = await root();
+      const file = (await upload(folder.id, "a.bin", randomBytes(10))).body.file;
 
       const res = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.colleague });
 
-      assert.equal(res.status, 404);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.folder.access, "read");
+      assert.equal((await download(file.id, tokens.colleague)).status, 200);
+      assert.equal((await upload(folder.id, "b.bin", randomBytes(10), { token: tokens.colleague })).status, 403);
     });
 
     test("read access lists and downloads but cannot upload", async () => {
@@ -323,32 +461,55 @@ describe("/api/documents", () => {
       }
     });
 
-    test("a shared folder appears in the colleague's top folders", async () => {
+    test("every root appears in everyone's top folders, shared or not", async () => {
       const folder = await root();
-      await share(folder.id, [{ areaId: areaX.id, level: "read" }]);
 
-      const res = await server.get("/api/documents/folders", { token: tokens.colleague });
+      const res = await server.get("/api/documents/folders", { token: tokens.outsider });
 
-      assert.deepEqual(res.body.folders.map((f) => f.id), [folder.id]);
+      assert.ok(res.body.folders.some((f) => f.id === folder.id));
     });
 
-    test("another area sees nothing", async () => {
+    test("another area reads a folder shared with someone else, but cannot write", async () => {
       const folder = await root();
       await share(folder.id, [{ areaId: areaX.id, level: "write" }]);
 
       const res = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.outsider });
 
-      assert.equal(res.status, 404);
+      assert.equal(res.status, 200);
+      assert.equal(res.body.folder.access, "read");
+      assert.equal((await upload(folder.id, "b.bin", randomBytes(10), { token: tokens.outsider })).status, 403);
     });
 
-    test("the nearest shared ancestor decides", async () => {
+    test("the nearest ancestor with grants decides who writes", async () => {
       const folder = await root();
-      const sub = (await createFolder({ parentId: folder.id, name: "Privado" })).body.folder;
+      const sub = (await createFolder({ parentId: folder.id, name: "Web" })).body.folder;
       await share(folder.id, [{ areaId: areaX.id, level: "write" }]);
-      await share(sub.id, [{ areaId: areaY.id, level: "read" }]);
+      await share(sub.id, [{ areaId: areaY.id, level: "write" }]);
 
-      assert.equal((await server.get(`/api/documents/folders/${sub.id}`, { token: tokens.colleague })).status, 404);
-      assert.equal((await server.get(`/api/documents/folders/${sub.id}`, { token: tokens.outsider })).status, 200);
+      const asColleague = await server.get(`/api/documents/folders/${sub.id}`, { token: tokens.colleague });
+      const asOutsider = await server.get(`/api/documents/folders/${sub.id}`, { token: tokens.outsider });
+
+      assert.equal(asColleague.body.folder.access, "read");
+      assert.equal(asOutsider.body.folder.access, "write");
+    });
+
+    test("a folder with no grants of its own reports the ones it inherits", async () => {
+      const folder = await root();
+      const sub = (await createFolder({ parentId: folder.id, name: "Diseño" })).body.folder;
+      const deep = (await createFolder({ parentId: sub.id, name: "Cartel" })).body.folder;
+      await share(folder.id, [{ areaId: areaX.id, level: "write" }]);
+
+      const inside = await server.get(`/api/documents/folders/${deep.id}`, { token: tokens.owner });
+      const top = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.owner });
+
+      assert.deepEqual(inside.body.folder.areas, []);
+      assert.equal(inside.body.folder.inherited.folderId, folder.id);
+      assert.equal(inside.body.folder.inherited.folderName, "Proyectos");
+      assert.deepEqual(
+        inside.body.folder.inherited.areas.map((g) => [g.areaId, g.level]),
+        [[areaX.id, "write"]],
+      );
+      assert.equal(top.body.folder.inherited, null);
     });
 
     test("without document.manage, only the owner changes who a folder is shared with", async () => {
@@ -464,12 +625,12 @@ describe("/api/documents", () => {
       assert.equal((await createLink(folder.id, inADay(), tokens.owner)).status, 403);
     });
 
-    test("document.share does not reach a folder the caller cannot see", async () => {
+    test("document.share links any folder, since every folder is readable", async () => {
       const folder = await root();
 
       await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write", "document.share"]);
       try {
-        assert.equal((await createLink(folder.id, inADay(), tokens.colleague)).status, 404);
+        assert.equal((await createLink(folder.id, inADay(), tokens.colleague)).status, 201);
         assert.equal((await createLink(folder.id, inADay(), tokens.owner)).status, 201);
       } finally {
         await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write"]);
@@ -480,6 +641,43 @@ describe("/api/documents", () => {
       assert.equal((await server.get(`/api/shared/${"x".repeat(43)}`)).status, 404);
     });
   });
+  describe("managing links", () => {
+    const inADay = () => new Date(Date.now() + 86_400_000).toISOString();
+    const createLink = (folderId) =>
+      server.post(`/api/documents/folders/${folderId}/links`, {
+        token: tokens.admin,
+        body: { expiresAt: inADay() },
+      });
+
+    test("lists every working link with its folder, and a folder counts its own", async () => {
+      const folder = await root();
+      const sub = (await createFolder({ parentId: folder.id, name: "Entregables" })).body.folder;
+      const working = (await createLink(sub.id)).body.link;
+      const revoked = (await createLink(sub.id)).body.link;
+      const expired = (await createLink(sub.id)).body.link;
+      await server.delete(`/api/documents/links/${revoked.id}`, { token: tokens.admin });
+      await sql("update access_tokens set expires_at = now() - interval '1 minute' where id = $1", [expired.id]);
+
+      const res = await server.get("/api/documents/links", { token: tokens.admin });
+      const listing = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.owner });
+
+      assert.equal(res.status, 200);
+      const mine = res.body.links.filter((link) => link.folder.id === sub.id);
+      assert.deepEqual(mine.map((link) => link.id), [working.id]);
+      assert.equal(mine[0].token, undefined);
+      assert.deepEqual(mine[0].folder.path, [
+        { id: folder.id, name: "Proyectos" },
+        { id: sub.id, name: "Entregables" },
+      ]);
+      assert.equal(listing.body.folder.folders[0].links, 1);
+    });
+
+    test("listing every link needs document.share", async () => {
+      const res = await server.get("/api/documents/links", { token: tokens.owner });
+      assert.equal(res.status, 403);
+    });
+  });
+
   describe("project folders", () => {
     const createProject = async (stages = []) => {
       const res = await server.post("/api/projects", {
@@ -505,7 +703,9 @@ describe("/api/documents", () => {
         assert.equal(res.body.folder.access, "write");
         assert.equal((await upload(project.folderId, "a.bin", randomBytes(16))).status, 201);
 
-        assert.equal((await projectFolder(project.id, tokens.outsider)).status, 404);
+        const outside = await projectFolder(project.id, tokens.outsider);
+        assert.equal(outside.status, 200);
+        assert.equal(outside.body.folder.access, "read");
       } finally {
         await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write"]);
       }
@@ -538,27 +738,6 @@ describe("/api/documents", () => {
       assert.equal(res.status, 200);
       const [row] = await sql("select folder_id from projects where id = $1", [project.id]);
       assert.equal(String(row.folder_id), String(res.body.folder.id));
-    });
-  });
-
-  describe("document.browse", () => {
-    test("reads every folder and lists every root, but cannot write", async () => {
-      const folder = await root("Privada");
-      const file = (await upload(folder.id, "a.bin", randomBytes(16))).body.file;
-
-      await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write", "document.browse"]);
-      try {
-        const top = await server.get("/api/documents/folders", { token: tokens.outsider });
-        assert.ok(top.body.folders.some((f) => f.id === folder.id));
-
-        const res = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.outsider });
-        assert.equal(res.status, 200);
-        assert.equal(res.body.folder.access, "read");
-        assert.equal((await download(file.id, tokens.outsider)).status, 200);
-        assert.equal((await upload(folder.id, "b.bin", randomBytes(16), { token: tokens.outsider })).status, 403);
-      } finally {
-        await grantPermissions(server, tokens.admin, "worker", ["document.read", "document.write"]);
-      }
     });
   });
 
@@ -595,6 +774,44 @@ describe("/api/documents", () => {
       const file = (await upload(project.folderId, "p.bin", bytes, { token: tokens.admin })).body.file;
       return { project, file };
     };
+
+    test("a project's folder lists with its project, and when an ended one loses its files", async () => {
+      const { project } = await projectWithFile(randomBytes(32));
+      const sub = (await createFolder({ parentId: project.folderId, name: "Diseño" }, tokens.admin)).body.folder;
+      const listed = async () =>
+        (await server.get("/api/documents/folders", { token: tokens.admin })).body.folders.find(
+          (f) => f.id === project.folderId,
+        ).project;
+
+      const open = await listed();
+      assert.equal(open.title, "Proyecto");
+      assert.equal(open.key, project.key);
+      assert.equal(open.filesExpireAt, null);
+
+      await sql("update projects set archived_at = current_timestamp where id = $1", [project.id]);
+      const [{ expected }] = await sql(
+        `select archived_at + (select make_interval(months => months) from file_retention) as expected
+           from projects where id = $1`,
+        [project.id],
+      );
+      const archived = await listed();
+      assert.notEqual(archived.archivedAt, null);
+      assert.equal(new Date(archived.filesExpireAt).getTime(), new Date(expected).getTime());
+
+      const inside = await server.get(`/api/documents/folders/${sub.id}`, { token: tokens.admin });
+      assert.equal(inside.body.folder.project.id, project.id);
+      assert.equal(new Date(inside.body.folder.project.filesExpireAt).getTime(), new Date(expected).getTime());
+    });
+
+    test("a folder outside any project has no project", async () => {
+      const folder = await root();
+
+      const res = await server.get(`/api/documents/folders/${folder.id}`, { token: tokens.owner });
+      const top = await server.get("/api/documents/folders", { token: tokens.owner });
+
+      assert.equal(res.body.folder.project, null);
+      assert.equal(top.body.folders.find((f) => f.id === folder.id).project, null);
+    });
 
     test("an open project's files never expire", async () => {
       const { file } = await projectWithFile(randomBytes(32));

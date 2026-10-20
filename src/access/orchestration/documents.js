@@ -1,5 +1,6 @@
 // Folders, files and share links. Names and folders live in Postgres and bytes in MinIO under
 // their SHA-256, so renames and moves never touch MinIO. Upload the bytes first, then insert the row.
+// Every folder is readable by anyone the router lets in; area grants decide only who writes.
 import { createHash, randomBytes } from "node:crypto";
 
 import query from "../resources/query.js";
@@ -19,6 +20,10 @@ import {
 const NAME_MAX = 255;
 const MIME_MAX = 255;
 const LEVELS = ["read", "write"];
+const QUERY_MAX = 100;
+
+/** How many files, and how many project folders, a search returns. */
+const SEARCH_LIMIT = 20;
 
 /** Path separators and control characters: a name is one segment, and it ends up in a header. */
 const BAD_NAME = /[/\\\u0000-\u001f\u007f]/;
@@ -26,31 +31,40 @@ const BAD_NAME = /[/\\\u0000-\u001f\u007f]/;
 class Documents {
   /** The folders the caller starts browsing from. */
   async listTop() {
-    const actor = currentActor();
-    const all = isAdmin(actor) || (await browses(actor));
-    const rows = await query.listTopFolders(all ? null : actor.id);
-    return rows.map(shapeFolder);
+    return (await query.listTopFolders()).map(shapeFolder);
   }
 
   /**
-   * A folder with its subfolders, files and area grants.
+   * A folder with its subfolders, files and area grants. `areas` are its own; when it has none,
+   * `inherited` carries the grants of the nearest ancestor that does, which are the ones in force.
    *
-   * @throws {ApiError} 404 when missing or not readable.
+   * @throws {ApiError} 404 when missing.
    */
   async getFolder(folderId) {
     const id = requireId(folderId, "folderId");
     const { folder, access } = await this.#readable(id);
-    const [folders, files, areas] = await Promise.all([
+    const [folders, files, areas, project] = await Promise.all([
       query.listChildFolders(id),
       query.listFolderFiles(id),
       query.listFolderAreas(id),
+      query.folderProject(id),
     ]);
+    const inherited = areas.length > 0 ? [] : await query.inheritedFolderAreas(id);
     return {
       ...shapeFolder(folder),
       access,
+      project,
       folders: folders.map(shapeFolder),
       files: files.map(shapeFile),
       areas: areas.map(shapeGrant),
+      inherited:
+        inherited.length === 0
+          ? null
+          : {
+              folderId: inherited[0].folder_id,
+              folderName: inherited[0].folder_name,
+              areas: inherited.map(shapeGrant),
+            },
     };
   }
 
@@ -289,6 +303,17 @@ class Documents {
     return { ...shapeLink(row), token };
   }
 
+  /**
+   * Every working link, soonest to expire first, each with `folder`: its id, name, project and
+   * the path to it from its root. The route requires `document.share`.
+   */
+  async listLinks() {
+    return (await query.listWorkingLinks()).map((row) => ({
+      ...shapeLink(row),
+      folder: { id: row.folder_id, name: row.folder_name, project: row.project, path: row.path },
+    }));
+  }
+
   /** @throws {ApiError} 404 when the folder is missing or not readable. */
   async listFolderLinks(folderId) {
     const id = requireId(folderId, "folderId");
@@ -370,6 +395,31 @@ class Documents {
       after: { linkId: link.link_id },
     });
     return { file: shapeSharedFile(file), stream: content.stream, size: content.size };
+  }
+
+  /**
+   * Files whose name contains `text`, case-insensitively: the first SEARCH_LIMIT by name, each
+   * with `path`, the folders that lead to it. Within `folderId` the path starts there; without
+   * it the path starts at the root, and the project folders whose project's key or title
+   * contains `text` come back too.
+   *
+   * @returns {Promise<{files: object[], folders: object[]}>}
+   * @throws {ApiError} 400 without `text`; 404 when `folderId` does not exist.
+   */
+  async search(text, folderId) {
+    const needle = requireText(text, "q", QUERY_MAX);
+    const within = optionalId(folderId, "folderId");
+    if (within !== null) await this.#readable(within);
+
+    const pattern = `%${needle.replace(/[\\%_]/g, "\\$&")}%`;
+    const [rows, projectFolders] = await Promise.all([
+      query.searchFiles(pattern, { withinId: within, limit: SEARCH_LIMIT }),
+      within === null ? query.searchProjectFolders(pattern, SEARCH_LIMIT) : [],
+    ]);
+    return {
+      files: rows.map((row) => ({ ...shapeFile(row), path: row.path })),
+      folders: projectFolders.map((row) => ({ ...shapeFolder(row), path: row.path })),
+    };
   }
 
   /**
@@ -470,7 +520,8 @@ class Documents {
   }
 
   /**
-   * Resolves what the caller may do in a folder: 'owner', 'write', 'read' or null.
+   * Resolves what the caller may do in a folder: 'owner', 'write' or 'read', which is everyone's
+   * floor (DATAMODEL.md, `folder_areas`).
    *
    * @returns {Promise<{folder: object, access: string|null}>}
    * @throws {ApiError} 404 when the folder does not exist.
@@ -482,26 +533,23 @@ class Documents {
       query.folderAccess(folderId, actor.id),
     ]);
     if (!folder) throw ApiError.notFound("Folder not found.");
-    let access = isAdmin(actor) || grant.owns ? "owner" : grant.level;
-    if (!access && (await browses(actor))) access = "read";
+    const access = isAdmin(actor) || grant.owns ? "owner" : (grant.level ?? "read");
     return { folder, access };
   }
 
-  /** @throws {ApiError} 404 when missing or not readable. */
+  /** @throws {ApiError} 404 when missing. */
   async #readable(folderId) {
-    const result = await this.#access(folderId);
-    if (!result.access) throw ApiError.notFound("Folder not found.");
-    return result;
+    return this.#access(folderId);
   }
 
-  /** @throws {ApiError} 404 when not readable, 403 when read-only. */
+  /** @throws {ApiError} 404 when missing, 403 when read-only. */
   async #writable(folderId) {
     const result = await this.#readable(folderId);
     if (result.access === "read") throw ApiError.forbidden("This folder is read-only for you.");
     return result;
   }
 
-  /** @throws {ApiError} 404 when not readable, 403 when the caller may not manage it. */
+  /** @throws {ApiError} 404 when missing, 403 when the caller may not manage it. */
   async #managed(folderId) {
     const result = await this.#writable(folderId);
     await this.#requireManage(result.access);
@@ -521,13 +569,11 @@ class Documents {
     }
   }
 
-  /** @throws {ApiError} 404 when the file is missing or its folder not readable. */
+  /** @throws {ApiError} 404 when the file is missing. */
   async #readableFile(fileId) {
     const file = await query.getFile(fileId);
     if (!file) throw ApiError.notFound("File not found.");
-    const access = await this.#access(file.folder_id);
-    if (!access.access) throw ApiError.notFound("File not found.");
-    return { file, ...access };
+    return { file, ...(await this.#access(file.folder_id)) };
   }
 
   /** @throws {ApiError} 404, or 403 when the folder is read-only for the caller. */
@@ -540,11 +586,6 @@ class Documents {
 
 function isAdmin(actor) {
   return actor?.role === "admin";
-}
-
-/** Whether the actor's role holds `document.browse`: read on every folder. */
-async function browses(actor) {
-  return (await query.getRolePermissionCodes(actor.roleId)).includes("document.browse");
 }
 
 function shapeRetention(row) {
@@ -603,6 +644,9 @@ function shapeFolder(row) {
     name: row.name,
     ownerId: row.owner_id,
     createdAt: row.created_at,
+    ...("empty" in row ? { empty: row.empty } : {}),
+    ...("project" in row ? { project: row.project } : {}),
+    ...("links" in row ? { links: row.links } : {}),
   };
 }
 

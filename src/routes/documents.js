@@ -22,6 +22,14 @@ router.get("/folders/:id", async (req, res) => {
   res.json({ folder: await documents.getFolder(folderId(req)) });
 });
 
+router.get("/search", async (req, res) => {
+  res.json(await documents.search(req.query.q, req.query.folderId));
+});
+
+router.get("/links", requirePermission("document.share"), async (_req, res) => {
+  res.json({ links: await documents.listLinks() });
+});
+
 router.get("/retention", async (_req, res) => {
   res.json({ retention: await documents.getRetention() });
 });

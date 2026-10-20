@@ -1737,8 +1737,106 @@ export function buildOpenApiDocument() {
             name: { type: 'string', example: 'Diseño' },
             ownerId: { type: 'integer' },
             createdAt: { type: 'string', format: 'date-time' },
+            empty: {
+              type: 'boolean',
+              description:
+                'Only in a listing (the top folders, a folder\'s subfolders): no live file ' +
+                'anywhere beneath it, subfolders included.',
+            },
+            project: {
+              oneOf: [{ $ref: '#/components/schemas/FolderProject' }, { type: 'null' }],
+              description: 'Only in a listing: the project whose folder this is.',
+            },
+            links: {
+              type: 'integer',
+              description: 'Only in a listing: how many share links on it still work.',
+            },
           },
           required: ['id', 'parentId', 'name', 'ownerId'],
+        },
+        FolderProject: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer' },
+            key: { type: 'string', example: 'PRY-000012' },
+            title: { type: 'string', example: 'Campaña de admisión' },
+            closedAt: { type: ['string', 'null'], format: 'date-time' },
+            archivedAt: { type: ['string', 'null'], format: 'date-time' },
+            filesExpireAt: {
+              type: ['string', 'null'],
+              format: 'date-time',
+              description:
+                'When the daily sweep removes its files: retention counted from the close or ' +
+                'archive. Null while the project is open.',
+            },
+          },
+          required: ['id', 'key', 'title', 'filesExpireAt'],
+        },
+        FolderHit: {
+          allOf: [
+            { $ref: '#/components/schemas/Folder' },
+            {
+              type: 'object',
+              properties: {
+                path: {
+                  type: 'array',
+                  description: 'The folders leading to it, top-down, ending with itself.',
+                  items: {
+                    type: 'object',
+                    properties: { id: { type: 'integer' }, name: { type: 'string' } },
+                  },
+                },
+              },
+              required: ['path'],
+            },
+          ],
+        },
+        WorkingLink: {
+          allOf: [
+            { $ref: '#/components/schemas/ShareLink' },
+            {
+              type: 'object',
+              properties: {
+                folder: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'integer' },
+                    name: { type: 'string' },
+                    project: {
+                      oneOf: [{ $ref: '#/components/schemas/FolderProject' }, { type: 'null' }],
+                    },
+                    path: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: { id: { type: 'integer' }, name: { type: 'string' } },
+                      },
+                    },
+                  },
+                },
+              },
+              required: ['folder'],
+            },
+          ],
+        },
+        FileHit: {
+          allOf: [
+            { $ref: '#/components/schemas/FileEntry' },
+            {
+              type: 'object',
+              properties: {
+                path: {
+                  type: 'array',
+                  description: 'The folders leading to the file, top-down, ending with its own.',
+                  items: {
+                    type: 'object',
+                    properties: { id: { type: 'integer' }, name: { type: 'string' } },
+                  },
+                },
+              },
+              required: ['path'],
+            },
+          ],
         },
         FolderDetail: {
           allOf: [
@@ -1750,6 +1848,21 @@ export function buildOpenApiDocument() {
                   type: 'string',
                   enum: ['owner', 'write', 'read'],
                   description: 'What the caller may do here. `owner` includes deleting and sharing.',
+                },
+                project: {
+                  oneOf: [{ $ref: '#/components/schemas/FolderProject' }, { type: 'null' }],
+                  description: 'The project the folder belongs to: its own, or its nearest ancestor\'s.',
+                },
+                inherited: {
+                  type: ['object', 'null'],
+                  description:
+                    'Only when `areas` is empty: the grants of the nearest ancestor that has any, ' +
+                    'which are the ones in force here.',
+                  properties: {
+                    folderId: { type: 'integer' },
+                    folderName: { type: 'string' },
+                    areas: { type: 'array', items: { $ref: '#/components/schemas/FolderGrant' } },
+                  },
                 },
                 folders: { type: 'array', items: { $ref: '#/components/schemas/Folder' } },
                 files: { type: 'array', items: { $ref: '#/components/schemas/FileEntry' } },
@@ -4082,7 +4195,7 @@ export function buildOpenApiDocument() {
             200: wrapped('The folder.', 'folder', 'FolderDetail'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('No such project, or its folder is not visible.', 'Folder not found.'),
+            404: errorResponse('No such project.', 'Folder not found.'),
           },
         },
       },
@@ -4465,8 +4578,8 @@ export function buildOpenApiDocument() {
           tags: ['documents'],
           summary: 'Where browsing starts',
           description:
-            'The roots the caller owns plus every folder shared with one of their areas. ' +
-            'An admin gets every root.',
+            'Every live root. Reading is open to anyone with document.read; area grants ' +
+            'decide only who writes.',
           responses: {
             200: wrapped('The folders.', 'folders', 'Folder', true),
             401: UNAUTHORIZED,
@@ -4499,7 +4612,60 @@ export function buildOpenApiDocument() {
             400: errorResponse('A bad name or parentId.', 'name is required.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('The parent does not exist or is not visible.', 'Folder not found.'),
+            404: errorResponse('The parent does not exist.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/search': {
+        get: {
+          tags: ['documents'],
+          summary: 'Files whose name contains the query, and projects by key or title',
+          description:
+            'Case-insensitive, at most 20 of each, by name. Within `folderId` the path starts ' +
+            'at that folder; without it the path starts at the root, and the folders of ' +
+            'projects whose key or title contains `q` come back as `folders`.',
+          parameters: [
+            { name: 'q', in: 'query', required: true, schema: { type: 'string', maxLength: 100 } },
+            { name: 'folderId', in: 'query', required: false, schema: { type: 'integer' }, description: 'Search only beneath this folder.' },
+          ],
+          responses: {
+            200: {
+              description: 'The matching files and project folders.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      files: { type: 'array', items: { $ref: '#/components/schemas/FileHit' } },
+                      folders: {
+                        type: 'array',
+                        description: 'Empty within `folderId`.',
+                        items: { $ref: '#/components/schemas/FolderHit' },
+                      },
+                    },
+                    required: ['files', 'folders'],
+                  },
+                },
+              },
+            },
+            400: errorResponse('No q.', 'q is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('folderId does not exist or was deleted.', 'Folder not found.'),
+          },
+        },
+      },
+      '/api/documents/links': {
+        get: {
+          tags: ['documents'],
+          summary: 'Every working share link',
+          description:
+            'Needs document.share. Not revoked, not expired, on a live folder; soonest to ' +
+            'expire first. Tokens are never listed.',
+          responses: {
+            200: wrapped('The links.', 'links', 'WorkingLink', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
           },
         },
       },
@@ -4512,7 +4678,7 @@ export function buildOpenApiDocument() {
             200: wrapped('The folder.', 'folder', 'FolderDetail'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing, deleted or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
           },
         },
         patch: {
@@ -4541,7 +4707,7 @@ export function buildOpenApiDocument() {
             400: errorResponse('A bad name, or a move into its own subtree.', 'A folder cannot be moved inside itself.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
           },
         },
         delete: {
@@ -4578,7 +4744,7 @@ export function buildOpenApiDocument() {
             },
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
           },
         },
       },
@@ -4609,7 +4775,7 @@ export function buildOpenApiDocument() {
             400: errorResponse('A bad grant or an unknown area.', "level must be 'read' or 'write'."),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
           },
         },
       },
@@ -4633,7 +4799,7 @@ export function buildOpenApiDocument() {
             400: errorResponse('A bad name.', 'name cannot contain slashes or control characters, or be . or ..'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
             413: errorResponse('Larger than MAX_UPLOAD_BYTES.', 'Upload exceeds 536870912 bytes.'),
             503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
           },
@@ -5011,7 +5177,7 @@ export function buildOpenApiDocument() {
             200: wrapped('The file.', 'file', 'FileEntry'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'File not found.'),
+            404: errorResponse('Missing or deleted.', 'File not found.'),
           },
         },
         patch: {
@@ -5038,7 +5204,7 @@ export function buildOpenApiDocument() {
             400: errorResponse('A bad name or folderId.', 'name is required.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'File not found.'),
+            404: errorResponse('Missing or deleted.', 'File not found.'),
           },
         },
         delete: {
@@ -5052,7 +5218,7 @@ export function buildOpenApiDocument() {
             200: wrapped('The file as it was.', 'file', 'FileEntry'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'File not found.'),
+            404: errorResponse('Missing or deleted.', 'File not found.'),
           },
         },
       },
@@ -5069,7 +5235,7 @@ export function buildOpenApiDocument() {
             },
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'File not found.'),
+            404: errorResponse('Missing or deleted.', 'File not found.'),
             503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
           },
         },
@@ -5085,7 +5251,7 @@ export function buildOpenApiDocument() {
             200: wrapped('The links, without tokens.', 'links', 'ShareLink', true),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
           },
         },
         post: {
@@ -5132,7 +5298,7 @@ export function buildOpenApiDocument() {
             400: errorResponse('expiresAt missing, malformed or past.', 'expiresAt must be in the future.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Missing or not visible.', 'Folder not found.'),
+            404: errorResponse('Missing or deleted.', 'Folder not found.'),
           },
         },
       },
@@ -5148,7 +5314,7 @@ export function buildOpenApiDocument() {
             200: wrapped('The link, revoked.', 'link', 'ShareLink'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
-            404: errorResponse('Unknown, already revoked, or its folder not visible.', 'Link not found.'),
+            404: errorResponse('Unknown, already revoked, or its folder deleted.', 'Link not found.'),
           },
         },
       },

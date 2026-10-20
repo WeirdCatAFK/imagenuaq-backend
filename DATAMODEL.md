@@ -1636,16 +1636,19 @@ renombrar una carpeta se volvía copiar cada objeto debajo de ella, y `folder_ar
 `access_tokens` no tenían dónde colgarse.
 
 **Quién toca qué carpeta** (`RF-USR-05`) se resuelve en `orchestration/documents.js`, no con
-el código de permiso: `document.read` / `document.write` abren el router; ser dueño de la carpeta o de
-una ancestra es control total; si no, decide la ancestra más cercana con filas en
-`folder_areas`, con el mejor nivel entre las áreas de quien pregunta. Borrar o recompartir
+el código de permiso: `document.read` / `document.write` abren el router. **Leer es para todos**:
+cualquiera con `document.read` ve y descarga cualquier carpeta, porque cerrar la lectura por área
+causaba fricción sin proteger nada (`files-open-read` retiró `document.browse`, que ya no daba
+nada). Escribir sí se concede: ser dueño de la carpeta o de una ancestra es control total; si no,
+decide la ancestra más cercana con filas en `folder_areas`, con el mejor nivel entre las áreas
+de quien pregunta, y sin fila el nivel es `read`. Borrar o recompartir
 el trabajo ajeno no basta con escribir, porque es lo que `RF-USR-05` quiere evitar: lo hace
 el dueño de la carpeta, el autor del archivo, o quien además de escribir tenga el permiso
 `document.manage`.
 
 **Los nombres no son llave.** Dos archivos o dos carpetas hermanas pueden llamarse igual; los
 distingue su id, y el objeto en MinIO se llama por su hash. `file-store-minio` quitó los
-índices únicos de nombre que traía `file-sharing`. Una carpeta que no se puede leer responde 404.
+índices únicos de nombre que traía `file-sharing`. Una carpeta inexistente o borrada responde 404.
 
 #### `folders`
 
@@ -1682,7 +1685,10 @@ Un archivo dentro de una carpeta. La fila es el nombre y el lugar; los bytes se 
 
 #### `folder_areas`
 
-Qué área ve qué carpeta y con qué nivel. Es lo que da `RF-USR-03` sobre archivos.
+Qué área puede escribir en qué carpeta. Todas leen todo; `read` sólo sirve para que una
+subcarpeta con filas propias deje sin escritura a un área que la tenía arriba. La carpeta que no
+tiene filas usa las de su ancestra más cercana, y `GET /api/documents/folders/:id` las devuelve
+como `inherited`. Es lo que da `RF-USR-03` sobre archivos.
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |
@@ -1727,8 +1733,8 @@ comparte su hash. La bitácora se conserva.
 
 Cada proyecto recibe su carpeta raíz, nombrada con su clave, al crearse (o al abrirla por
 primera vez, `/api/projects/:id/folder`), y cada área con una etapa en él obtiene `write`
-sobre ella; una concesión puesta a mano no se pisa. El permiso `document.browse` da lectura
-sobre todo el árbol; quien no lo tiene llega a los archivos por el proyecto (`RF-ARC-02`).
+sobre ella; una concesión puesta a mano no se pisa. Las demás áreas la leen igual, como a
+cualquier carpeta (`RF-ARC-02`).
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |

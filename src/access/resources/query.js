@@ -18,6 +18,36 @@ const STAGE_FROM = `
   join flow_phases fp on fp.id = fs.phase_id
   join areas a on a.id = fs.area_id`;
 
+/**
+ * `empty`: whether no live file lies anywhere beneath the folder, subfolders included, so a tree
+ * of nothing but folders reads as empty. Expects alias `f`.
+ */
+const FOLDER_EMPTY = `not exists (
+  with recursive below as (
+    select f.id
+    union all
+    select c.id from folders c join below b on c.parent_id = b.id where c.deleted_at is null
+  )
+  select 1 from files fi where fi.folder_id in (select id from below) and fi.deleted_at is null
+) as empty`;
+
+/**
+ * `project`: the live project whose folder is `f`, or null, as {id, key, title, closedAt,
+ * archivedAt, filesExpireAt}. `filesExpireAt` is retention counted from the close or archive,
+ * as expireFiles() counts it, and null while the project is open. Expects alias `f`.
+ */
+const FOLDER_PROJECT = `(select json_build_object(
+    'id', p.id, 'key', p.key, 'title', p.title,
+    'closedAt', p.closed_at, 'archivedAt', p.archived_at,
+    'filesExpireAt', coalesce(p.closed_at, p.archived_at)
+                     + (select make_interval(months => months) from file_retention))
+   from projects p
+  where p.folder_id = f.id and p.deleted_at is null) as project`;
+
+/** `links`: how many share links on the folder still work. Expects alias `f`. */
+const FOLDER_LINKS = `(select count(*)::int from access_tokens t
+   where t.folder_id = f.id and t.revoked_at is null and t.expires_at > current_timestamp) as links`;
+
 /** A project whose work still counts: not closed, archived or deleted. Expects alias `p`. */
 const LIVE_PROJECT = "p.deleted_at is null and p.closed_at is null and p.archived_at is null";
 
@@ -3179,32 +3209,114 @@ class Query {
     return row ?? null;
   }
 
-  /**
-   * The folders a user starts browsing from: every live root for an admin (`userId` null);
-   * otherwise the roots they own plus any folder shared with one of their areas.
-   */
-  async listTopFolders(userId) {
+  /** Every live root: where browsing starts, the same for everyone. */
+  async listTopFolders() {
     return this.#rows(
-      `select f.*
+      `select f.*, ${FOLDER_EMPTY}, ${FOLDER_PROJECT}, ${FOLDER_LINKS}
          from folders f
-        where f.deleted_at is null
-          and (($1::bigint is null and f.parent_id is null)
-               or ($1::bigint is not null and f.parent_id is null and f.owner_id = $1::bigint)
-               or exists (select 1
-                            from folder_areas fa
-                            join area_members am on am.area_id = fa.area_id
-                           where fa.folder_id = f.id and am.user_id = $1::bigint))
+        where f.deleted_at is null and f.parent_id is null
         order by f.name, f.id`,
-      [userId],
     );
   }
 
   async listChildFolders(folderId) {
     return this.#rows(
-      `select * from folders
-        where parent_id = $1 and deleted_at is null
-        order by name, id`,
+      `select f.*, ${FOLDER_EMPTY}, ${FOLDER_PROJECT}, ${FOLDER_LINKS}
+         from folders f
+        where f.parent_id = $1 and f.deleted_at is null
+        order by f.name, f.id`,
       [folderId],
+    );
+  }
+
+  /**
+   * The project a folder belongs to: the one whose folder is `folderId` or its nearest ancestor,
+   * shaped as FOLDER_PROJECT, or null outside any project.
+   */
+  async folderProject(folderId) {
+    const [row] = await this.#rows(
+      `with recursive chain as (
+         select id, parent_id, 0 as depth from folders where id = $1
+         union all
+         select fo.id, fo.parent_id, c.depth + 1
+           from folders fo
+           join chain c on fo.id = c.parent_id
+          where c.depth < 100
+       )
+       select ${FOLDER_PROJECT}
+         from chain c
+         join folders f on f.id = c.id
+        where exists (select 1 from projects p where p.folder_id = f.id and p.deleted_at is null)
+        order by c.depth
+        limit 1`,
+      [folderId],
+    );
+    return row?.project ?? null;
+  }
+
+  /**
+   * Live project folders whose project's key or title matches the ILIKE `pattern`, by key, at
+   * most `limit`, each with `project` (as FOLDER_PROJECT) and `path` from its root.
+   */
+  async searchProjectFolders(pattern, limit) {
+    return this.#rows(
+      `with recursive hits as (
+         select f.id
+           from folders f
+           join projects p on p.folder_id = f.id and p.deleted_at is null
+          where f.deleted_at is null
+            and (p.key ilike $1 escape '\\' or p.title ilike $1 escape '\\')
+       ),
+       chain as (
+         select h.id as hit_id, fo.id, fo.parent_id, fo.name, 0 as depth
+           from hits h
+           join folders fo on fo.id = h.id
+         union all
+         select c.hit_id, fo.id, fo.parent_id, fo.name, c.depth + 1
+           from chain c
+           join folders fo on fo.id = c.parent_id and fo.deleted_at is null
+          where c.depth < 100
+       )
+       select f.*, ${FOLDER_PROJECT},
+              (select json_agg(json_build_object('id', c.id, 'name', c.name) order by c.depth desc)
+                 from chain c
+                where c.hit_id = f.id) as path
+         from folders f
+        where f.id in (select hit_id from chain where parent_id is null)
+        order by f.name, f.id
+        limit $2`,
+      [pattern, limit],
+    );
+  }
+
+  /**
+   * Live files whose name matches the ILIKE `pattern`, by name, at most `limit`. Each carries
+   * `path`, its folders top-down as [{id, name}]: from `withinId` when given, leaving out any
+   * file not beneath it, else from its root. A file under a deleted folder is left out.
+   */
+  async searchFiles(pattern, { withinId = null, limit }) {
+    return this.#rows(
+      `with recursive chain as (
+         select fi.id as file_id, fo.id, fo.parent_id, fo.name, 0 as depth
+           from files fi
+           join folders fo on fo.id = fi.folder_id and fo.deleted_at is null
+          where fi.deleted_at is null and fi.name ilike $1 escape '\\'
+         union all
+         select c.file_id, fo.id, fo.parent_id, fo.name, c.depth + 1
+           from chain c
+           join folders fo on fo.id = c.parent_id and fo.deleted_at is null
+          where c.depth < 100 and c.id is distinct from $2::bigint
+       )
+       select fi.*,
+              (select json_agg(json_build_object('id', c.id, 'name', c.name) order by c.depth desc)
+                 from chain c
+                where c.file_id = fi.id) as path
+         from files fi
+        where fi.id in (select file_id from chain
+                         where ($2::bigint is null and parent_id is null) or id = $2::bigint)
+        order by fi.name, fi.id
+        limit $3`,
+      [pattern, withinId, limit],
     );
   }
 
@@ -3259,6 +3371,37 @@ class Query {
       [folderId],
     );
     return row ?? null;
+  }
+
+  /**
+   * The grants in force on a folder with none of its own: those of its nearest ancestor that has
+   * any, each with that ancestor's `folder_name`; empty when no ancestor has grants.
+   */
+  async inheritedFolderAreas(folderId) {
+    return this.#rows(
+      `with recursive chain as (
+         select parent_id as id, 1 as depth from folders where id = $1
+         union all
+         select f.parent_id, c.depth + 1
+           from folders f
+           join chain c on f.id = c.id
+          where c.depth < 100 and f.parent_id is not null
+       ),
+       nearest as (
+         select c.id
+           from chain c
+          where exists (select 1 from folder_areas fa where fa.folder_id = c.id)
+          order by c.depth
+          limit 1
+       )
+       select fa.folder_id, fa.area_id, fa.level, a.name as area_name, fo.name as folder_name
+         from folder_areas fa
+         join nearest n on n.id = fa.folder_id
+         join areas a on a.id = fa.area_id
+         join folders fo on fo.id = fa.folder_id
+        order by a.name`,
+      [folderId],
+    );
   }
 
   async listFolderAreas(folderId) {
@@ -3344,6 +3487,34 @@ class Query {
       [tokenHash, folderId, authorizer, expiresAt],
     );
     return row;
+  }
+
+  /**
+   * Every link that still works on a live folder, soonest to expire first, each with its folder's
+   * `name`, `project` (as FOLDER_PROJECT) and `path` from its root, top-down as [{id, name}].
+   */
+  async listWorkingLinks() {
+    return this.#rows(
+      `with recursive chain as (
+         select t.id as link_id, fo.id, fo.parent_id, fo.name, 0 as depth
+           from access_tokens t
+           join folders fo on fo.id = t.folder_id and fo.deleted_at is null
+          where t.revoked_at is null and t.expires_at > current_timestamp
+         union all
+         select c.link_id, fo.id, fo.parent_id, fo.name, c.depth + 1
+           from chain c
+           join folders fo on fo.id = c.parent_id and fo.deleted_at is null
+          where c.depth < 100
+       )
+       select t.*, f.name as folder_name, ${FOLDER_PROJECT},
+              (select json_agg(json_build_object('id', c.id, 'name', c.name) order by c.depth desc)
+                 from chain c
+                where c.link_id = t.id) as path
+         from access_tokens t
+         join folders f on f.id = t.folder_id
+        where t.id in (select link_id from chain where parent_id is null)
+        order by t.expires_at, t.id`,
+    );
   }
 
   /** Links on a folder that still work: not revoked and not expired. */
