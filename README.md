@@ -184,7 +184,11 @@ bucket** — lose it and MinIO holds correctly-hashed but meaningless bytes. Bac
 ## Scheduled jobs and notifications
 
 Two things create notifications. **Domain events** cover what a person did: the subscriber in
-`orchestration/notifications.js` listens on `utils/events.js`, beside the audit trail.
+`orchestration/notifications.js` listens on `utils/events.js`, beside the audit trail, and its
+`HANDLERS` map says, per action (`stage_activated`, `stage_assigned`, `stage_delivered`,
+`stage_signed_off`), who hears and what the message says. Except for `stage_activated`, the person who acted is left
+out.
+An action without an entry notifies nobody.
 **Scheduled jobs** cover what needs no one: `src/scheduler.js` holds `JOBS`, one entry per job
 with a unique `name` (grep for it), a cron `schedule` read in Querétaro time, and `run(now)`.
 `main.js` starts them and `Api` does not, so tests never run on a clock; a test calls

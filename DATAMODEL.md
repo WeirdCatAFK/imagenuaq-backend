@@ -856,7 +856,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-PRY-09                       | `project_materials.origin`                                                                                        | ✗ |
 | RF-FLW-01, RF-FLW-02            | `flow_phases` + `flow_stages`, de plantilla, de solicitud o de proyecto (§2.1, §2.17)                     | ◑ plantillas y flujo de la solicitud en el diseñador; el de un proyecto en curso se edita etapa por etapa |
 | RF-FLW-03                       | `approvals`; el rechazo abre`attempt + 1` (§2.6, §2.12)                                                      | ✔ |
-| RF-FLW-04                       | `advanceStage()`: aprobar la última etapa abierta de una fase abre la siguiente (§2.12) + `notifications` | ◑ el avance existe; faltan las notificaciones |
+| RF-FLW-04                       | `advanceStage()`: aprobar la última etapa abierta de una fase abre la siguiente (§2.12) + `notifications` (`stage_activated`) | ✔ |
 | RF-FLW-05                       | Descartado como firma: el visto bueno es interno y la conformidad del solicitante se captura como evidencia (§2.11) | ✗ por decisión |
 | RF-FLW-06                       | `project_field_values` (§2.4) + `flow_stages.input_keys`/`output_keys`, exigidas al firmar (§2.14)            | ✔ |
 | RF-FLW-07                       | `project_stages.status = 'waiting_external'` + `blocked_reason` (CHECK)                                        | ✔ |
@@ -866,9 +866,10 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-TSK-06, RF-TSK-07            | Consulta sobre `project_stages`, `area_members` y `absence_availability`; sin tabla nueva (§2.18)    | ✔ |
 | RF-EST-01                       | `projects.status_id` → `statuses`                                                                              | ✔ |
 | RF-EST-02                       | `statuses.area_id`; el catálogo global viene sembrado, los de área los pone coordinación por`/api/statuses`   | ✔ |
-| RF-EST-03, RF-EST-04, RF-EST-09 | `alert_rules` + `status_since`                                                                                  | ◑ `status_since` sí, `alert_rules` no |
+| RF-EST-03, RF-EST-04, RF-EST-09 | `status_since`; sin `alert_rules`                                                                               | ◑ `status_since` sí; `alert_rules` descartado por ahora (2026-10-21) |
 | RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
-| RF-EST-06, RF-EST-10            | `notifications`                                                                                                   | ✗ |
+| RF-EST-06                       | `notifications`: eventos de etapa (`HANDLERS` en `notifications.js`) y trabajos programados (`src/scheduler.js`) | ✔ |
+| RF-EST-10                       | `notifications`                                                                                                   | ✗ espera las rutas de AUS |
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
 | RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13) + `sheets.column_map` y `sheet_imports` (§2.16) | ✔ |
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |

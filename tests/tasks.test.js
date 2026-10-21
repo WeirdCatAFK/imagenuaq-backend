@@ -179,7 +179,7 @@ describe("/api/tasks", () => {
     assert.equal(String(ok.body.stage.assignedTo), String(ana.id));
 
     const logs = await logsFor("project_stages", step.id);
-    assert.ok(logs.some((log) => log.action === "record_updated"));
+    assert.ok(logs.some((log) => log.action === "stage_assigned"));
   });
 
   test("the review queue lists delivered stages of the areas I lead, and I sign them from it", async () => {
@@ -252,5 +252,80 @@ describe("/api/tasks", () => {
     assert.equal(byName["Lía Líder"].openStages, 0);
     assert.equal(res.body.members.find((m) => m.suggested).name, "Lía Líder");
     assert.ok(!JSON.stringify(res.body).includes("privado"));
+  });
+  describe("notifications", () => {
+    /** The notifications `userId` holds whose dedup key starts with `prefix`. */
+    const notified = (userId, prefix) =>
+      sql("select title, message from notifications where user_id = $1 and dedup_key like $2", [
+        userId,
+        `${prefix}:%`,
+      ]);
+
+    /** An active stage in Diseño given to Ana and delivered by her. */
+    async function delivered() {
+      const made = await project({ title: "Cartel" });
+      const step = await stage(made.id, design.id, { title: "Arte", assignedTo: ana.id, status: "active" });
+      const res = await server.put(`/api/projects/${made.id}/stages/${step.id}/delivery`, {
+        token: anaToken,
+        body: { note: "Arte final" },
+      });
+      assert.equal(res.status, 200);
+      return step;
+    }
+
+    test("an assignment tells the new assignee, not the lead who made it", async () => {
+      const made = await project({ title: "Cartel" });
+      const step = await stage(made.id, design.id, { title: "Arte", status: "active" });
+
+      const res = await server.put(`/api/tasks/stages/${step.id}/assignee`, {
+        token: leadToken,
+        body: { userId: ana.id },
+      });
+      assert.equal(res.status, 200);
+
+      const [toAna] = await notified(ana.id, "stage_assigned");
+      assert.equal(toAna.title, "Etapa asignada");
+      assert.equal(toAna.message, `Te asignaron la etapa "Arte" del proyecto "Cartel" (${made.key}).`);
+      assert.deepEqual(await notified(lead.id, "stage_assigned"), []);
+    });
+
+    test("a delivery asks the area's lead for the sign-off, and not the deliverer", async () => {
+      await delivered();
+
+      const [toLead] = await notified(lead.id, "stage_delivered");
+      assert.equal(toLead.title, "Entrega por revisar");
+      assert.match(toLead.message, /^Se entregó la etapa "Arte" .* y espera tu visto bueno\.$/);
+      assert.deepEqual(await notified(ana.id, "stage_delivered"), []);
+    });
+
+    test("an approval tells whoever delivered, not the lead who signed", async () => {
+      const step = await delivered();
+
+      const res = await server.post(`/api/tasks/stages/${step.id}/approvals`, {
+        token: leadToken,
+        body: { decision: "approved" },
+      });
+      assert.equal(res.status, 201);
+
+      const [toAna] = await notified(ana.id, "stage_signed_off");
+      assert.equal(toAna.title, "Entrega aprobada");
+      assert.match(toAna.message, /^Se aprobó tu entrega de la etapa "Arte"/);
+      assert.deepEqual(await notified(lead.id, "stage_signed_off"), []);
+    });
+
+    test("a rejection sends the work back once, with the comment", async () => {
+      const step = await delivered();
+
+      const res = await server.post(`/api/tasks/stages/${step.id}/approvals`, {
+        token: leadToken,
+        body: { decision: "rejected", comment: "Falta el logo" },
+      });
+      assert.equal(res.status, 201);
+
+      const toAna = await notified(ana.id, "stage_signed_off");
+      assert.equal(toAna.length, 1);
+      assert.equal(toAna[0].title, "Etapa devuelta");
+      assert.match(toAna[0].message, /\. Comentario: Falta el logo$/);
+    });
   });
 });

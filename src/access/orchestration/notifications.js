@@ -1,9 +1,61 @@
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
+import { currentActor } from "../../utils/context.js";
 import realtime from "../../realtime/socket.js";
 
 const CATEGORIES = new Set(["calendario", "alerta", "recordatorio"]);
+
+/**
+ * Qué avisa cada evento de dominio, por nombre de acción. Cada entrada recibe el evento y regresa
+ * la etapa, a quién avisar (`to`), el título, el texto antes y después de «la etapa … del
+ * proyecto …», y la clave que evita repetir el aviso; o null para no avisar. Un evento que no
+ * está aquí no avisa a nadie (RF-FLW-04, RF-FLW-03, RF-EST-06).
+ */
+const HANDLERS = {
+  stage_activated: (event) => ({
+    stageId: event.target.id,
+    to: { assignee: true, leads: true, admins: true },
+    title: "Nueva etapa activada",
+    lead: "Se activó",
+    trail: ".",
+    dedupKey: `stage_activated:${event.target.id}`,
+  }),
+  stage_assigned: (event) =>
+    event.after?.assigned_to == null
+      ? null
+      : {
+          stageId: event.target.id,
+          to: { assignee: true },
+          exceptActor: true,
+          title: "Etapa asignada",
+          lead: "Te asignaron",
+          trail: ".",
+          dedupKey: `stage_assigned:${event.target.id}:${event.after.assigned_to}`,
+        },
+  stage_delivered: (event) => ({
+    stageId: event.target.id,
+    to: { leads: true },
+    exceptActor: true,
+    title: "Entrega por revisar",
+    lead: "Se entregó",
+    trail: " y espera tu visto bueno.",
+    dedupKey: `stage_delivered:${event.target.id}`,
+  }),
+  stage_signed_off: (event) => {
+    const approval = event.after;
+    const approved = approval.decision === "approved";
+    return {
+      stageId: approval.project_stage_id,
+      to: approved ? { deliverer: true } : { deliverer: true, assignee: true },
+      exceptActor: true,
+      title: approved ? "Entrega aprobada" : "Etapa devuelta",
+      lead: approved ? "Se aprobó tu entrega de" : "Se devolvió",
+      trail: approval.comment ? `. Comentario: ${approval.comment}` : ".",
+      dedupKey: `stage_signed_off:${approval.id}`,
+    };
+  },
+};
 
 const MAX_TITLE = 300;
 const MAX_TYPE = 50;
@@ -164,29 +216,17 @@ class Notifications {
     events.on("notifications", (event) => this.handle(event));
   }
 
-  /** Avisa al asignado, a los líderes del área y a los administradores cuando se activa una etapa. */
+  /**
+   * Avisa según HANDLERS, con una sola consulta por evento. Quien hizo la acción no recibe su
+   * propio aviso, salvo en `stage_activated`.
+   */
   async handle(event) {
-    if (event?.action !== "stage_activated" || event?.target?.table !== "project_stages") return;
+    const spec = HANDLERS[event?.action]?.(event);
+    if (!spec?.stageId) return;
 
-    const stageId = event.after?.id ?? event.target?.id;
-    if (!stageId) return;
-
-    const recipients = await query.getStageNotificationRecipients(stageId);
-    for (const recipient of recipients) {
-      await this.create({
-        userId: recipient.user_id,
-        category: "alerta",
-        type: "proyecto",
-        title: "Nueva etapa activada",
-        message:
-          `Se activó la etapa "${recipient.stage_title}" ` +
-          `del proyecto "${recipient.project_title}" ` +
-          `(${recipient.project_key}).`,
-        sourceType: "project_stages",
-        sourceId: stageId,
-        dedupKey: `stage_activated:${stageId}`,
-      });
-    }
+    const { stageId, exceptActor = false, ...message } = spec;
+    const exceptUserId = exceptActor ? (currentActor()?.id ?? null) : null;
+    this.deliver(await query.notifyStage(stageId, { ...message, exceptUserId }));
   }
 }
 

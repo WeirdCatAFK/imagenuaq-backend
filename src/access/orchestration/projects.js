@@ -564,7 +564,7 @@ class Projects {
 
     const row = await query.setStageDelivery(id, { note: text, fileId: file, deliveredBy: actor.id });
     await events.emit({
-      action: "record_updated",
+      action: "stage_delivered",
       target: { table: "project_stages", id },
       before: deliveryOf(before),
       after: deliveryOf(row),
@@ -636,7 +636,7 @@ class Projects {
     }
 
     await events.emit({
-      action: "record_created",
+      action: "stage_signed_off",
       target: { table: "approvals", id: approval.id },
       after: approval,
     });

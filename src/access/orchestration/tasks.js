@@ -70,7 +70,7 @@ class Tasks {
 
     const row = await query.setStageAssignee(id, assignee);
     await events.emit({
-      action: "record_updated",
+      action: "stage_assigned",
       target: { table: "project_stages", id },
       before: { assigned_to: stage.assigned_to },
       after: { assigned_to: row.assigned_to },

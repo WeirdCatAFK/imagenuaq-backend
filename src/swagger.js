@@ -286,6 +286,14 @@ export function buildOpenApiDocument() {
           'are kept by the server and absences never carry the reason. Global events and closure ' +
           'windows are written under `calendar.write`.',
       },
+      {
+        name: 'notifications',
+        description:
+          "The caller's notifications (RF-EST-06, RF-FLW-04). Any session may read and mark its own; " +
+          'the recipient is always the token\'s user. They are written by the server: stage events ' +
+          '(activated, assigned, delivered, signed off) and scheduled jobs (birthdays, files about to ' +
+          'expire). Each new one is also pushed live over Socket.IO as `notification:new`.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -4893,6 +4901,76 @@ export function buildOpenApiDocument() {
             200: { description: '`{ stages: [...] }`.' },
             401: UNAUTHORIZED,
             403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/notifications': {
+        get: {
+          tags: ['notifications'],
+          summary: 'My notifications',
+          description: 'Newest first. `limit` is 1–100 (default 50); `offset` defaults to 0.',
+          parameters: [
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 100 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 } },
+          ],
+          responses: {
+            200: {
+              description: '`{ notifications: [...] }`.',
+              content: {
+                'application/json': {
+                  example: {
+                    notifications: [
+                      {
+                        id: 12,
+                        userId: 3,
+                        category: 'alerta',
+                        type: 'proyecto',
+                        title: 'Entrega por revisar',
+                        message: 'Se entregó la etapa "Arte" del proyecto "Cartel" (PRY-000004) y espera tu visto bueno.',
+                        sourceType: 'project_stages',
+                        sourceId: 41,
+                        createdAt: '2026-10-21T16:02:11.000Z',
+                        readAt: null,
+                        isRead: false,
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/notifications/unread-count': {
+        get: {
+          tags: ['notifications'],
+          summary: 'How many are unread',
+          responses: {
+            200: { description: '`{ unreadCount }`.' },
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/notifications/read-all': {
+        patch: {
+          tags: ['notifications'],
+          summary: 'Mark all read',
+          responses: {
+            200: { description: '`{ updated }`: how many changed.' },
+            401: UNAUTHORIZED,
+          },
+        },
+      },
+      '/api/notifications/{id}/read': {
+        patch: {
+          tags: ['notifications'],
+          summary: 'Mark one read',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer' } }],
+          responses: {
+            200: { description: '`{ notification: { id, userId, readAt } }`.' },
+            401: UNAUTHORIZED,
+            404: { description: "Not the caller's, or already read." },
           },
         },
       },

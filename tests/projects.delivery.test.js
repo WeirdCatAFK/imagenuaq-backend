@@ -82,7 +82,7 @@ describe("/api/projects/:id/stages/:stageId/delivery", () => {
     assert.equal(shown.deliveredByName, "Ana");
 
     const logs = await logsFor("project_stages", stage.id);
-    assert.ok(logs.some((log) => log.action === "record_updated"));
+    assert.ok(logs.some((log) => log.action === "stage_delivered"));
   });
 
   test("the file is optional; the note is not", async () => {

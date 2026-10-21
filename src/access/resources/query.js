@@ -4204,14 +4204,21 @@ class Query {
   }
 
   /**
-   * Who hears that a stage opened: its assignee, the leads of its area and every admin, once
-   * each, with the stage and project names for the message.
+   * Notifies about one project stage in a single statement. `to` picks the audience -- the
+   * stage's assignee, whoever delivered it, the leads of its area, every admin -- and each live
+   * user hears once. The message is `lead` + ` la etapa "<stage>" del proyecto "<project>" (<key>)`
+   * + `trail`. `exceptUserId` (the actor) is left out. A used `dedupKey` writes nothing.
+   *
+   * @param {number} stageId
+   * @param {{to: {assignee?: boolean, deliverer?: boolean, leads?: boolean, admins?: boolean},
+   *   exceptUserId?: number|null, title: string, lead: string, trail: string, dedupKey: string}} spec
+   * @returns {Promise<object[]>} the notifications written
    */
-  async getStageNotificationRecipients(stageId) {
+  async notifyStage(stageId, { to, exceptUserId = null, title, lead, trail, dedupKey }) {
     return this.#rows(
       `with stage_info as (
-         select ps.id as stage_id, fp.project_id, fs.area_id, fs.title as stage_title,
-                ps.assigned_to, p.key as project_key, p.title as project_title
+         select ps.id, ps.assigned_to, ps.delivered_by, fs.area_id, fs.title as stage_title,
+                p.key as project_key, p.title as project_title
            from project_stages ps
            join flow_stages fs on fs.id = ps.flow_stage_id
            join flow_phases fp on fp.id = fs.phase_id
@@ -4220,28 +4227,48 @@ class Query {
             and p.deleted_at is null
        ),
        recipients as (
-         select assigned_to as user_id from stage_info where assigned_to is not null
+         select assigned_to as user_id from stage_info where $2::boolean and assigned_to is not null
+         union
+         select delivered_by from stage_info where $3::boolean and delivered_by is not null
          union
          select am.user_id
            from area_members am
            join stage_info s on s.area_id = am.area_id
-          where am.is_area_leader
+          where $4::boolean and am.is_area_leader
          union
          select u.id
            from users u
            join roles r on r.id = u.role_id
-          where r.name = 'admin'
+          where $5::boolean and r.name = 'admin'
        )
-       select u.id as user_id, s.stage_id, s.project_id, s.project_key, s.project_title,
-              s.stage_title
-         from recipients recipient
-         join users u on u.id = recipient.user_id
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select u.id, 'alerta', 'proyecto', $7::text,
+              $8::text || ' la etapa "' || s.stage_title || '" del proyecto "' || s.project_title
+                || '" (' || s.project_key || ')' || $9::text,
+              'project_stages', s.id, $10::text
+         from recipients rc
+         join users u on u.id = rc.user_id and u.deleted_at is null
         cross join stage_info s
-        where u.deleted_at is null
-        order by u.id`,
-      [stageId],
+        where u.id is distinct from $6::bigint
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [
+        stageId,
+        Boolean(to.assignee),
+        Boolean(to.deliverer),
+        Boolean(to.leads),
+        Boolean(to.admins),
+        exceptUserId,
+        title,
+        lead,
+        trail,
+        dedupKey,
+      ],
     );
   }
+
   /**
    * Today's birthdays, told to every live user, in one statement: the person whose birthday it
    * is gets a greeting, everyone else a heads-up. "Today" is `now` in Querétaro time, and a 29
