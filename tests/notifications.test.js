@@ -338,10 +338,6 @@ describe('/api/notifications', () => {
             isAreaLeader: true,
         });
 
-        // console.log('ASSIGNED:', assigned);
-        // console.log('LEADER:', leader);
-        // console.log('ASSIGNED ID:', assigned?.id);
-        // console.log('LEADER ID:', leader?.id);
 
         const [admin] = await sql(
             'SELECT id FROM users WHERE email = $1',
@@ -541,8 +537,6 @@ describe('/api/notifications', () => {
             String(user.id),
             );
 
-            // Comprobamos que el servidor colocó cada conexión
-            // en la sala privada correspondiente a su usuario.
             const [outsider] = await sql(
             'SELECT id FROM users WHERE email = $1',
             [ACCOUNTS[1]],
