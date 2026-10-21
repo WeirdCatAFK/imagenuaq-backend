@@ -54,6 +54,7 @@ const UNSEEDED_TABLES = [
   'folder_areas',
   'files',
   'area_members',
+  'notifications',
   'logs',
   'approvals',
   'project_field_values',

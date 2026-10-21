@@ -1413,7 +1413,7 @@ class Query {
         select
           d.id, si.status,
           case when si.status = 'active' then current_timestamp end,
-          nullif(si.assigned_to, '')::bigint
+          nullif(btrim(si.assigned_to), '')::bigint
         from stage_input si
         join phases_inserted ph on ph.seq = si.seq
         join definitions_inserted d on d.phase_id = ph.id and d.seq = si.position
@@ -4095,6 +4095,151 @@ class Query {
             gone_links as (delete from collection_events where event_id = $1)
        delete from events where id = $1`,
       [eventId],
+    );
+  }
+  /**
+   * Stores a notification for a live user. A repeated `dedupKey` for the same user is
+   * ignored, as is a deleted or missing user: both return null.
+   */
+  async createNotification({
+    userId,
+    category,
+    type = "generico",
+    title,
+    message,
+    sourceType = null,
+    sourceId = null,
+    dedupKey = null,
+  }) {
+    const [row] = await this.#rows(
+      `insert into notifications (
+         user_id, category, type, title, message,
+         source_type, source_id, dedup_key
+       )
+       select u.id, $2, $3, $4, $5,
+              $6::varchar, $7::bigint, $8::varchar
+         from users u
+        where u.id = $1
+          and u.deleted_at is null
+       on conflict (user_id, dedup_key)
+         where dedup_key is not null
+       do nothing
+       returning *`,
+      [userId, category, type, title, message, sourceType, sourceId, dedupKey],
+    );
+
+    return row ?? null;
+  }
+
+  /** A user's notifications, newest first. */
+  async listNotifications(userId, limit = 50, offset = 0) {
+    return this.#rows(
+      `select id, user_id, category, type, title, message,
+              source_type, source_id, created_at, read_at
+         from notifications
+        where user_id = $1
+        order by created_at desc, id desc
+        limit $2 offset $3`,
+      [userId, limit, offset],
+    );
+  }
+
+  /** How many of a user's notifications are unread. */
+  async countUnreadNotifications(userId) {
+    const [row] = await this.#rows(
+      `select count(*)::int as total
+         from notifications
+        where user_id = $1
+          and read_at is null`,
+      [userId],
+    );
+
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Marks one notification read. Scoped by `userId`, so nobody marks another user's; null
+   * when it is not theirs or was already read.
+   */
+  async markNotificationAsRead(notificationId, userId) {
+    const [row] = await this.#rows(
+      `update notifications
+          set read_at = current_timestamp
+        where id = $1
+          and user_id = $2
+          and read_at is null
+        returning id, user_id, read_at`,
+      [notificationId, userId],
+    );
+
+    return row ?? null;
+  }
+
+  /** Marks every unread notification of a user read, returning how many changed. */
+  async markAllNotificationsAsRead(userId) {
+    const rows = await this.#rows(
+      `update notifications
+          set read_at = current_timestamp
+        where user_id = $1
+          and read_at is null
+        returning id`,
+      [userId],
+    );
+
+    return rows.length;
+  }
+
+  /** Deletes notifications older than six months, for the scheduled cleanup. */
+  async deleteExpiredNotifications() {
+    const [row] = await this.#rows(
+      `with deleted as (
+         delete from notifications
+          where created_at < current_timestamp - interval '6 months'
+          returning id
+       )
+       select count(*)::int as total from deleted`,
+    );
+
+    return row?.total ?? 0;
+  }
+
+  /**
+   * Who hears that a stage opened: its assignee, the leads of its area and every admin, once
+   * each, with the stage and project names for the message.
+   */
+  async getStageNotificationRecipients(stageId) {
+    return this.#rows(
+      `with stage_info as (
+         select ps.id as stage_id, fp.project_id, fs.area_id, fs.title as stage_title,
+                ps.assigned_to, p.key as project_key, p.title as project_title
+           from project_stages ps
+           join flow_stages fs on fs.id = ps.flow_stage_id
+           join flow_phases fp on fp.id = fs.phase_id
+           join projects p on p.id = fp.project_id
+          where ps.id = $1
+            and p.deleted_at is null
+       ),
+       recipients as (
+         select assigned_to as user_id from stage_info where assigned_to is not null
+         union
+         select am.user_id
+           from area_members am
+           join stage_info s on s.area_id = am.area_id
+          where am.is_area_leader
+         union
+         select u.id
+           from users u
+           join roles r on r.id = u.role_id
+          where r.name = 'admin'
+       )
+       select u.id as user_id, s.stage_id, s.project_id, s.project_key, s.project_title,
+              s.stage_title
+         from recipients recipient
+         join users u on u.id = recipient.user_id
+        cross join stage_info s
+        where u.deleted_at is null
+        order by u.id`,
+      [stageId],
     );
   }
 }

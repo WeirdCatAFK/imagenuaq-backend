@@ -703,6 +703,32 @@ Table "field_keys" {
 CHECK field_keys_key_shape: (key)::text ~ \'^[a-z][a-z0-9_]{0,99}$\'::text'''
 }
 
+Table "notifications" {
+  "id" int8 [pk, not null, increment]
+  "user_id" int8 [not null]
+  "category" varchar(30) [not null, note: 'Categoria funcional: calendario, alerta o recordatorio.']
+  "type" varchar(50) [not null, default: 'generico', note: 'Tipo visual: alerta, mensaje, proyecto, birthday o generico.']
+  "title" varchar(300) [not null]
+  "message" text [not null]
+  "source_type" varchar(100)
+  "source_id" int8
+  "dedup_key" varchar(300) [note: 'Clave de deduplicacion por destinatario y situacion.']
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "read_at" timestamptz [note: 'NULL cuando la notificacion esta sin leer.']
+
+  Indexes {
+    (user_id, dedup_key) [type: btree, unique, name: "notifications_user_dedup_idx"]
+    created_at [type: btree, name: "notifications_created_at_idx"]
+    (user_id, created_at) [type: btree, name: "notifications_unread_idx"]
+    (user_id, created_at, id) [type: btree, name: "notifications_user_created_idx"]
+  }
+  Note: '''Notificaciones persistentes por usuario, con retencion de seis meses.
+CHECK notifications_read_at_check: (read_at IS NULL) OR (read_at >= created_at)
+CHECK notifications_category_check: (category)::text = ANY ((ARRAY[\'calendario\'::character varying, \'alerta\'::character varying, \'recordatorio\'::character varying])::text[])
+CHECK notifications_title_check: length(TRIM(BOTH FROM title)) > 0
+CHECK notifications_message_check: length(TRIM(BOTH FROM message)) > 0'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -798,6 +824,8 @@ Ref "logs_area_id_fkey":"areas"."id" < "logs"."area_id"
 Ref "microsoft_accounts_user_id_fkey":"users"."id" < "microsoft_accounts"."user_id"
 
 Ref "microsoft_app_updated_by_fkey":"users"."id" < "microsoft_app"."updated_by"
+
+Ref "fk_notifications_user_id_users_id":"users"."id" < "notifications"."user_id"
 
 Ref "period_closures_created_by_fkey":"users"."id" < "period_closures"."created_by" [delete: set null]
 

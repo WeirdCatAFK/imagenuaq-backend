@@ -33,11 +33,15 @@
     "@aws-sdk/lib-storage": "^3.1149.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
+    "date-fns": "^4.4.0",
+    "date-fns-tz": "^3.2.0",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "jose": "^6.2.12",
     "morgan": "^1.10.1",
+    "node-cron": "^4.6.0",
     "postgrejs": "^2.23.1",
+    "socket.io": "^4.8.4",
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
@@ -46,6 +50,7 @@
     "@dbml/core-chartdb": "npm:@dbml/core@^3.14.1",
     "eslint": "^10.11.0",
     "node-pg-migrate": "^9.0.0",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "socket.io-client": "^4.8.4"
   }
 }
