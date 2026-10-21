@@ -141,6 +141,24 @@ class Notifications {
     return { deleted };
   }
 
+  /** Envía en tiempo real las notificaciones que una consulta ya guardó, y regresa cuántas fueron. */
+  deliver(rows) {
+    for (const notification of rows.map(shapeNotification)) {
+      realtime.sendToUser(notification.userId, "notification:new", notification);
+    }
+    return { notified: rows.length };
+  }
+
+  /** Avisa a todo el equipo de los cumpleaños de hoy; una sola vez por persona y año. */
+  async notifyBirthdays(now = new Date()) {
+    return this.deliver(await query.notifyBirthdays(now.toISOString()));
+  }
+
+  /** Avisa a líderes y administradores qué proyectos cerrados borran sus archivos en los próximos `days` días. */
+  async notifyFilesExpiring(now = new Date(), days = 7) {
+    return this.deliver(await query.notifyFilesExpiring(now.toISOString(), days));
+  }
+
   /** Registra este módulo como suscriptor de eventos de dominio. Se llama una vez al iniciar la aplicación. */
   subscribe() {
     events.on("notifications", (event) => this.handle(event));

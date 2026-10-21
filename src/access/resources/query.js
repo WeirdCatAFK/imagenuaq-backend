@@ -4242,6 +4242,114 @@ class Query {
       [stageId],
     );
   }
+  /**
+   * Today's birthdays, told to every live user, in one statement: the person whose birthday it
+   * is gets a greeting, everyone else a heads-up. "Today" is `now` in Querétaro time, and a 29
+   * February birthday is told on the 28th in common years. The key is per person and year, so a
+   * second run the same day writes nothing.
+   *
+   * @param {string} now ISO timestamp
+   * @returns {Promise<object[]>} the notifications written
+   */
+  async notifyBirthdays(now) {
+    return this.#rows(
+      `with today as (
+         select ($1::timestamptz at time zone 'America/Mexico_City')::date as d
+       ),
+       born as (
+         select b.id, b.full_name
+           from users b, today
+          where b.deleted_at is null
+            and b.birthday is not null
+            and (to_char(b.birthday, 'MM-DD') = to_char(today.d, 'MM-DD')
+                 or (to_char(b.birthday, 'MM-DD') = '02-29'
+                     and to_char(today.d, 'MM-DD') = '02-28'
+                     and today.d = make_date(extract(year from today.d)::int, 3, 1) - 1))
+       )
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select r.id, 'calendario', 'birthday',
+              case when r.id = born.id then '¡Feliz cumpleaños!' else 'Cumpleaños' end,
+              case when r.id = born.id
+                   then 'Todo el equipo de Imagen UAQ te desea un feliz cumpleaños.'
+                   else 'Hoy es el cumpleaños de ' || born.full_name || '.' end,
+              'users', born.id,
+              'birthday:' || born.id || ':' || extract(year from today.d)::int
+         from born, today, users r
+        where r.deleted_at is null
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [now],
+    );
+  }
+
+  /**
+   * Warns, once per project and expiry date, that a closed or archived project's files are
+   * deleted within `days` days -- the same retention expireFiles() applies. Told to the leads of
+   * the areas in the project's flow and to every admin. A project with no live files is skipped.
+   *
+   * @param {string} now ISO timestamp
+   * @param {number} days
+   * @returns {Promise<object[]>} the notifications written
+   */
+  async notifyFilesExpiring(now, days) {
+    return this.#rows(
+      `with recursive ending as (
+         select p.id, p.key, p.folder_id,
+                coalesce(p.closed_at, p.archived_at)
+                  + (select make_interval(months => months) from file_retention) as expires_at
+           from projects p
+          where p.deleted_at is null and p.folder_id is not null
+       ),
+       soon as (
+         select * from ending
+          where expires_at between $1::timestamptz and $1::timestamptz + make_interval(days => $2::int)
+       ),
+       tree as (
+         select s.id as project_id, s.folder_id, 0 as depth from soon s
+         union all
+         select t.project_id, f.id, t.depth + 1
+           from folders f
+           join tree t on f.parent_id = t.folder_id
+          where t.depth < 100
+       ),
+       counted as (
+         select t.project_id, count(*)::int as files
+           from tree t
+           join files fi on fi.folder_id = t.folder_id and fi.deleted_at is null
+          group by t.project_id
+       ),
+       recipients as (
+         select fp.project_id, am.user_id
+           from flow_phases fp
+           join flow_stages fs on fs.phase_id = fp.id
+           join area_members am on am.area_id = fs.area_id and am.is_area_leader
+          where fp.project_id in (select project_id from counted)
+         union
+         select c.project_id, u.id
+           from counted c, users u
+           join roles r on r.id = u.role_id
+          where r.name = 'admin'
+       )
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select u.id, 'recordatorio', 'proyecto', 'Archivos por borrarse',
+              c.files || ' archivo(s) del proyecto ' || s.key || ' se borran el '
+                || to_char(s.expires_at at time zone 'America/Mexico_City', 'DD/MM/YYYY') || '.',
+              'projects', s.id,
+              'file-expiry-warning:' || s.id || ':'
+                || to_char(s.expires_at at time zone 'America/Mexico_City', 'YYYY-MM-DD')
+         from recipients rc
+         join counted c on c.project_id = rc.project_id
+         join soon s on s.id = rc.project_id
+         join users u on u.id = rc.user_id and u.deleted_at is null
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [now, days],
+    );
+  }
 }
 
 export default new Query();

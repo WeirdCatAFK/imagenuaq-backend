@@ -14,12 +14,14 @@ npm test                      # see Tests below
 ## Layout
 
 ```
-main.js                  entry point: opens the pool, starts the API, shuts both down
+main.js                  entry point: opens the pool, starts the API and the scheduler, shuts them down
 migrations/              one file per schema change; commit these
 dbml/                    one committed snapshot per migration, plus current.dbml
 scripts/genDBML.js       writes dbml/ from the live schema (npm run dbml)
 src/
   api.js                 Api class: builds the app, mounts ROUTERS under /api/, start/stop
+  scheduler.js           JOBS: the clock-driven checks, one entry per job
+  realtime/socket.js     Socket.IO: pushes each new notification to its user
   swagger.js             the OpenAPI 3.1 document, hand-written
   routes/                one file per resource, thin: parse the request, call orchestration
   access/                everything that reads or writes data
@@ -178,6 +180,27 @@ Things worth knowing before building on it:
 
 The cost of this design: **the database is now as critical as the
 bucket** — lose it and MinIO holds correctly-hashed but meaningless bytes. Back up both.
+
+## Scheduled jobs and notifications
+
+Two things create notifications. **Domain events** cover what a person did: the subscriber in
+`orchestration/notifications.js` listens on `utils/events.js`, beside the audit trail.
+**Scheduled jobs** cover what needs no one: `src/scheduler.js` holds `JOBS`, one entry per job
+with a unique `name` (grep for it), a cron `schedule` read in Querétaro time, and `run(now)`.
+`main.js` starts them and `Api` does not, so tests never run on a clock; a test calls
+`runJob(name, now)` with whatever date it needs.
+
+Two rules keep the jobs cheap and safe to repeat:
+
+- **One set-based statement per run.** A job that notifies does it in a single
+  `insert into notifications ... select ... returning *`, then pushes the returned rows over
+  Socket.IO. No query per row.
+- **Every notification a job writes carries a dedup key** naming the occurrence
+  (`birthday:<userId>:<year>`). `notifications` is unique on `(user_id, dedup_key)`, so a run
+  repeated, or caught up after a restart, writes nothing new. That is why `birthdays` can run
+  hourly.
+
+The scheduler runs inside the API process, so a second instance would run every job twice.
 
 ## Endpoints
 
