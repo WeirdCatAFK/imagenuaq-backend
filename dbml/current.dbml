@@ -421,6 +421,7 @@ Table "projects" {
   "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se hereda de la solicitud al convertir.']
   "workflow_version_id" int8 [note: 'La version de plantilla de la que salio su flujo (DATAMODEL 2.2); nulo si se armo a mano.']
   "expected_invoice_count" int4 [note: 'RF-FIN-07: declared by finance or coordination. NULL = nobody declared it.']
+  "no_finance" bool [not null, default: false, note: 'Never goes through finance: left out of every finance list, digest and closing check.']
 
   Indexes {
     (priority, created_at) [type: btree, name: "idx_projects_open"]
@@ -428,6 +429,7 @@ Table "projects" {
   }
   Note: '''RF-PRY-02. Las areas participantes se derivan de project_stages; no hay etapa actual, ver DATAMODEL 2.1.
 CHECK projects_date_range: (due_on IS NULL) OR (starts_on IS NULL) OR (due_on >= starts_on)
+CHECK projects_no_finance_without_cost: NOT (has_cost AND no_finance)
 CHECK projects_key_format: (key)::text ~ \'^[A-Z0-9][A-Z0-9_-]*$\'::text
 CHECK projects_expected_invoices_positive: expected_invoice_count >= 0
 DEFAULT key: (\'PRY-\'::text || to_char(nextval(\'projects_key_seq\'::regclass), \'FM000000\'::text))'''
