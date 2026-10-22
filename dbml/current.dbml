@@ -420,6 +420,7 @@ Table "projects" {
   "deleted_at" timestamptz
   "requester" varchar(300) [note: 'RF-SOL-07: la entidad solicitante, como cadena. Se hereda de la solicitud al convertir.']
   "workflow_version_id" int8 [note: 'La version de plantilla de la que salio su flujo (DATAMODEL 2.2); nulo si se armo a mano.']
+  "expected_invoice_count" int4 [note: 'RF-FIN-07: declared by finance or coordination. NULL = nobody declared it.']
 
   Indexes {
     (priority, created_at) [type: btree, name: "idx_projects_open"]
@@ -428,6 +429,7 @@ Table "projects" {
   Note: '''RF-PRY-02. Las areas participantes se derivan de project_stages; no hay etapa actual, ver DATAMODEL 2.1.
 CHECK projects_date_range: (due_on IS NULL) OR (starts_on IS NULL) OR (due_on >= starts_on)
 CHECK projects_key_format: (key)::text ~ \'^[A-Z0-9][A-Z0-9_-]*$\'::text
+CHECK projects_expected_invoices_positive: expected_invoice_count >= 0
 DEFAULT key: (\'PRY-\'::text || to_char(nextval(\'projects_key_seq\'::regclass), \'FM000000\'::text))'''
 }
 
@@ -677,8 +679,11 @@ Table "file_retention" {
   "months" int4 [not null, default: 6]
   "updated_by" int8
   "updated_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "finance_months" int4 [not null, default: 60]
+  "finance_keep_forever" bool [not null, default: false]
   Note: '''One row: how many months a file lives once its project is closed or archived, or since upload outside any project.
-CHECK file_retention_months_positive: months > 0'''
+CHECK file_retention_months_positive: months > 0
+CHECK file_retention_finance_months_positive: finance_months > 0'''
 }
 
 Table "period_closures" {
@@ -727,6 +732,74 @@ CHECK notifications_read_at_check: (read_at IS NULL) OR (read_at >= created_at)
 CHECK notifications_category_check: (category)::text = ANY ((ARRAY[\'calendario\'::character varying, \'alerta\'::character varying, \'recordatorio\'::character varying])::text[])
 CHECK notifications_title_check: length(TRIM(BOTH FROM title)) > 0
 CHECK notifications_message_check: length(TRIM(BOTH FROM message)) > 0'''
+}
+
+Table "providers" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(300) [not null]
+  "rfc" varchar(13)
+  "contact_name" varchar(300)
+  "email" varchar(320)
+  "phone" varchar(50)
+  "notes" text
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+  Note: 'RF-FIN-18: supplier directory. Its history is read from quotes, invoices and payments.'
+}
+
+Table "quotes" {
+  "id" int8 [pk, not null, increment]
+  "project_id" int8 [not null]
+  "provider_id" int8
+  "entity" varchar(300) [note: 'Free text, like projects.requester (DATAMODEL §2.11), when the quote is not from a provider.']
+  "amount" numeric(12,2) [not null]
+  "description" text
+  "file_id" int8
+  "status" varchar(20) [not null, default: 'issued']
+  "in_review_at" timestamptz
+  "decided_at" timestamptz
+  "decided_by" int8
+  "decision_comment" text
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    project_id [type: btree, name: "idx_quotes_project"]
+  }
+  Note: '''RF-FIN-01 to RF-FIN-04: visible from the moment it is issued, not only once approved.
+CHECK quotes_decision_complete: ((status)::text = ANY ((ARRAY[\'approved\'::character varying, \'rejected\'::character varying])::text[])) = (decided_at IS NOT NULL)
+CHECK quotes_status_valid: (status)::text = ANY ((ARRAY[\'issued\'::character varying, \'in_review\'::character varying, \'approved\'::character varying, \'rejected\'::character varying])::text[])
+CHECK quotes_amount_positive: amount >= (0)::numeric'''
+}
+
+Table "invoices" {
+  "id" int8 [pk, not null, increment]
+  "project_id" int8 [not null]
+  "quote_id" int8
+  "provider_id" int8
+  "amount" numeric(12,2) [not null]
+  "material" text
+  "invoice_folio" varchar(100)
+  "fiscal_folio" varchar(36) [note: 'CFDI UUID. Unique among live invoices, so the same invoice is not uploaded twice.']
+  "destination" varchar(300)
+  "file_id" int8
+  "status" varchar(20) [not null, default: 'uploaded']
+  "payment_folio" varchar(100)
+  "sent_at" timestamptz
+  "in_payment_at" timestamptz
+  "paid_at" timestamptz
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    project_id [type: btree, name: "idx_invoices_project"]
+  }
+  Note: '''RF-FIN-05 to RF-FIN-10: grouped by project, not by area. Only the amount is required.
+CHECK invoices_status_valid: (status)::text = ANY ((ARRAY[\'uploaded\'::character varying, \'sent\'::character varying, \'in_payment\'::character varying, \'paid\'::character varying])::text[])
+CHECK invoices_amount_positive: amount >= (0)::numeric'''
 }
 
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
@@ -811,6 +884,16 @@ Ref "folders_owner_id_fkey":"users"."id" < "folders"."owner_id"
 
 Ref "folders_parent_id_fkey":"folders"."id" < "folders"."parent_id"
 
+Ref "invoices_created_by_fkey":"users"."id" < "invoices"."created_by" [delete: set null]
+
+Ref "invoices_file_id_fkey":"files"."id" < "invoices"."file_id"
+
+Ref "invoices_project_id_fkey":"projects"."id" < "invoices"."project_id"
+
+Ref "invoices_provider_id_fkey":"providers"."id" < "invoices"."provider_id"
+
+Ref "invoices_quote_id_fkey":"quotes"."id" < "invoices"."quote_id"
+
 Ref "leave_balances_absence_type_id_fkey":"absence_types"."id" < "leave_balances"."absence_type_id"
 
 Ref "leave_balances_user_id_fkey":"users"."id" < "leave_balances"."user_id"
@@ -854,6 +937,18 @@ Ref "projects_schema_version_id_fkey":"schema_versions"."id" < "projects"."schem
 Ref "projects_status_id_fkey":"statuses"."id" < "projects"."status_id"
 
 Ref "projects_workflow_version_id_fkey":"workflow_versions"."id" < "projects"."workflow_version_id"
+
+Ref "providers_created_by_fkey":"users"."id" < "providers"."created_by" [delete: set null]
+
+Ref "quotes_created_by_fkey":"users"."id" < "quotes"."created_by" [delete: set null]
+
+Ref "quotes_decided_by_fkey":"users"."id" < "quotes"."decided_by" [delete: set null]
+
+Ref "quotes_file_id_fkey":"files"."id" < "quotes"."file_id"
+
+Ref "quotes_project_id_fkey":"projects"."id" < "quotes"."project_id"
+
+Ref "quotes_provider_id_fkey":"providers"."id" < "quotes"."provider_id"
 
 Ref "requests_area_id_fkey":"areas"."id" < "requests"."area_id"
 
