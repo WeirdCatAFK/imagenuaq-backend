@@ -35,7 +35,7 @@ router.get("/retention", async (_req, res) => {
 });
 
 router.put("/retention", requirePermission("document.manage"), async (req, res) => {
-  res.json({ retention: await documents.setRetention(req.body?.months) });
+  res.json({ retention: await documents.setRetention(req.body ?? {}) });
 });
 
 router.get("/:id", async (req, res) => {

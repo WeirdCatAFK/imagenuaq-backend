@@ -294,6 +294,14 @@ export function buildOpenApiDocument() {
           '(activated, assigned, delivered, signed off) and scheduled jobs (birthdays, files about to ' +
           'expire). Each new one is also pushed live over Socket.IO as `notification:new`.',
       },
+      {
+        name: 'finance',
+        description:
+          'Quotes, invoices, providers and what each project is missing (RF-FIN-01 to RF-FIN-10, ' +
+          'RF-FIN-18; DATAMODEL §2.20). Areas upload with `project.write`; finance decides quotes and ' +
+          'edits providers with `finance.write`, and reads across projects with `finance.read`. Little ' +
+          'is required: finance reads the gaps instead. Amounts travel as strings with two decimals.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -1555,6 +1563,11 @@ export function buildOpenApiDocument() {
             'filter and every later reader see it with no special case.',
           properties: {
             kind: { type: 'string', enum: ['quote', 'invoice'] },
+            count: {
+              type: ['integer', 'null'],
+              minimum: 0,
+              description: 'For an invoice: how many the project should have (RF-FIN-07). null clears it.',
+            },
             needed: {
               type: 'boolean',
               default: true,
@@ -2060,10 +2073,93 @@ export function buildOpenApiDocument() {
           type: 'object',
           properties: {
             months: { type: 'integer', minimum: 1, default: 6 },
+            financeMonths: {
+              type: 'integer',
+              minimum: 1,
+              default: 60,
+              description: 'How long a file a quote or invoice points at lives after its project ends.',
+            },
+            financeKeepForever: { type: 'boolean', default: false, description: 'Finance files never expire.' },
             updatedBy: { type: ['integer', 'null'], readOnly: true },
             updatedAt: { type: 'string', format: 'date-time', readOnly: true },
           },
-          required: ['months'],
+          description: 'On PUT, every field is optional; an omitted one keeps its value.',
+        },
+        Provider: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            name: { type: 'string', maxLength: 300, description: 'Unique, case-insensitive, among live providers.' },
+            rfc: { type: ['string', 'null'], maxLength: 13 },
+            contactName: { type: ['string', 'null'] },
+            email: { type: ['string', 'null'] },
+            phone: { type: ['string', 'null'] },
+            notes: { type: ['string', 'null'] },
+            createdAt: { type: 'string', format: 'date-time', readOnly: true },
+          },
+          required: ['name'],
+        },
+        Quote: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            projectId: { type: 'integer', readOnly: true },
+            projectKey: { type: ['string', 'null'], readOnly: true },
+            providerId: { type: ['integer', 'null'] },
+            providerName: { type: ['string', 'null'], readOnly: true },
+            entity: { type: ['string', 'null'], description: 'Free text, when the quote is not from a provider.' },
+            amount: { type: 'string', example: '1250.50' },
+            description: { type: ['string', 'null'] },
+            fileId: { type: ['integer', 'null'], description: "A live file in the project's folder." },
+            status: { type: 'string', enum: ['issued', 'in_review', 'approved', 'rejected'], readOnly: true },
+            inReviewAt: { type: ['string', 'null'], format: 'date-time', readOnly: true },
+            decidedAt: { type: ['string', 'null'], format: 'date-time', readOnly: true },
+            decidedBy: { type: ['integer', 'null'], readOnly: true },
+            decisionComment: { type: ['string', 'null'], readOnly: true },
+          },
+          required: ['amount'],
+        },
+        Invoice: {
+          type: 'object',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            projectId: { type: 'integer', readOnly: true },
+            projectKey: { type: ['string', 'null'], readOnly: true },
+            quoteId: { type: ['integer', 'null'], description: 'A quote of the same project.' },
+            providerId: { type: ['integer', 'null'] },
+            providerName: { type: ['string', 'null'], readOnly: true },
+            amount: { type: 'string', example: '300.00' },
+            material: { type: ['string', 'null'] },
+            invoiceFolio: { type: ['string', 'null'] },
+            fiscalFolio: { type: ['string', 'null'], description: 'CFDI UUID; unique among live invoices.' },
+            destination: { type: ['string', 'null'] },
+            fileId: { type: ['integer', 'null'] },
+            status: { type: 'string', enum: ['uploaded', 'sent', 'in_payment', 'paid'], readOnly: true },
+            paymentFolio: { type: ['string', 'null'], readOnly: true },
+          },
+          required: ['amount'],
+        },
+        FinanceStanding: {
+          type: 'object',
+          properties: {
+            projectId: { type: 'integer' },
+            key: { type: 'string' },
+            title: { type: 'string' },
+            hasCost: { type: 'boolean' },
+            closedAt: { type: ['string', 'null'], format: 'date-time' },
+            expectedInvoices: { type: ['integer', 'null'] },
+            uploadedInvoices: { type: 'integer' },
+            missingInvoices: { type: 'integer' },
+            invoiced: { type: 'string' },
+            quotes: { type: 'integer' },
+            flags: {
+              type: 'array',
+              items: {
+                type: 'string',
+                enum: ['missing_invoices', 'costed_no_quote', 'delivered_no_invoice', 'no_finance_records'],
+              },
+            },
+          },
         },
         SharedFolder: {
           type: 'object',
@@ -4116,10 +4212,12 @@ export function buildOpenApiDocument() {
           summary: 'Close a project',
           description:
             'Needs project.write. Refused while a stage is still active or waiting on a third ' +
-            "party -- RF-EST-05's question about what is pending, in the cheapest form it has.",
+            "party -- RF-EST-05's question about what is pending, in the cheapest form it has. " +
+            'Missing finance records never refuse it (RF-FIN-08): they come back as `financeGaps`, ' +
+            'and finance is notified unless the only gap is `no_finance_records`.',
           parameters: [pathId('id', 'projects.id')],
           responses: {
-            200: wrapped('The closed project.', 'project', 'Project'),
+            200: { description: '`{ project, financeGaps }`: the closed project and its finance flags.' },
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such project.', 'Project not found.'),
@@ -4971,6 +5069,297 @@ export function buildOpenApiDocument() {
             200: { description: '`{ notification: { id, userId, readAt } }`.' },
             401: UNAUTHORIZED,
             404: { description: "Not the caller's, or already read." },
+          },
+        },
+      },
+      '/api/finance/projects': {
+        get: {
+          tags: ['finance'],
+          summary: 'Projects with their finance standing, most missing invoices first',
+          description: 'Needs `finance.read` (RF-EST-08, RF-FIN-07).',
+          parameters: [
+            {
+              name: 'flag',
+              in: 'query',
+              schema: {
+                type: 'string',
+                enum: ['missing_invoices', 'costed_no_quote', 'delivered_no_invoice', 'no_finance_records'],
+              },
+            },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0, default: 0 } },
+          ],
+          responses: {
+            200: wrapped('The projects.', 'projects', 'FinanceStanding', true),
+            400: errorResponse('An unknown flag.', 'flag must be one of: ...'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/finance/projects/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: "One project's standing, with its quotes and invoices",
+          description: 'Needs `project.read` or `finance.read`.',
+          parameters: [pathId('id', 'projects.id')],
+          responses: {
+            200: { description: '`{ finance: { ...FinanceStanding, quotes: [Quote], invoices: [Invoice] } }`.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/finance/providers': {
+        get: {
+          tags: ['finance'],
+          summary: 'Providers, by a name fragment',
+          parameters: [{ name: 'q', in: 'query', schema: { type: 'string' } }],
+          responses: {
+            200: wrapped('The providers.', 'providers', 'Provider', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['finance'],
+          summary: 'Register a provider',
+          description: 'Needs `project.write` or `finance.write`, so an upload never stalls on a missing name.',
+          requestBody: jsonBody('Provider'),
+          responses: {
+            201: wrapped('The provider.', 'provider', 'Provider'),
+            400: errorResponse('A bad field.', 'rfc is not a valid RFC.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse('The name is taken.', 'A provider with that name already exists.'),
+          },
+        },
+      },
+      '/api/finance/providers/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: 'One provider',
+          parameters: [pathId('id', 'providers.id')],
+          responses: {
+            200: wrapped('The provider.', 'provider', 'Provider'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Provider not found.'),
+          },
+        },
+        patch: {
+          tags: ['finance'],
+          summary: 'Correct a provider',
+          description: 'Needs `finance.write`. Send only what changes.',
+          parameters: [pathId('id', 'providers.id')],
+          requestBody: jsonBody('Provider'),
+          responses: {
+            200: wrapped('The provider.', 'provider', 'Provider'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Provider not found.'),
+            409: errorResponse('The name is taken.', 'A provider with that name already exists.'),
+          },
+        },
+        delete: {
+          tags: ['finance'],
+          summary: 'Delete a provider',
+          description: 'Needs `finance.write`. A soft delete: quotes and invoices keep pointing at it.',
+          parameters: [pathId('id', 'providers.id')],
+          responses: {
+            200: wrapped('The deleted provider.', 'provider', 'Provider'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Provider not found.'),
+          },
+        },
+      },
+      '/api/finance/quotes': {
+        get: {
+          tags: ['finance'],
+          summary: 'Quotes across projects, newest first',
+          description: 'Needs `finance.read` (RF-FIN-04).',
+          parameters: [
+            { name: 'status', in: 'query', schema: { type: 'string', enum: ['issued', 'in_review', 'approved', 'rejected'] } },
+            { name: 'projectId', in: 'query', schema: { type: 'integer' } },
+          ],
+          responses: {
+            200: wrapped('The quotes.', 'quotes', 'Quote', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/finance/projects/{id}/quotes': {
+        post: {
+          tags: ['finance'],
+          summary: 'Record a quote on a project',
+          description:
+            "Needs `project.write` or `finance.write`. Starts `issued`. `fileId` must be a live file in the project's folder.",
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('Quote'),
+          responses: {
+            201: wrapped('The quote.', 'quote', 'Quote'),
+            400: errorResponse(
+              'A bad amount, an unknown provider or a file outside the project.',
+              "fileId is not a file in this project's folder.",
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+          },
+        },
+      },
+      '/api/finance/quotes/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: 'One quote',
+          parameters: [pathId('id', 'quotes.id')],
+          responses: {
+            200: wrapped('The quote.', 'quote', 'Quote'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Quote not found.'),
+          },
+        },
+        patch: {
+          tags: ['finance'],
+          summary: 'Correct a quote not yet decided',
+          description: 'Needs `project.write` or `finance.write`. Send only what changes.',
+          parameters: [pathId('id', 'quotes.id')],
+          requestBody: jsonBody('Quote'),
+          responses: {
+            200: wrapped('The quote.', 'quote', 'Quote'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Quote not found.'),
+            409: errorResponse('Already decided.', 'A decided quote cannot be changed.'),
+          },
+        },
+        delete: {
+          tags: ['finance'],
+          summary: 'Delete a quote not yet decided and no invoice points at',
+          description: 'Needs `project.write` or `finance.write`.',
+          parameters: [pathId('id', 'quotes.id')],
+          responses: {
+            200: wrapped('The deleted quote.', 'quote', 'Quote'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Quote not found.'),
+            409: errorResponse(
+              'Decided, or an invoice points at it.',
+              'A decided quote, or one an invoice points at, cannot be deleted.',
+            ),
+          },
+        },
+      },
+      '/api/finance/quotes/{id}/decision': {
+        post: {
+          tags: ['finance'],
+          summary: 'Move a quote to review, approve or reject it',
+          description:
+            'Needs `finance.write` (RF-FIN-03). `issued` → `in_review` → `approved`/`rejected`; a decided quote stays.',
+          parameters: [pathId('id', 'quotes.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    decision: { type: 'string', enum: ['in_review', 'approved', 'rejected'] },
+                    comment: { type: 'string' },
+                  },
+                  required: ['decision'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The quote.', 'quote', 'Quote'),
+            400: errorResponse('No decision.', 'decision is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Quote not found.'),
+            409: errorResponse('Not allowed from its status.', 'A quote that is approved cannot move to rejected.'),
+          },
+        },
+      },
+      '/api/finance/invoices': {
+        get: {
+          tags: ['finance'],
+          summary: 'Invoices across projects, newest first',
+          description: 'Needs `finance.read` (RF-FIN-09).',
+          parameters: [
+            { name: 'status', in: 'query', schema: { type: 'string', enum: ['uploaded', 'sent', 'in_payment', 'paid'] } },
+            { name: 'projectId', in: 'query', schema: { type: 'integer' } },
+          ],
+          responses: {
+            200: wrapped('The invoices.', 'invoices', 'Invoice', true),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+      },
+      '/api/finance/projects/{id}/invoices': {
+        post: {
+          tags: ['finance'],
+          summary: 'Upload an invoice to a project',
+          description:
+            'Needs `project.write` or `finance.write`. Only `amount` is required (RF-FIN-06). Starts `uploaded`.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('Invoice'),
+          responses: {
+            201: wrapped('The invoice.', 'invoice', 'Invoice'),
+            400: errorResponse('A bad field, or a reference outside the project.', 'quoteId is not a quote of this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse(
+              'The fiscal folio is already uploaded.',
+              'An invoice with that fiscal folio is already uploaded.',
+            ),
+          },
+        },
+      },
+      '/api/finance/invoices/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: 'One invoice',
+          parameters: [pathId('id', 'invoices.id')],
+          responses: {
+            200: wrapped('The invoice.', 'invoice', 'Invoice'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Invoice not found.'),
+          },
+        },
+        patch: {
+          tags: ['finance'],
+          summary: 'Correct an invoice not yet sent',
+          description: 'Needs `project.write` or `finance.write`. Send only what changes.',
+          parameters: [pathId('id', 'invoices.id')],
+          requestBody: jsonBody('Invoice'),
+          responses: {
+            200: wrapped('The invoice.', 'invoice', 'Invoice'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Invoice not found.'),
+            409: errorResponse('Already sent, or the fiscal folio is taken.', 'An invoice already sent cannot be changed.'),
+          },
+        },
+        delete: {
+          tags: ['finance'],
+          summary: 'Delete an invoice not yet sent',
+          description: 'Needs `project.write` or `finance.write`.',
+          parameters: [pathId('id', 'invoices.id')],
+          responses: {
+            200: wrapped('The deleted invoice.', 'invoice', 'Invoice'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Invoice not found.'),
+            409: errorResponse('Already sent.', 'An invoice already sent cannot be deleted.'),
           },
         },
       },

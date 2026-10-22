@@ -21,7 +21,8 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | MIG                               | `microsoft_app`, `microsoft_accounts`, `sheets`, `sheet_imports`                                                                                                                                  | Completo: registro de libros por`microsoft-accounts` y `microsoft-app`, mapeo de columnas e importación por `sheet-imports` (§2.10, §2.16) |
 | FLW                               | `workflows`, `workflow_versions`, `flow_phases`, `flow_stages`, `project_stages`, `approvals`, `project_field_values`                                                                                                                                                             | Plantillas de flujo por fases con API (`/api/workflows`, §2.1, §2.17); el visto bueno avanza de fase (§2.12). Falta que un proyecto parta de una plantilla (§6) |
 | TSK                               | —                                                                                                                                                                                                                                       | Sin modelar; cuelga de`projects` y `project_stages` (§6)                          |
-| FIN, INV, IMP, RPT, EXT           | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
+| FIN                               | `providers`, `quotes`, `invoices`, `finance_files` (vista) | Primera mitad de I9 con API (`/api/finance`, §2.20); faltan oficios, pagos y recibos referenciados |
+| INV, IMP, RPT, EXT                | —                                                                                                                                                                                                                                       | Sin modelar; §4 describe los puntos de enganche                                     |
 
 La migración `projects-spine` aterrizó la columna vertebral del MVP: once tablas que
 alcanzan para que una solicitud entre con folio, caiga en la bandeja de un área, se
@@ -571,28 +572,34 @@ algún día, se agrega a `approvals`, no se vuelve a copiar la definición por i
 Son `jsonb` y no una tabla puente por lo mismo que los campos de un formato: se leen de una etapa
 a la vez y nada busca entre etapas distintas.
 
-### 2.15 Factura y cotización son tipos de campo, no tablas
+### 2.15 El folio de una factura en un formato es un tipo de campo; la factura es un registro
 
 `factura` y `cotizacion` entran a `data_types` como `string` con `properties.finance = true`.
-Guardan el folio o la referencia que genera el sistema financiero de la UAQ, que `RF-MIG-04` dice
-que se captura a mano porque este sistema no lo sustituye. Cuando ARC tenga carga de archivos, el
-mismo campo acepta el PDF (`RF-ARC-05`) sin mover ningún dato.
-
+Guardan el folio o la referencia que genera el sistema financiero de la UAQ cuando un formato lo
+captura, que `RF-MIG-04` dice que se escribe a mano porque este sistema no lo sustituye.
 `properties.finance` es cómo el resto del sistema sabe que un campo es de finanzas sin mantener
 una lista aparte, igual que `properties.format` dice que un `email` se valida como dirección.
 
-**Finanzas ve el tablero y puede pedir, sin poder editar.** El rol `finance` recibe
-`project.read` —el tablero completo, que puede filtrar por el valor de un campo— y un permiso
-propio, `finance.request`, con una sola ruta:
-`POST /api/projects/:id/finance-request {kind, needed, note}`. Esa ruta solo escribe dos claves
+Esta sección decía antes que factura y cotización *eran* tipos de campo y no tablas. Eso alcanzaba
+para un folio, pero no para contar cuántas facturas tiene un proyecto (`RF-FIN-07`), llevar el
+estatus de cada una (`RF-FIN-03`, `RF-FIN-10`) ni su monto y su proveedor (`RF-FIN-06`). Desde
+`finance-quotes-invoices` son registros con tabla propia (§2.20); el tipo de campo se queda para
+el folio dentro de un formato.
+
+**Finanzas ve el tablero y puede pedir.** El rol `finance` recibe `project.read` —el tablero
+completo— y `finance.request`, con una sola ruta:
+`POST /api/projects/:id/finance-request {kind, needed, note, count}`. Escribe dos claves
 reservadas, `requiere_factura` y `requiere_cotizacion`, como valores ordinarios del proyecto, así
-que el filtro del tablero y cualquier lector posterior las ven sin caso especial. Retirar el
-pedido borra la fila en vez de escribir «no»: un «no» guardado es indistinguible de un proyecto
-que nadie miró.
+que el filtro del tablero las ve sin caso especial, y con `count` declara cuántas facturas espera
+el proyecto (`projects.expected_invoice_count`). Retirar el pedido borra la fila en vez de escribir
+«no» —un «no» guardado es indistinguible de un proyecto que nadie miró— y borra la cuenta
+declarada.
 
 No se le da `project.write` porque ese permiso alcanza para etapas, vistos buenos y cierre, que
-no es lo que finanzas necesita (`RF-USR-05`: leer y escribir son independientes). El código es
-`finance.request` y no `project.request` porque en este dominio «request» ya es la solicitud.
+no es lo que finanzas necesita (`RF-USR-05`: leer y escribir son independientes). Su trámite
+propio —decidir cotizaciones, proveedores, después oficios y pagos— es `finance.write` (§2.20). El
+código es `finance.request` y no `project.request` porque en este dominio «request» ya es la
+solicitud.
 
 ### 2.16 El mapeo de columnas es un documento, y la corrida deja constancia
 
@@ -831,6 +838,54 @@ con una exclusión que impide que dos se traslapen. Un proyecto con costo cuyas 
 ventana sale con `inClosure` en el tablero, en su ficha y en el calendario; nada se rechaza,
 porque la coordinación decide qué se arrastra al siguiente periodo (`carried_over`).
 
+### 2.20 Finanzas detecta lo que falta; el sistema no lo exige
+
+El problema que repiten las entrevistas 005, 007 y 008 no es dónde guardar una factura, sino que
+las áreas no la suben: de cinco facturas llegan tres y nadie lo nota hasta después. Un sistema que
+rechace lo incompleto solo empuja ese trabajo de vuelta al correo. `finance-quotes-invoices` toma
+el camino contrario: pide poco y le enseña a finanzas lo que falta.
+
+**Casi todo es nulable.** Una factura con solo el monto ya cuenta (`RF-FIN-06` lista lo deseable,
+no lo obligatorio); una cotización también. El folio fiscal (UUID del CFDI) es único entre las
+facturas vivas, que es lo único que se exige porque evita contar dos veces la misma.
+
+**El estado financiero de un proyecto es una consulta**, `GET /api/finance/projects`, ordenada por
+cuántas facturas faltan. Cada proyecto trae sus banderas:
+
+| Bandera | Cuándo |
+| --- | --- |
+| `missing_invoices` | Se declararon más facturas (`expected_invoice_count`) de las que hay |
+| `costed_no_quote` | Con costo y sin cotización vigente (ninguna, o todas rechazadas) |
+| `delivered_no_invoice` | Con costo, con alguna etapa entregada o el proyecto cerrado, y sin facturas |
+| `no_finance_records` | Sin cotizaciones ni facturas |
+
+Los oficios sin respuesta, las facturas que no van en ningún oficio y los pagos sin folio de
+rastreo se suman a la lista con la segunda mitad de I9.
+
+**Cerrar nunca espera a finanzas** (`RF-FIN-08`). El cierre devuelve `financeGaps` y emite
+`project_closed`; si hay algo más que `no_finance_records` —que solo, en un proyecto sin costo, es
+lo normal— avisa a quien tenga `finance.read`. El proyecto sigue saliendo en la lista hasta que
+se resuelva. Bloquear el cierre habría dejado proyectos que nunca se pueden cerrar, justo porque
+la carga no llega.
+
+**Quién escribe qué.** Las áreas suben cotizaciones y facturas con `project.write`; finanzas, con
+`finance.write`, decide las cotizaciones (`issued` → `in_review` → `approved`/`rejected`) y
+corrige el directorio de proveedores. Un área puede registrar un proveedor para no detener una
+carga. Una cotización decidida y una factura ya enviada no se editan ni se borran.
+
+**El estatus es una lista fija con fecha por paso**, no el catálogo de `statuses`: las banderas y
+los avisos dependen de sus códigos, y `RF-FIN-12` pide la fecha de cada cambio.
+
+**La bitácora va en la misma sentencia** (§5.6). Cada escritura de finanzas es un CTE que inserta
+su renglón de `logs` junto con el cambio (`loggedChange` en `query.js`), sin pasar por el
+despachador de eventos. Una acción que falte en el catálogo hace fallar la escritura completa.
+
+**Los archivos de finanzas no se van con el semestre.** Un archivo al que apunta una cotización o
+una factura (`finance_files`) vive `file_retention.finance_months` (60 por omisión) desde el
+cierre del proyecto, o para siempre con `finance_keep_forever`. Es la decisión que el plan de
+desarrollo dejaba pendiente para I9: la cotización y la evidencia de aprobación son justo lo que
+finanzas necesita señalar después.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -867,11 +922,19 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-01                       | `projects.status_id` → `statuses`                                                                              | ✔ |
 | RF-EST-02                       | `statuses.area_id`; el catálogo global viene sembrado, los de área los pone coordinación por`/api/statuses`   | ✔ |
 | RF-EST-03, RF-EST-04, RF-EST-09 | `status_since`; sin `alert_rules`                                                                               | ◑ `status_since` sí; `alert_rules` descartado por ahora (2026-10-21) |
-| RF-EST-05                       | Sin tabla: regla de orquestación sobre`expected_invoice_count`, las etapas sin `approvals` y la evidencia      | ◑ |
+| RF-EST-05                       | Sin tabla: el cierre rechaza etapas abiertas y devuelve `financeGaps` (§2.20); falta la evidencia      | ◑ |
 | RF-EST-06                       | `notifications`: eventos de etapa (`HANDLERS` en `notifications.js`) y trabajos programados (`src/scheduler.js`) | ✔ |
 | RF-EST-10                       | `notifications`                                                                                                   | ✗ espera las rutas de AUS |
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
 | RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13) + `sheets.column_map` y `sheet_imports` (§2.16) | ✔ |
+| RF-FIN-01 … RF-FIN-04          | `quotes` con estatus propio desde su emisión; `GET /api/finance/quotes` (§2.20)                               | ✔ |
+| RF-FIN-05, RF-FIN-06, RF-FIN-09 | `invoices` por proyecto; solo el monto es obligatorio; `GET /api/finance/invoices` (§2.20)                     | ✔ |
+| RF-FIN-07, RF-FIN-08            | `projects.expected_invoice_count` + `GET /api/finance/projects` con sus banderas; el cierre avisa, no bloquea (§2.20) | ✔ |
+| RF-FIN-10                       | `invoices.status` con fecha por paso                                                                            | ◑ `sent` y lo que sigue llegan con los oficios |
+| RF-FIN-11 … RF-FIN-16           | `oficios`, `payments`, `receipts`                                                                              | ✗ segunda mitad de I9 |
+| RF-FIN-17                       | `invoices.quote_id`; el cobro, con los oficios                                                                  | ◑ |
+| RF-FIN-18                       | `providers`; el historial es consulta sobre cotizaciones, facturas y pagos                                      | ◑ falta la consulta de historial |
+| RF-USR-08                       | `finance.read` (cruzado, solo lectura) + `finance.write` para el trámite (§2.15, §2.20)                       | ✔ |
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
 | RF-CAL-02                       | `events` + `event_participants`; la etapa escribe el suyo por disparador (§2.19)                              | ✔ |
 | RF-CAL-03                       | `period_closures` + `projects.has_cost`; marca, no bloquea (§2.19)                                            | ✔ |
@@ -892,12 +955,10 @@ fechas y duración pero nunca el motivo.
 Lo que la columna vertebral deja preparado, para no rediseñarla al llegar a ellos. Desde
 `projects-spine`, los enganches marcados existen de verdad y no son promesas:
 
-- **FIN** — `projects.requester` como destinatario del cobro y `project_field_values`
-  (existe) para el número de orden que `RF-IMP-08` pasa a facturación imprenta. Faltan
-  `projects.expected_invoice_count`, `providers`, `quotes`, `invoices`, `oficios`,
-  `payments`. Ojo con §5.6: el despachador de eventos deja que una escritura tenga éxito
-  sin su fila de bitácora, y para FIN la forma que no puede perder una es un CTE que
-  escriba en `logs` en la misma sentencia que el cambio.
+- **FIN** — `providers`, `quotes`, `invoices` y `projects.expected_invoice_count` existen
+  (§2.20), con la bitácora en la misma sentencia. Faltan `oficios`, `payments` y los recibos
+  referenciados; `projects.requester` es el destinatario del cobro y `project_field_values`
+  lleva el número de orden que `RF-IMP-08` pasa a facturación imprenta.
 - **INV** — independiente del proyecto salvo por préstamos ligados a uno. Faltan
   `inventory_items`, `inventory_loans`, `inventory_movements`, y para `RF-INV-07` las
   licencias compartidas con su bitácora de sesiones.
@@ -1741,6 +1802,8 @@ cualquier carpeta (`RF-ARC-02`).
 | --- | --- | --- | --- | --- |
 | `id` | boolean | no | `true` | Llave primaria; `CHECK (id)` deja una sola fila |
 | `months` | integer | no | `6` | Meses de vida; mayor que cero |
+| `finance_months` | integer | no | `60` | Meses de vida de un archivo al que apunta un registro de finanzas (`finance_files`), desde el cierre del proyecto (§2.20) |
+| `finance_keep_forever` | boolean | no | `false` | Los archivos de finanzas no vencen nunca |
 | `updated_by` | bigint | sí | | Quién lo cambió → `users.id` |
 | `updated_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Último cambio |
 
@@ -1838,6 +1901,7 @@ guardan, y no hay etapa actual: eso es el conjunto de `project_stages` activas (
 | `status_since` | timestamptz | no | `CURRENT_TIMESTAMP` | Desde cuándo. Desnormalizado para que la alerta de `RF-EST-03`/`RF-EST-04` no recorra la bitácora |
 | `priority` | int | no | `0` | Prioridad manual por urgencia (`RF-FLW-08`) |
 | `has_cost` | boolean | no | `false` | Con costo o sin costo; el tratamiento financiero difiere (`RF-PRY-07`) |
+| `expected_invoice_count` | integer | sí | | Cuántas facturas debe tener (`RF-FIN-07`), declarado por finanzas o coordinación. Nulo: nadie lo declaró |
 | `carried_over` | boolean | no | `false` | Rezagado de un periodo anterior (`RF-PRY-08`). El `period_id` espera a que exista `periods` |
 | `starts_on` | date | sí | | Inicio previsto |
 | `due_on` | date | sí | | Compromiso de entrega. No puede ser anterior a `starts_on` |
@@ -2013,6 +2077,70 @@ pregunta después, cuando la respuesta HTTP ya se cerró.
 | `rows_failed` | int | no | `0` | No se pudieron leer; ninguna se insertó a medias |
 | `rows_flagged` | int | no | `0` | Entraron, pero parecen corrección de una fila anterior |
 | `errors` | jsonb | no | `'[]'` | `[{index, message}]`, el renglón y por qué. CHECK de arreglo |
+
+### 7.7 FIN — cotizaciones, facturas y proveedores
+
+Los montos son `numeric(12,2)` con `CHECK >= 0` y salen de la API como cadena, para no perder
+centavos en un flotante. Las tres tablas se borran de forma lógica (`deleted_at`).
+
+#### `providers`
+
+Directorio de proveedores (`RF-FIN-18`). El nombre es único, sin distinguir mayúsculas, entre los
+vivos.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(300) | no | | Razón social o nombre comercial |
+| `rfc` | varchar(13) | sí | | RFC, en mayúsculas |
+| `contact_name`, `email`, `phone`, `notes` | | sí | | Contacto |
+| `created_by` | bigint | sí | | → `users.id` |
+| `created_at`, `deleted_at` | timestamptz | | | Alta y baja lógica |
+
+#### `quotes`
+
+Cotización de un proyecto, visible desde que se emite (`RF-FIN-01` a `RF-FIN-04`).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `project_id` | bigint | no | | → `projects.id` |
+| `provider_id` | bigint | sí | | → `providers.id` |
+| `entity` | varchar(300) | sí | | Entidad, como cadena (§2.11), cuando no es de un proveedor |
+| `amount` | numeric(12,2) | no | | Monto |
+| `description` | text | sí | | Concepto |
+| `file_id` | bigint | sí | | Archivo en la carpeta del proyecto → `files.id` |
+| `status` | varchar(20) | no | `issued` | `issued`, `in_review`, `approved`, `rejected` |
+| `in_review_at`, `decided_at` | timestamptz | sí | | Fecha de cada paso; `decided_at` existe si y solo si está aprobada o rechazada |
+| `decided_by`, `decision_comment` | | sí | | Quién decidió y por qué |
+| `created_by`, `created_at`, `deleted_at` | | | | Alta y baja lógica |
+
+#### `invoices`
+
+Factura de un proyecto, agrupada por proyecto y no por área (`RF-FIN-05` a `RF-FIN-10`). Solo el
+monto es obligatorio (§2.20).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `project_id` | bigint | no | | → `projects.id` |
+| `quote_id` | bigint | sí | | Cotización que la respalda, del mismo proyecto (`RF-FIN-17`) → `quotes.id` |
+| `provider_id` | bigint | sí | | → `providers.id` |
+| `amount` | numeric(12,2) | no | | Monto |
+| `material` | text | sí | | Material adquirido |
+| `invoice_folio` | varchar(100) | sí | | Folio de la factura |
+| `fiscal_folio` | varchar(36) | sí | | UUID del CFDI, en mayúsculas; único entre las vivas |
+| `destination` | varchar(300) | sí | | Entidad destino, como cadena |
+| `file_id` | bigint | sí | | Archivo en la carpeta del proyecto → `files.id` |
+| `status` | varchar(20) | no | `uploaded` | `uploaded`, `sent`, `in_payment`, `paid` |
+| `payment_folio` | varchar(100) | sí | | Folio que confirma que pasó a pago |
+| `sent_at`, `in_payment_at`, `paid_at` | timestamptz | sí | | Fecha de cada paso |
+| `created_by`, `created_at`, `deleted_at` | | | | Alta y baja lógica |
+
+#### `finance_files` (vista)
+
+Los archivos a los que apunta un registro vivo de finanzas; el barrido de vencimiento les aplica
+`finance_months` en vez de `months`. La migración de cada tabla de finanzas nueva la redefine.
 
 ## 8. El recorrido de una solicitud, paso por paso
 

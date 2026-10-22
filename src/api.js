@@ -24,6 +24,7 @@ import documentsRouter from './routes/documents.js';
 import sharedRouter from './routes/shared.js';
 import tasksRouter from './routes/tasks.js';
 import calendarRouter from './routes/calendar.js';
+import financeRouter from './routes/finance.js';
 import docsRouter from './routes/docs.js';
 import notificationsRouter from './routes/notifications.js';
 
@@ -63,6 +64,7 @@ export const ROUTERS = {
   shared: sharedRouter,
   tasks: tasksRouter,
   calendar: calendarRouter,
+  finance: financeRouter,
   docs: docsRouter,
 
 };

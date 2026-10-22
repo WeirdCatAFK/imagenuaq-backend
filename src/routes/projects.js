@@ -34,9 +34,9 @@ router.get("/:id/field-values", async (req, res) => {
 });
 
 router.post("/:id/finance-request", requirePermission("finance.request"), async (req, res) => {
-  const { kind, needed, note } = req.body ?? {};
+  const { kind, needed, note, count } = req.body ?? {};
   res.json({
-    request: await projects.requestFinance(projectId(req), { kind, needed, note }),
+    request: await projects.requestFinance(projectId(req), { kind, needed, note, count }),
   });
 });
 
@@ -61,7 +61,7 @@ router.put("/:id/status", async (req, res) => {
 });
 
 router.post("/:id/close", async (req, res) => {
-  res.json({ project: await projects.close(projectId(req)) });
+  res.json(await projects.close(projectId(req)));
 });
 
 router.post("/:id/archive", async (req, res) => {

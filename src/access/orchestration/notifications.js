@@ -55,6 +55,29 @@ const HANDLERS = {
       dedupKey: `stage_signed_off:${approval.id}`,
     };
   },
+  project_closed: (event) => {
+    const gaps = (event.financeGaps ?? []).filter((flag) => flag !== "no_finance_records");
+    if (gaps.length === 0) return null;
+    return {
+      projectId: event.target.id,
+      permission: "finance.read",
+      exceptActor: true,
+      title: "Proyecto cerrado con pendientes",
+      lead: "Se cerró",
+      trail: ` con pendientes de finanzas: ${gaps.map((flag) => FINANCE_GAPS[flag] ?? flag).join(", ")}.`,
+      dedupKey: `project_closed:${event.target.id}`,
+    };
+  },
+};
+
+/**
+ * Cómo se lee cada pendiente de finanzas en un aviso (RF-FIN-08). `no_finance_records` no avisa
+ * por sí solo: un proyecto sin costo sin facturas es lo normal.
+ */
+const FINANCE_GAPS = {
+  missing_invoices: "faltan facturas",
+  costed_no_quote: "tiene costo y no tiene cotización",
+  delivered_no_invoice: "se entregó y no tiene facturas",
 };
 
 const MAX_TITLE = 300;
@@ -217,16 +240,21 @@ class Notifications {
   }
 
   /**
-   * Avisa según HANDLERS, con una sola consulta por evento. Quien hizo la acción no recibe su
-   * propio aviso, salvo en `stage_activated`.
+   * Avisa según HANDLERS, con una sola consulta por evento: por etapa (`stageId`) o, por proyecto, a
+   * quien tenga un permiso (`projectId` y `permission`). Quien hizo la acción no recibe su propio
+   * aviso, salvo en `stage_activated`.
    */
   async handle(event) {
     const spec = HANDLERS[event?.action]?.(event);
-    if (!spec?.stageId) return;
+    if (!spec?.stageId && !spec?.projectId) return;
 
-    const { stageId, exceptActor = false, ...message } = spec;
+    const { stageId, projectId, exceptActor = false, ...message } = spec;
     const exceptUserId = exceptActor ? (currentActor()?.id ?? null) : null;
-    this.deliver(await query.notifyStage(stageId, { ...message, exceptUserId }));
+    this.deliver(
+      stageId
+        ? await query.notifyStage(stageId, { ...message, exceptUserId })
+        : await query.notifyPermission(projectId, { ...message, exceptUserId }),
+    );
   }
 }
 

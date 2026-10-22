@@ -52,6 +52,26 @@ const FOLDER_LINKS = `(select count(*)::int from access_tokens t
 const LIVE_PROJECT = "p.deleted_at is null and p.closed_at is null and p.archived_at is null";
 
 /**
+ * The `logged` CTE of a finance write: one `logs` row per row of CTE `changed`, in the same
+ * statement as the change, so a write and its trail cannot part (DATAMODEL §5.6). `actor` is the
+ * placeholder holding the actor's id and `before` the SQL for `before_data`. An action missing
+ * from the catalogue leaves `action_id` null, which fails the whole statement.
+ */
+const loggedChange = (action, table, actor, before = "null") => `logged as (
+    insert into logs (user_id, action_id, area_id, target_table, target_id, before_data, after_data)
+    select ${actor}::bigint, (select id from actions where code = '${action}'),
+           (select primary_area_id from users where id = ${actor}::bigint),
+           '${table}', c.id, ${before}, to_jsonb(c)
+      from changed c
+  )`;
+
+/** The finance columns of a quote or invoice list: its project and its provider. Expects alias `x`. */
+const FINANCE_JOINS = `
+  join projects p on p.id = x.project_id and p.deleted_at is null
+  left join providers pr on pr.id = x.provider_id`;
+const FINANCE_COLUMNS = "x.*, p.key as project_key, p.title as project_title, pr.name as provider_name";
+
+/**
  * A costed project whose dates touch a semester-closure window (RF-CAL-03): marked, never
  * blocked. Undated ends fall back to its creation and today. Expects alias `p`.
  */
@@ -3612,12 +3632,16 @@ class Query {
     return row;
   }
 
-  async setRetention(months, updatedBy) {
+  /** Each setting left null keeps its value. */
+  async setRetention({ months = null, financeMonths = null, financeKeepForever = null }, updatedBy) {
     const [row] = await this.#rows(
       `update file_retention
-          set months = $1, updated_by = $2::bigint, updated_at = current_timestamp
+          set months = coalesce($1::int, months),
+              finance_months = coalesce($2::int, finance_months),
+              finance_keep_forever = coalesce($3::boolean, finance_keep_forever),
+              updated_by = $4::bigint, updated_at = current_timestamp
         returning *`,
-      [months, updatedBy],
+      [months, financeMonths, financeKeepForever, updatedBy],
     );
     return row;
   }
@@ -3625,12 +3649,16 @@ class Query {
   /**
    * Soft-deletes every live file past retention as of `now`, and returns the rows. A file under
    * a project's folder counts from the project's close or archive, so an open project never
-   * loses one; a file under no project counts from its upload.
+   * loses one; a file under no project counts from its upload. A file a finance record points at
+   * (`finance_files`) lives `finance_months` instead, or forever with `finance_keep_forever`.
    */
   async expireFiles(now) {
     return this.#rows(
-      `with recursive months as (
-         select make_interval(months => months) as span from file_retention
+      `with recursive retention as (
+         select make_interval(months => months) as span,
+                make_interval(months => finance_months) as finance_span,
+                finance_keep_forever
+           from file_retention
        ),
        project_tree as (
          select f.id, coalesce(p.closed_at, p.archived_at) as ended_at, 0 as depth
@@ -3647,9 +3675,15 @@ class Query {
          select fi.id
            from files fi
            left join project_tree t on t.id = fi.folder_id
+          cross join retention r
           where fi.deleted_at is null
-            and case when t.id is null then fi.created_at
-                     else t.ended_at end + (select span from months) < $1::timestamptz
+            and case when fi.id in (select file_id from finance_files)
+                     then not r.finance_keep_forever
+                          and case when t.id is null then fi.created_at
+                                   else t.ended_at end + r.finance_span < $1::timestamptz
+                     else case when t.id is null then fi.created_at
+                               else t.ended_at end + r.span < $1::timestamptz
+                end
        )
        update files set deleted_at = $1::timestamptz
         where id in (select id from expired)
@@ -4315,6 +4349,9 @@ class Query {
    * Warns, once per project and expiry date, that a closed or archived project's files are
    * deleted within `days` days -- the same retention expireFiles() applies. Told to the leads of
    * the areas in the project's flow and to every admin. A project with no live files is skipped.
+   * Finance files keep their own, longer clock and are not counted.
+   * shortcut: nobody is warned before a finance file expires; add a second warning if
+   * `finance_months` ever drops to something a person would still be around for.
    *
    * @param {string} now ISO timestamp
    * @param {number} days
@@ -4345,6 +4382,7 @@ class Query {
          select t.project_id, count(*)::int as files
            from tree t
            join files fi on fi.folder_id = t.folder_id and fi.deleted_at is null
+          where fi.id not in (select file_id from finance_files)
           group by t.project_id
        ),
        recipients as (
@@ -4375,6 +4413,253 @@ class Query {
        on conflict (user_id, dedup_key) where dedup_key is not null do nothing
        returning *`,
       [now, days],
+    );
+  }
+
+  /**
+   * Notifies every live holder of `permission`, through their role, about a project: the message
+   * is `lead` + ` el proyecto "<title>" (<key>)` + `trail`. `exceptUserId` (the actor) is left
+   * out. A used `dedupKey` writes nothing.
+   *
+   * @returns {Promise<object[]>} the notifications written
+   */
+  async notifyPermission(projectId, { permission, exceptUserId = null, title, lead, trail, dedupKey }) {
+    return this.#rows(
+      `insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select u.id, 'alerta', 'proyecto', $4::text,
+              $5::text || ' el proyecto "' || p.title || '" (' || p.key || ')' || $6::text,
+              'projects', p.id, $7::text
+         from projects p
+         cross join users u
+         join role_permissions rp on rp.role_id = u.role_id
+         join permissions pm on pm.id = rp.permission_id and pm.code = $2::text
+        where p.id = $1 and p.deleted_at is null
+          and u.deleted_at is null and u.id is distinct from $3::bigint
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [projectId, permission, exceptUserId, title, lead, trail, dedupKey],
+    );
+  }
+
+  /**
+   * Inserts a finance row from `fields` (column to value, columns named by the caller, never by
+   * the client) and logs `action` in the same statement. The values travel as one JSON record so
+   * Postgres casts each to its column's type; postgrejs would send a string as varchar.
+   *
+   * @returns {Promise<object>} the new row
+   */
+  async #financeInsert(table, fields, { action, actorId }) {
+    const columns = Object.keys(fields);
+    const [row] = await this.#rows(
+      `with changed as (
+         insert into ${table} (${columns.join(", ")})
+         select ${columns.join(", ")} from json_populate_record(null::${table}, $2::json)
+         returning *
+       ),
+       ${loggedChange(action, table, "$1")}
+       select * from changed`,
+      [actorId, JSON.stringify(fields)],
+    );
+    return row;
+  }
+
+  /**
+   * Updates a live finance row from `fields` where `guard` (SQL over alias `x`) still holds, and
+   * logs `action` with the row before and after, in one statement.
+   *
+   * @returns {Promise<object | null>} the updated row, or null when missing or the guard failed
+   */
+  async #financeUpdate(table, id, fields, { action, actorId, guard = "true" }) {
+    const columns = Object.keys(fields);
+    const [row] = await this.#rows(
+      `with prior as (
+         select * from ${table} x where x.id = $2 and x.deleted_at is null and ${guard}
+       ),
+       changed as (
+         update ${table} x
+            set ${columns.map((column) => `${column} = r.${column}`).join(", ")}
+           from prior, json_populate_record(null::${table}, $3::json) r
+          where x.id = prior.id
+         returning x.*
+       ),
+       ${loggedChange(action, table, "$1", "(select to_jsonb(prior) from prior)")}
+       select * from changed`,
+      [actorId, id, JSON.stringify(fields)],
+    );
+    return row ?? null;
+  }
+
+  async createProvider(fields, actorId) {
+    return this.#financeInsert("providers", fields, { action: "provider_created", actorId });
+  }
+
+  async updateProvider(providerId, fields, actorId) {
+    return this.#financeUpdate("providers", providerId, fields, { action: "provider_updated", actorId });
+  }
+
+  async deleteProvider(providerId, actorId) {
+    return this.#financeUpdate("providers", providerId, { deleted_at: new Date().toISOString() }, {
+      action: "provider_deleted",
+      actorId,
+    });
+  }
+
+  async getProvider(providerId) {
+    const [row] = await this.#rows(
+      `select * from providers where id = $1 and deleted_at is null`,
+      [providerId],
+    );
+    return row ?? null;
+  }
+
+  /** Live providers by name, prefix matches first. */
+  async listProviders({ q = null, limit = 50 } = {}) {
+    return this.#rows(
+      `select * from providers
+        where deleted_at is null
+          and ($1::text is null or lower(name) like '%' || lower($1::text) || '%')
+        order by ($1::text is not null and lower(name) like lower($1::text) || '%') desc, name
+        limit $2`,
+      [q, limit],
+    );
+  }
+
+  async createQuote(fields, actorId) {
+    return this.#financeInsert("quotes", fields, { action: "quote_created", actorId });
+  }
+
+  async updateQuote(quoteId, fields, { action = "quote_updated", actorId, guard }) {
+    return this.#financeUpdate("quotes", quoteId, fields, { action, actorId, guard });
+  }
+
+  async getQuote(quoteId) {
+    const [row] = await this.#rows(
+      `select ${FINANCE_COLUMNS} from quotes x ${FINANCE_JOINS} where x.id = $1 and x.deleted_at is null`,
+      [quoteId],
+    );
+    return row ?? null;
+  }
+
+  /** Live quotes, newest first, optionally of one project or in one status. */
+  async listQuotes({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `select ${FINANCE_COLUMNS} from quotes x ${FINANCE_JOINS}
+        where x.deleted_at is null
+          and ($1::bigint is null or x.project_id = $1::bigint)
+          and ($2::text is null or x.status = $2::text)
+        order by x.created_at desc, x.id desc
+        limit $3 offset $4`,
+      [projectId, status, limit, offset],
+    );
+  }
+
+  async createInvoice(fields, actorId) {
+    return this.#financeInsert("invoices", fields, { action: "invoice_created", actorId });
+  }
+
+  async updateInvoice(invoiceId, fields, { action = "invoice_updated", actorId, guard }) {
+    return this.#financeUpdate("invoices", invoiceId, fields, { action, actorId, guard });
+  }
+
+  async getInvoice(invoiceId) {
+    const [row] = await this.#rows(
+      `select ${FINANCE_COLUMNS} from invoices x ${FINANCE_JOINS} where x.id = $1 and x.deleted_at is null`,
+      [invoiceId],
+    );
+    return row ?? null;
+  }
+
+  /** Live invoices, newest first, optionally of one project or in one status. */
+  async listInvoices({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `select ${FINANCE_COLUMNS} from invoices x ${FINANCE_JOINS}
+        where x.deleted_at is null
+          and ($1::bigint is null or x.project_id = $1::bigint)
+          and ($2::text is null or x.status = $2::text)
+        order by x.created_at desc, x.id desc
+        limit $3 offset $4`,
+      [projectId, status, limit, offset],
+    );
+  }
+
+  /** Whether `fileId` is a live file somewhere under the project's folder. */
+  async isProjectFile(projectId, fileId) {
+    const [row] = await this.#rows(
+      `with recursive tree as (
+         select p.folder_id as id, 0 as depth
+           from projects p where p.id = $1 and p.folder_id is not null
+         union all
+         select f.id, t.depth + 1
+           from folders f join tree t on f.parent_id = t.id
+          where t.depth < 100 and f.deleted_at is null
+       )
+       select exists (
+         select 1 from files fi
+          where fi.id = $2 and fi.deleted_at is null and fi.folder_id in (select id from tree)
+       ) as within`,
+      [projectId, fileId],
+    );
+    return row.within;
+  }
+
+  async setExpectedInvoices(projectId, count) {
+    const [row] = await this.#rows(
+      `update projects set expected_invoice_count = $2::int
+        where id = $1 and deleted_at is null
+        returning *`,
+      [projectId, count],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Live projects with their finance standing, the ones missing the most invoices first. `flags`
+   * are what finance should look at (DATAMODEL §2.20): fewer invoices than expected, costed with
+   * no standing quote, delivered or closed costed work with no invoice, and nothing recorded at
+   * all. One statement; each count is a correlated subquery on an indexed `project_id`.
+   *
+   * @param {{projectId?: number|null, flag?: string|null, limit?: number, offset?: number}} filter
+   */
+  async financeProjects({ projectId = null, flag = null, limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `with stats as (
+         select p.id, p.key, p.title, p.requester, p.has_cost, p.closed_at, p.archived_at,
+                p.expected_invoice_count as expected,
+                (select count(*)::int from invoices i
+                  where i.project_id = p.id and i.deleted_at is null) as uploaded,
+                (select coalesce(sum(i.amount), 0) from invoices i
+                  where i.project_id = p.id and i.deleted_at is null) as invoiced,
+                (select count(*)::int from quotes q
+                  where q.project_id = p.id and q.deleted_at is null) as quotes,
+                (select count(*)::int from quotes q
+                  where q.project_id = p.id and q.deleted_at is null and q.status <> 'rejected') as standing_quotes,
+                (p.closed_at is not null or exists (
+                   select 1 from flow_phases fp
+                     join flow_stages fs on fs.phase_id = fp.id
+                     join project_stages ps on ps.flow_stage_id = fs.id
+                    where fp.project_id = p.id
+                      and (ps.delivered_at is not null or ps.status = 'done'))) as delivered
+           from projects p
+          where p.deleted_at is null and ($1::bigint is null or p.id = $1::bigint)
+       ),
+       flagged as (
+         select s.*,
+                greatest(coalesce(s.expected, 0) - s.uploaded, 0) as missing,
+                array_remove(array[
+                  case when s.expected > s.uploaded then 'missing_invoices' end,
+                  case when s.has_cost and s.standing_quotes = 0 then 'costed_no_quote' end,
+                  case when s.has_cost and s.delivered and s.uploaded = 0 then 'delivered_no_invoice' end,
+                  case when s.quotes = 0 and s.uploaded = 0 then 'no_finance_records' end
+                ], null) as flags
+           from stats s
+       )
+       select * from flagged
+        where $2::text is null or $2::text = any(flags)
+        order by missing desc, cardinality(flags) desc, id desc
+        limit $3 offset $4`,
+      [projectId, flag, limit, offset],
     );
   }
 }

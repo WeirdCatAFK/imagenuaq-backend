@@ -467,16 +467,27 @@ class Documents {
   }
 
   /**
-   * Changes the retention. The route requires `document.manage`.
+   * Changes the retention: `months` for ordinary files, and for the files a finance record points
+   * at `financeMonths` or `financeKeepForever`. Each omitted setting keeps its value. The route
+   * requires `document.manage`.
    *
-   * @throws {ApiError} 400 unless `months` is a positive integer.
+   * @throws {ApiError} 400 on a month count that is not a positive integer, a non-boolean
+   *   `financeKeepForever`, or nothing to change.
    */
-  async setRetention(months) {
-    if (!Number.isInteger(months) || months < 1) {
-      throw ApiError.badRequest("months must be a positive integer.");
+  async setRetention({ months, financeMonths, financeKeepForever } = {}) {
+    for (const [field, value] of Object.entries({ months, financeMonths })) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+        throw ApiError.badRequest(`${field} must be a positive integer.`);
+      }
+    }
+    if (financeKeepForever !== undefined && typeof financeKeepForever !== "boolean") {
+      throw ApiError.badRequest("financeKeepForever must be a boolean.");
+    }
+    if (months === undefined && financeMonths === undefined && financeKeepForever === undefined) {
+      throw ApiError.badRequest("months, financeMonths or financeKeepForever is required.");
     }
     const before = await query.getRetention();
-    const row = await query.setRetention(months, currentActor().id);
+    const row = await query.setRetention({ months, financeMonths, financeKeepForever }, currentActor().id);
     await events.emit({
       action: "record_updated",
       target: { table: "file_retention", id: 1 },
@@ -589,7 +600,13 @@ function isAdmin(actor) {
 }
 
 function shapeRetention(row) {
-  return { months: row.months, updatedBy: row.updated_by, updatedAt: row.updated_at };
+  return {
+    months: row.months,
+    financeMonths: row.finance_months,
+    financeKeepForever: row.finance_keep_forever,
+    updatedBy: row.updated_by,
+    updatedAt: row.updated_at,
+  };
 }
 
 /** MAX_UPLOAD_BYTES, or no limit when unset. */

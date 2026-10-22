@@ -39,6 +39,11 @@ from tiers below it — see [src/access/ACCESS.md](src/access/ACCESS.md). All SQ
 Express 5 forwards rejections from `async` handlers to the error handler, so routes can
 throw `ApiError` directly instead of being wrapped.
 
+Finance writes (`orchestration/finance.js`) are the exception to "orchestration emits, audit
+writes `logs`": each one inserts its own `logs` row in the same statement as the change
+(`loggedChange` in `query.js`), because a lost audit row is not acceptable there
+(`DATAMODEL.md` §5.6, §2.20).
+
 ## Database
 
 - **postgrejs** owns runtime queries. The pool is built in
@@ -186,8 +191,8 @@ bucket** — lose it and MinIO holds correctly-hashed but meaningless bytes. Bac
 Two things create notifications. **Domain events** cover what a person did: the subscriber in
 `orchestration/notifications.js` listens on `utils/events.js`, beside the audit trail, and its
 `HANDLERS` map says, per action (`stage_activated`, `stage_assigned`, `stage_delivered`,
-`stage_signed_off`), who hears and what the message says. Except for `stage_activated`, the person who acted is left
-out.
+`stage_signed_off`, and `project_closed` when finance has gaps to see), who hears and what the
+message says. Except for `stage_activated`, the person who acted is left out.
 An action without an entry notifies nobody.
 **Scheduled jobs** cover what needs no one: `src/scheduler.js` holds `JOBS`, one entry per job
 with a unique `name` (grep for it), a cron `schedule` read in Querétaro time, and `run(now)`.
