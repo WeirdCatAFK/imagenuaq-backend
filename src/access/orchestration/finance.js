@@ -223,6 +223,19 @@ class Finance {
     return rows.map(shapeStanding);
   }
 
+  /**
+   * Refuses to mark a project as having no finance while it holds quotes, invoices or a declared
+   * invoice count: marking it would hide them (DATAMODEL §2.20).
+   *
+   * @throws {ApiError} 409
+   */
+  async assertCanSkip(projectId) {
+    const [standing] = await query.financeProjects({ projectId });
+    if (standing && (standing.quotes > 0 || standing.uploaded > 0 || standing.expected !== null)) {
+      throw ApiError.conflict("A project with quotes, invoices or expected invoices cannot be marked as having no finance.");
+    }
+  }
+
   /** What finance should know about a project, as finance flags (empty when nothing is off). */
   async gaps(projectId) {
     const [standing] = await query.financeProjects({ projectId });
@@ -385,10 +398,12 @@ class Finance {
     return shapeInvoice(row);
   }
 
-  /** @throws {ApiError} 404 unless a live project. */
+  /** @throws {ApiError} 404 unless a live project, 409 when it is marked as having no finance. */
   async #liveProject(projectId) {
     const id = requireId(projectId, "projectId");
-    if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    const project = await query.getProject(id);
+    if (!project) throw ApiError.notFound("Project not found.");
+    if (project.no_finance) throw ApiError.conflict("This project is marked as having no finance.");
     return id;
   }
 
@@ -487,6 +502,7 @@ function shapeStanding(row) {
     title: row.title,
     requester: row.requester,
     hasCost: row.has_cost,
+    noFinance: row.no_finance,
     closedAt: row.closed_at,
     archivedAt: row.archived_at,
     expectedInvoices: row.expected,

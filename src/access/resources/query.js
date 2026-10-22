@@ -70,6 +70,45 @@ const FINANCE_JOINS = `
   join projects p on p.id = x.project_id and p.deleted_at is null
   left join providers pr on pr.id = x.provider_id`;
 const FINANCE_COLUMNS = "x.*, p.key as project_key, p.title as project_title, pr.name as provider_name";
+/**
+ * The CTEs `stats` and `flagged`: each project matching `where` (SQL over alias `p`, live ones
+ * only) with its invoice and quote counts and its finance `flags` (DATAMODEL §2.20). A project
+ * marked `no_finance` never has a flag. The finance
+ * list and the weekly digest read the same flags from here. Each count is a correlated subquery
+ * on an indexed `project_id`.
+ */
+const financeStanding = (where) => `stats as (
+         select p.id, p.key, p.title, p.requester, p.has_cost, p.no_finance, p.closed_at, p.archived_at,
+                p.expected_invoice_count as expected,
+                (select count(*)::int from invoices i
+                  where i.project_id = p.id and i.deleted_at is null) as uploaded,
+                (select coalesce(sum(i.amount), 0) from invoices i
+                  where i.project_id = p.id and i.deleted_at is null) as invoiced,
+                (select count(*)::int from quotes q
+                  where q.project_id = p.id and q.deleted_at is null) as quotes,
+                (select count(*)::int from quotes q
+                  where q.project_id = p.id and q.deleted_at is null and q.status <> 'rejected') as standing_quotes,
+                (p.closed_at is not null or exists (
+                   select 1 from flow_phases fp
+                     join flow_stages fs on fs.phase_id = fp.id
+                     join project_stages ps on ps.flow_stage_id = fs.id
+                    where fp.project_id = p.id
+                      and (ps.delivered_at is not null or ps.status = 'done'))) as delivered
+           from projects p
+          where p.deleted_at is null and (${where})
+       ),
+       flagged as (
+         select s.*,
+                greatest(coalesce(s.expected, 0) - s.uploaded, 0) as missing,
+                array_remove(array[
+                  case when s.no_finance then null
+                       when s.expected > s.uploaded then 'missing_invoices' end,
+                  case when s.has_cost and s.standing_quotes = 0 then 'costed_no_quote' end,
+                  case when s.has_cost and s.delivered and s.uploaded = 0 then 'delivered_no_invoice' end,
+                  case when not s.no_finance and s.quotes = 0 and s.uploaded = 0 then 'no_finance_records' end
+                ], null) as flags
+           from stats s
+       )`;
 
 /**
  * A costed project whose dates touch a semester-closure window (RF-CAL-03): marked, never
@@ -1669,7 +1708,7 @@ class Query {
   /** Only the keys the caller sent; the row is merged in orchestration. */
   async updateProject(projectId, {
     title = null, description = null, requester = null, priority = null,
-    hasCost = null, carriedOver = null, startsOn = null, dueOn = null, key = null,
+    hasCost = null, carriedOver = null, startsOn = null, dueOn = null, key = null, noFinance = null,
   }) {
     const [row] = await this.#rows(
       `update projects set
@@ -1681,10 +1720,11 @@ class Query {
         has_cost     = coalesce($7, has_cost),
         carried_over = coalesce($8, carried_over),
         starts_on    = coalesce($9::date, starts_on),
-        due_on       = coalesce($10::date, due_on)
+        due_on       = coalesce($10::date, due_on),
+        no_finance   = coalesce($11::boolean, no_finance)
       where id = $1 and deleted_at is null
       returning *`,
-      [projectId, key, title, description, requester, priority, hasCost, carriedOver, startsOn, dueOn],
+      [projectId, key, title, description, requester, priority, hasCost, carriedOver, startsOn, dueOn, noFinance],
     );
     return row ?? null;
   }
@@ -4618,48 +4658,100 @@ class Query {
    * Live projects with their finance standing, the ones missing the most invoices first. `flags`
    * are what finance should look at (DATAMODEL §2.20): fewer invoices than expected, costed with
    * no standing quote, delivered or closed costed work with no invoice, and nothing recorded at
-   * all. One statement; each count is a correlated subquery on an indexed `project_id`.
+   * all. One statement. A `no_finance` project is left out of the list, and alone shows no flags.
    *
    * @param {{projectId?: number|null, flag?: string|null, limit?: number, offset?: number}} filter
    */
   async financeProjects({ projectId = null, flag = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
-      `with stats as (
-         select p.id, p.key, p.title, p.requester, p.has_cost, p.closed_at, p.archived_at,
-                p.expected_invoice_count as expected,
-                (select count(*)::int from invoices i
-                  where i.project_id = p.id and i.deleted_at is null) as uploaded,
-                (select coalesce(sum(i.amount), 0) from invoices i
-                  where i.project_id = p.id and i.deleted_at is null) as invoiced,
-                (select count(*)::int from quotes q
-                  where q.project_id = p.id and q.deleted_at is null) as quotes,
-                (select count(*)::int from quotes q
-                  where q.project_id = p.id and q.deleted_at is null and q.status <> 'rejected') as standing_quotes,
-                (p.closed_at is not null or exists (
-                   select 1 from flow_phases fp
-                     join flow_stages fs on fs.phase_id = fp.id
-                     join project_stages ps on ps.flow_stage_id = fs.id
-                    where fp.project_id = p.id
-                      and (ps.delivered_at is not null or ps.status = 'done'))) as delivered
-           from projects p
-          where p.deleted_at is null and ($1::bigint is null or p.id = $1::bigint)
-       ),
-       flagged as (
-         select s.*,
-                greatest(coalesce(s.expected, 0) - s.uploaded, 0) as missing,
-                array_remove(array[
-                  case when s.expected > s.uploaded then 'missing_invoices' end,
-                  case when s.has_cost and s.standing_quotes = 0 then 'costed_no_quote' end,
-                  case when s.has_cost and s.delivered and s.uploaded = 0 then 'delivered_no_invoice' end,
-                  case when s.quotes = 0 and s.uploaded = 0 then 'no_finance_records' end
-                ], null) as flags
-           from stats s
-       )
+      `with ${financeStanding("p.id = $1::bigint or ($1::bigint is null and not p.no_finance)")}
        select * from flagged
         where $2::text is null or $2::text = any(flags)
         order by missing desc, cardinality(flags) desc, id desc
         limit $3 offset $4`,
       [projectId, flag, limit, offset],
+    );
+  }
+
+  /**
+   * The finance digest, in one statement, at most once per person every `days` days. Counts the projects that are not archived and
+   * show a gap -- any flag but `no_finance_records`, which alone is normal for work without cost
+   * and is already `costed_no_quote` for work with it. Every holder of `finance.read` gets the
+   * count per flag; every lead of an area with a stage in such a project gets their projects' keys
+   * (the first ten). The key is the person and the first day of the `days`-day window holding
+   * today in Querétaro time (windows counted from 2000-01-01), so a rerun inside it writes nothing.
+   *
+   * @param {string} now ISO timestamp
+   * @param {number} days
+   * @returns {Promise<object[]>} the notifications written
+   */
+  async notifyFinanceGaps(now, days) {
+    return this.#rows(
+      `with today as (
+         select ($1::timestamptz at time zone 'America/Mexico_City')::date as d
+       ),
+       window_start as (
+         select to_char(date '2000-01-01' + ((d - date '2000-01-01') / $2::int) * $2::int, 'YYYY-MM-DD') as w
+           from today
+       ),
+       ${financeStanding("p.archived_at is null")},
+       gaps as (
+         select id, key, flags from flagged
+          where cardinality(array_remove(flags, 'no_finance_records')) > 0
+       ),
+       totals as (
+         select count(*)::int as projects,
+                count(*) filter (where 'missing_invoices' = any(flags))::int as missing,
+                count(*) filter (where 'costed_no_quote' = any(flags))::int as no_quote,
+                count(*) filter (where 'delivered_no_invoice' = any(flags))::int as no_invoice
+           from gaps
+       ),
+       finance_people as (
+         select distinct u.id
+           from users u
+           join role_permissions rp on rp.role_id = u.role_id
+           join permissions pm on pm.id = rp.permission_id and pm.code = 'finance.read'
+          where u.deleted_at is null
+       ),
+       lead_projects as (
+         select am.user_id, g.key
+           from gaps g
+           join flow_phases fp on fp.project_id = g.id
+           join flow_stages fs on fs.phase_id = fp.id
+           join area_members am on am.area_id = fs.area_id and am.is_area_leader
+           join users u on u.id = am.user_id and u.deleted_at is null
+          group by am.user_id, g.key
+       ),
+       per_lead as (
+         select user_id, count(*)::int as projects,
+                array_to_string((array_agg(key order by key))[1:10], ', ') as keys
+           from lead_projects
+          group by user_id
+       ),
+       messages as (
+         select f.id as user_id, 'finance' as audience,
+                t.projects || ' proyecto(s) con pendientes de finanzas: '
+                  || t.missing || ' con facturas faltantes, '
+                  || t.no_quote || ' con costo y sin cotización, '
+                  || t.no_invoice || ' entregados sin facturas.' as message
+           from finance_people f, totals t
+          where t.projects > 0
+         union all
+         select l.user_id, 'lead',
+                'Proyectos de tu área con pendientes de finanzas: ' || l.keys
+                  || case when l.projects > 10 then ' y ' || (l.projects - 10) || ' más' else '' end
+                  || '. Sube sus cotizaciones y facturas.'
+           from per_lead l
+       )
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select m.user_id, 'recordatorio', 'proyecto', 'Pendientes de finanzas', m.message,
+              null, null, 'finance-gaps:' || m.audience || ':' || window_start.w
+         from messages m, window_start
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [now, days],
     );
   }
 }

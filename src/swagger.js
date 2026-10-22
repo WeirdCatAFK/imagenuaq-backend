@@ -1357,6 +1357,8 @@ export function buildOpenApiDocument() {
             statusSince: { type: 'string', format: 'date-time' },
             priority: { type: 'integer', description: 'Higher is more urgent (RF-FLW-08).' },
             hasCost: { type: 'boolean', description: 'RF-PRY-07.' },
+            expectedInvoiceCount: { type: ['integer', 'null'], description: 'RF-FIN-07: declared by finance.' },
+            noFinance: { type: 'boolean', description: 'Never goes through finance: left out of every finance list and check.' },
             inClosure: { type: 'boolean', description: 'RF-CAL-03: costed and inside a closure window. A mark, not a block.' },
             carriedOver: { type: 'boolean', description: 'RF-PRY-08.' },
             startsOn: { type: ['string', 'null'], format: 'date' },
@@ -1474,6 +1476,13 @@ export function buildOpenApiDocument() {
             requester: { type: 'string', maxLength: 300 },
             priority: { type: 'integer' },
             hasCost: { type: 'boolean' },
+            noFinance: {
+              type: 'boolean',
+              description:
+                'Marks work that never goes through finance (an event set-up, say): it leaves every finance ' +
+                'list, the digest and the closing check. Refused with 400 on a costed project, and with 409 ' +
+                'while it has quotes, invoices or a declared invoice count.',
+            },
             carriedOver: { type: 'boolean' },
             startsOn: { type: 'string', format: 'date' },
             dueOn: { type: 'string', format: 'date' },
@@ -2146,6 +2155,7 @@ export function buildOpenApiDocument() {
             key: { type: 'string' },
             title: { type: 'string' },
             hasCost: { type: 'boolean' },
+            noFinance: { type: 'boolean', description: 'Then `flags` is always empty.' },
             closedAt: { type: ['string', 'null'], format: 'date-time' },
             expectedInvoices: { type: ['integer', 'null'] },
             uploadedInvoices: { type: 'integer' },
@@ -5208,6 +5218,7 @@ export function buildOpenApiDocument() {
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('The project is marked as having no finance.', 'This project is marked as having no finance.'),
           },
         },
       },
@@ -5317,7 +5328,7 @@ export function buildOpenApiDocument() {
             403: FORBIDDEN,
             404: errorResponse('No such project.', 'Project not found.'),
             409: errorResponse(
-              'The fiscal folio is already uploaded.',
+              'The fiscal folio is already uploaded, or the project is marked as having no finance.',
               'An invoice with that fiscal folio is already uploaded.',
             ),
           },

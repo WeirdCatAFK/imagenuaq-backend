@@ -859,6 +859,14 @@ cuántas facturas faltan. Cada proyecto trae sus banderas:
 | `delivered_no_invoice` | Con costo, con alguna etapa entregada o el proyecto cerrado, y sin facturas |
 | `no_finance_records` | Sin cotizaciones ni facturas |
 
+**Un proyecto puede quedar fuera de finanzas** (`projects.no_finance`, migración
+`project-no-finance`). Hay trabajo que no compra ni cobra nada —acomodar el mobiliario de un evento
+de la UAQ—, y que aparezca cada vez como `no_finance_records` es ruido. Marcado, sale de la lista,
+del resumen periódico y de los pendientes al cerrar, y no acepta cotizaciones ni facturas. Se
+marca con `PATCH /api/projects/:id {noFinance}` (`project.write`); un proyecto con costo no puede
+marcarse (CHECK), ni uno que ya tenga cotizaciones, facturas o un número de facturas declarado
+(409), porque marcarlo escondería justo lo que finanzas debe ver.
+
 Los oficios sin respuesta, las facturas que no van en ningún oficio y los pagos sin folio de
 rastreo se suman a la lista con la segunda mitad de I9.
 
@@ -867,6 +875,17 @@ rastreo se suman a la lista con la segunda mitad de I9.
 lo normal— avisa a quien tenga `finance.read`. El proyecto sigue saliendo en la lista hasta que
 se resuelva. Bloquear el cierre habría dejado proyectos que nunca se pueden cerrar, justo porque
 la carga no llega.
+
+**Cada tres días, un resumen** (el trabajo `finance-gaps` de `src/scheduler.js`). El ciclo de
+finanzas es de quince días a un mes, y resolver un pendiente toma tiempo: un aviso diario sería
+ruido, uno semanal dejaría pasar media quincena. Cuenta los proyectos
+no archivados con algún pendiente distinto de `no_finance_records` —que solo es lo normal en un
+proyecto sin costo, y en uno con costo ya sale como `costed_no_quote`—. Quien tiene `finance.read`
+recibe cuántos proyectos hay por bandera; cada líder de un área con etapa en esos proyectos
+recibe sus claves, que es el «que el sistema avise a quien debe subir» de la entrevista 008. Un
+aviso por persona y ventana de tres días: el trabajo corre a diario para ponerse al día si el
+servidor estuvo abajo, y la llave —el primer día de la ventana— impide repetirlo. Las banderas son las
+mismas de la lista: las dos leen `financeStanding` en `query.js`.
 
 **Quién escribe qué.** Las áreas suben cotizaciones y facturas con `project.write`; finanzas, con
 `finance.write`, decide las cotizaciones (`issued` → `in_review` → `approved`/`rejected`) y
@@ -1902,6 +1921,7 @@ guardan, y no hay etapa actual: eso es el conjunto de `project_stages` activas (
 | `priority` | int | no | `0` | Prioridad manual por urgencia (`RF-FLW-08`) |
 | `has_cost` | boolean | no | `false` | Con costo o sin costo; el tratamiento financiero difiere (`RF-PRY-07`) |
 | `expected_invoice_count` | integer | sí | | Cuántas facturas debe tener (`RF-FIN-07`), declarado por finanzas o coordinación. Nulo: nadie lo declaró |
+| `no_finance` | boolean | no | `false` | Nunca pasa por finanzas: fuera de toda lista, resumen y revisión al cerrar (§2.20). No convive con `has_cost` |
 | `carried_over` | boolean | no | `false` | Rezagado de un periodo anterior (`RF-PRY-08`). El `period_id` espera a que exista `periods` |
 | `starts_on` | date | sí | | Inicio previsto |
 | `due_on` | date | sí | | Compromiso de entrega. No puede ser anterior a `starts_on` |

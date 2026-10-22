@@ -158,6 +158,52 @@ describe('scheduled jobs', () => {
     });
   });
 
+  describe('finance-gaps', () => {
+    test('tells finance the counts and each lead their projects, once every three days', async () => {
+      const area = await createArea('Pendientes de finanzas');
+      const lead = await createActive({
+        email: 'lider.finanzas@uaq.mx',
+        role: 'area_lead',
+        area: area.name,
+        isAreaLeader: true,
+      });
+      const worker = await createActive({ email: 'trabajador.finanzas@uaq.mx', area: area.name });
+      const money = await createActive({ email: 'finanzas@uaq.mx', role: 'finance' });
+
+      const create = async (body) => {
+        const res = await server.post('/api/projects', {
+          token: adminToken,
+          body: { stages: [{ areaId: area.id, title: 'Diseño', seq: 1 }], ...body },
+        });
+        assert.equal(res.status, 201);
+        return res.body.project;
+      };
+      const costed = await create({ title: 'Con costo', key: 'GAP-COSTO', hasCost: true });
+      await create({ title: 'Sin costo', key: 'GAP-NADA' });
+      const archived = await create({ title: 'Archivado', key: 'GAP-ARCH', hasCost: true });
+      await sql('update projects set archived_at = now() where id = $1', [archived.id]);
+
+      const now = new Date('2026-10-26T15:00:00Z');
+      const first = await runJob('finance-gaps', now);
+      assert.ok(first.notified >= 3);
+      assert.equal((await runJob('finance-gaps', now)).notified, 0);
+      const later = await runJob('finance-gaps', new Date('2026-10-29T15:00:00Z'));
+      assert.equal(later.notified, first.notified);
+
+      const [toMoney] = await notificationsOf(money.id, 'finance-gaps:finance:');
+      assert.match(toMoney.message, /^1 proyecto\(s\) con pendientes de finanzas: 0 con facturas faltantes, 1 con costo y sin cotización/);
+      assert.equal((await notificationsOf(admin.id, 'finance-gaps:finance:')).length, 2);
+
+      const [toLead] = await notificationsOf(lead.id, 'finance-gaps:lead:');
+      assert.match(toLead.message, new RegExp(`: ${costed.key}\\. Sube`));
+      assert.equal((await notificationsOf(worker.id, 'finance-gaps:')).length, 0);
+    });
+
+    test('says nothing when no project has a gap', async () => {
+      assert.equal((await runJob('finance-gaps', new Date('2026-10-26T15:00:00Z'))).notified, 0);
+    });
+  });
+
   test('notifications-cleanup deletes only notifications older than six months', async () => {
     const insert = (createdAt) =>
       sql(

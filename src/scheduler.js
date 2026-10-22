@@ -28,6 +28,14 @@ export const JOBS = [
     run: (now) => notifications.notifyFilesExpiring(now, 7),
   },
   {
+    name: 'finance-gaps',
+    schedule: '0 9 * * *',
+    description:
+      'Every three days, projects with finance gaps: counts to finance, the keys to area leads (RF-FIN-08). ' +
+      'Checked daily so a missed day catches up; the dedup key holds it to once per window.',
+    run: (now) => notifications.notifyFinanceGaps(now, 3),
+  },
+  {
     name: 'notifications-cleanup',
     schedule: '30 3 * * *',
     description: 'Deletes notifications older than six months.',

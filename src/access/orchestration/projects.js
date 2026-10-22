@@ -217,6 +217,7 @@ class Projects {
         input.carriedOver === undefined ? null : requireBoolean(input.carriedOver, "carriedOver"),
       startsOn: input.startsOn === undefined ? null : optionalDate(input.startsOn, "startsOn"),
       dueOn: input.dueOn === undefined ? null : optionalDate(input.dueOn, "dueOn"),
+      noFinance: input.noFinance === undefined ? null : requireBoolean(input.noFinance, "noFinance"),
     };
 
     if (Object.values(payload).every((value) => value === null)) {
@@ -225,6 +226,7 @@ class Projects {
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    if (payload.noFinance && !before.no_finance) await finance.assertCanSkip(id);
 
     let row;
     try {
@@ -1017,6 +1019,7 @@ function shapeProject(row) {
     priority: row.priority,
     hasCost: row.has_cost,
     expectedInvoiceCount: row.expected_invoice_count ?? null,
+    noFinance: row.no_finance ?? false,
     inClosure: row.in_closure ?? false,
     carriedOver: row.carried_over,
     startsOn: asDate(row.starts_on),
@@ -1051,6 +1054,7 @@ function shapeListed(row) {
     priority: row.priority,
     hasCost: row.has_cost,
     expectedInvoiceCount: row.expected_invoice_count ?? null,
+    noFinance: row.no_finance ?? false,
     inClosure: row.in_closure ?? false,
     carriedOver: row.carried_over,
     startsOn: asDate(row.starts_on),
@@ -1144,6 +1148,9 @@ function translate(err) {
   if (err?.code === CHECK_VIOLATION) {
     if (err.constraint === "projects_date_range") {
       return ApiError.badRequest("dueOn must not be earlier than startsOn.");
+    }
+    if (err.constraint === "projects_no_finance_without_cost") {
+      return ApiError.badRequest("A project with a cost cannot be marked as having no finance.");
     }
     if (err.constraint === "project_stages_blocked_reason_present") {
       return ApiError.badRequest("blockedReason is required when a stage waits on a third party.");

@@ -252,6 +252,49 @@ describe("/api/finance", () => {
     });
   });
 
+  describe("no finance", () => {
+    const mark = (projectId, noFinance = true) =>
+      server.patch(`/api/projects/${projectId}`, { token: adminToken, body: { noFinance } });
+
+    test("a marked project leaves every finance list and closes with no gaps", async () => {
+      const made = await project({ title: "Acomodo de sillas" });
+      const marked = await mark(made.id);
+      assert.equal(marked.status, 200);
+      assert.equal(marked.body.project.noFinance, true);
+
+      const listed = await server.get("/api/finance/projects", { token: moneyToken });
+      assert.equal(listed.body.projects.some((row) => row.projectId === made.id), false);
+      assert.deepEqual((await standing(made.id)).flags, []);
+
+      const closed = await server.post(`/api/projects/${made.id}/close`, { token: adminToken });
+      assert.deepEqual(closed.body.financeGaps, []);
+      assert.equal((await invoice(made.id, { amount: 1 })).status, 409);
+      assert.equal((await quote(made.id, { amount: 1 })).status, 409);
+    });
+
+    test("is refused on a costed project, or one already holding finance records", async () => {
+      assert.equal((await mark((await project({ hasCost: true })).id)).status, 400);
+
+      const withInvoice = await project();
+      await invoice(withInvoice.id, { amount: 1 });
+      assert.equal((await mark(withInvoice.id)).status, 409);
+
+      const declared = await project();
+      await server.post(`/api/projects/${declared.id}/finance-request`, {
+        token: moneyToken,
+        body: { kind: "invoice", count: 1 },
+      });
+      assert.equal((await mark(declared.id)).status, 409);
+    });
+
+    test("unmarking brings it back", async () => {
+      const made = await project();
+      await mark(made.id);
+      assert.equal((await mark(made.id, false)).body.project.noFinance, false);
+      assert.deepEqual((await standing(made.id)).flags, ["no_finance_records"]);
+    });
+  });
+
   describe("retention", () => {
     const MONTH_MS = 31 * 24 * 60 * 60 * 1000;
     const later = (months) => new Date(Date.now() + months * MONTH_MS);

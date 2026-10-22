@@ -234,6 +234,14 @@ class Notifications {
     return this.deliver(await query.notifyFilesExpiring(now.toISOString(), days));
   }
 
+  /**
+   * Resumen de pendientes de finanzas: a finanzas, cuántos proyectos tienen cada pendiente; a cada
+   * líder de área, cuáles de los suyos. Una sola vez por persona cada `days` días.
+   */
+  async notifyFinanceGaps(now = new Date(), days = 3) {
+    return this.deliver(await query.notifyFinanceGaps(now.toISOString(), days));
+  }
+
   /** Registra este módulo como suscriptor de eventos de dominio. Se llama una vez al iniciar la aplicación. */
   subscribe() {
     events.on("notifications", (event) => this.handle(event));
