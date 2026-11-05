@@ -795,13 +795,94 @@ Table "invoices" {
   "created_by" int8
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "deleted_at" timestamptz
+  "oficio_id" int8 [note: 'The one oficio the invoice was sent in.']
 
   Indexes {
+    oficio_id [type: btree, name: "idx_invoices_oficio"]
     project_id [type: btree, name: "idx_invoices_project"]
   }
   Note: '''RF-FIN-05 to RF-FIN-10: grouped by project, not by area. Only the amount is required.
 CHECK invoices_status_valid: (status)::text = ANY ((ARRAY[\'uploaded\'::character varying, \'sent\'::character varying, \'in_payment\'::character varying, \'paid\'::character varying])::text[])
 CHECK invoices_amount_positive: amount >= (0)::numeric'''
+}
+
+Table "oficios" {
+  "id" int8 [pk, not null, increment]
+  "project_id" int8 [not null]
+  "folio" varchar(100) [not null]
+  "recipient" varchar(300)
+  "amount" numeric(12,2) [not null]
+  "note" text
+  "stamped_file_id" int8
+  "status" varchar(20) [not null, default: 'issued']
+  "sent_at" timestamptz
+  "signed_at" timestamptz
+  "answered_at" timestamptz
+  "paid_at" timestamptz
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    project_id [type: btree, name: "idx_oficios_project"]
+  }
+  Note: '''RF-FIN-11 to RF-FIN-13: a charge to the requesting entity, grouping invoices of one project.
+CHECK oficios_status_valid: (status)::text = ANY ((ARRAY[\'issued\'::character varying, \'sent\'::character varying, \'signed\'::character varying, \'answered\'::character varying, \'paid\'::character varying])::text[])
+CHECK oficios_amount_positive: amount >= (0)::numeric'''
+}
+
+Table "payments" {
+  "id" int8 [pk, not null, increment]
+  "project_id" int8 [not null]
+  "direction" varchar(10) [not null]
+  "oficio_id" int8
+  "invoice_id" int8
+  "provider_id" int8
+  "amount" numeric(12,2) [not null]
+  "paid_on" date
+  "tracking_folio" varchar(100) [note: 'Folio of the university financial system backing the payment. NULL = not delivered yet.']
+  "proof_file_id" int8
+  "note" text
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    project_id [type: btree, name: "idx_payments_project"]
+  }
+  Note: '''RF-FIN-14: incoming pays an oficio, outgoing pays a provider invoice. Never moves a status.
+CHECK payments_direction_target: (((direction)::text = \'incoming\'::text) AND (oficio_id IS NOT NULL) AND (invoice_id IS NULL)) OR (((direction)::text = \'outgoing\'::text) AND (invoice_id IS NOT NULL) AND (oficio_id IS NULL))
+CHECK payments_amount_positive: amount >= (0)::numeric'''
+}
+
+Table "receipts" {
+  "id" int8 [pk, not null, increment]
+  "project_id" int8 [not null]
+  "quote_id" int8
+  "requester" varchar(300)
+  "amount" numeric(12,2) [not null]
+  "reference" varchar(100)
+  "concept" text
+  "file_id" int8
+  "status" varchar(20) [not null, default: 'draft']
+  "submitted_at" timestamptz
+  "validated_by" int8
+  "validated_at" timestamptz
+  "validation_comment" text
+  "issued_at" timestamptz
+  "paid_at" timestamptz
+  "cancelled_at" timestamptz
+  "created_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    project_id [type: btree, name: "idx_receipts_project"]
+  }
+  Note: '''RF-FIN-15, RF-FIN-16: coordination charging the requesting entity, validated by someone else before it is issued.
+CHECK receipts_validator_not_creator: (validated_by IS DISTINCT FROM created_by) OR (validated_by IS NULL)
+CHECK receipts_validated_before_issue: ((status)::text <> ALL ((ARRAY[\'validated\'::character varying, \'issued\'::character varying, \'paid\'::character varying])::text[])) OR (validated_at IS NOT NULL)
+CHECK receipts_status_valid: (status)::text = ANY ((ARRAY[\'draft\'::character varying, \'pending_validation\'::character varying, \'validated\'::character varying, \'issued\'::character varying, \'paid\'::character varying, \'cancelled\'::character varying])::text[])
+CHECK receipts_amount_positive: amount >= (0)::numeric'''
 }
 
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
@@ -890,6 +971,8 @@ Ref "invoices_created_by_fkey":"users"."id" < "invoices"."created_by" [delete: s
 
 Ref "invoices_file_id_fkey":"files"."id" < "invoices"."file_id"
 
+Ref "invoices_oficio_id_fkey":"oficios"."id" < "invoices"."oficio_id"
+
 Ref "invoices_project_id_fkey":"projects"."id" < "invoices"."project_id"
 
 Ref "invoices_provider_id_fkey":"providers"."id" < "invoices"."provider_id"
@@ -911,6 +994,24 @@ Ref "microsoft_accounts_user_id_fkey":"users"."id" < "microsoft_accounts"."user_
 Ref "microsoft_app_updated_by_fkey":"users"."id" < "microsoft_app"."updated_by"
 
 Ref "fk_notifications_user_id_users_id":"users"."id" < "notifications"."user_id"
+
+Ref "oficios_created_by_fkey":"users"."id" < "oficios"."created_by" [delete: set null]
+
+Ref "oficios_project_id_fkey":"projects"."id" < "oficios"."project_id"
+
+Ref "oficios_stamped_file_id_fkey":"files"."id" < "oficios"."stamped_file_id"
+
+Ref "payments_created_by_fkey":"users"."id" < "payments"."created_by" [delete: set null]
+
+Ref "payments_invoice_id_fkey":"invoices"."id" < "payments"."invoice_id"
+
+Ref "payments_oficio_id_fkey":"oficios"."id" < "payments"."oficio_id"
+
+Ref "payments_project_id_fkey":"projects"."id" < "payments"."project_id"
+
+Ref "payments_proof_file_id_fkey":"files"."id" < "payments"."proof_file_id"
+
+Ref "payments_provider_id_fkey":"providers"."id" < "payments"."provider_id"
 
 Ref "period_closures_created_by_fkey":"users"."id" < "period_closures"."created_by" [delete: set null]
 
@@ -951,6 +1052,16 @@ Ref "quotes_file_id_fkey":"files"."id" < "quotes"."file_id"
 Ref "quotes_project_id_fkey":"projects"."id" < "quotes"."project_id"
 
 Ref "quotes_provider_id_fkey":"providers"."id" < "quotes"."provider_id"
+
+Ref "receipts_created_by_fkey":"users"."id" < "receipts"."created_by" [delete: set null]
+
+Ref "receipts_file_id_fkey":"files"."id" < "receipts"."file_id"
+
+Ref "receipts_project_id_fkey":"projects"."id" < "receipts"."project_id"
+
+Ref "receipts_quote_id_fkey":"quotes"."id" < "receipts"."quote_id"
+
+Ref "receipts_validated_by_fkey":"users"."id" < "receipts"."validated_by" [delete: set null]
 
 Ref "requests_area_id_fkey":"areas"."id" < "requests"."area_id"
 
