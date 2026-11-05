@@ -210,7 +210,7 @@ describe("/api/finance", () => {
       assert.equal(after.expectedInvoices, 2);
       assert.equal(after.uploadedInvoices, 1);
       assert.equal(after.missingInvoices, 1);
-      assert.deepEqual(after.flags, ["missing_invoices"]);
+      assert.deepEqual(after.flags, ["missing_invoices", "invoice_not_in_oficio"]);
       assert.equal(after.invoices.length, 1);
 
       const listed = await server.get("/api/finance/projects?flag=missing_invoices", { token: moneyToken });

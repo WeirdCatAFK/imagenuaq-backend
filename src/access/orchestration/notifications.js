@@ -242,6 +242,23 @@ class Notifications {
     return this.deliver(await query.notifyFinanceGaps(now.toISOString(), days));
   }
 
+  /**
+   * Recuerda a quien movió un oficio que escriba el correo a quienes subieron sus facturas: al
+   * enviarlo (`step` = `sent`), que sus facturas van en él; al pagarse (`paid`), que ya se pagó.
+   * Avisar al solicitante es un correo de finanzas, no un aviso del sistema. Una vez por oficio y paso.
+   */
+  async remindOficioEmail(oficio, userId, step) {
+    const sent = step === "sent";
+    return this.deliver(
+      await query.notifyOficioEmail(oficio.id, userId, {
+        step,
+        title: sent ? "Avisa del oficio enviado" : "Avisa del oficio pagado",
+        lead: `Oficio ${oficio.folio} ${sent ? "enviado" : "pagado"}: escribe el correo a `,
+        trail: sent ? " de que sus facturas van en este oficio." : " de que ya se pagó.",
+      }),
+    );
+  }
+
   /** Registra este módulo como suscriptor de eventos de dominio. Se llama una vez al iniciar la aplicación. */
   subscribe() {
     events.on("notifications", (event) => this.handle(event));

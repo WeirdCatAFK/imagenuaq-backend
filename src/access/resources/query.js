@@ -52,29 +52,77 @@ const FOLDER_LINKS = `(select count(*)::int from access_tokens t
 const LIVE_PROJECT = "p.deleted_at is null and p.closed_at is null and p.archived_at is null";
 
 /**
- * The `logged` CTE of a finance write: one `logs` row per row of CTE `changed`, in the same
- * statement as the change, so a write and its trail cannot part (DATAMODEL §5.6). `actor` is the
- * placeholder holding the actor's id and `before` the SQL for `before_data`. An action missing
- * from the catalogue leaves `action_id` null, which fails the whole statement.
+ * A CTE (named `name`, `logged` by default) of a finance write: one `logs` row per row of CTE
+ * `source` (`changed` by default), in the same statement as the change, so a write and its trail
+ * cannot part (DATAMODEL §5.6). `actor` is the placeholder holding the actor's id and `before` the
+ * SQL for `before_data`, over alias `c`. An action missing from the catalogue leaves `action_id`
+ * null, which fails the whole statement.
  */
-const loggedChange = (action, table, actor, before = "null") => `logged as (
+const loggedChange = (action, table, actor, before = "null", { source = "changed", name = "logged" } = {}) => `${name} as (
     insert into logs (user_id, action_id, area_id, target_table, target_id, before_data, after_data)
     select ${actor}::bigint, (select id from actions where code = '${action}'),
            (select primary_area_id from users where id = ${actor}::bigint),
            '${table}', c.id, ${before}, to_jsonb(c)
-      from changed c
+      from ${source} c
   )`;
+
+/** `before_data` for rows of `table` updated in the same statement: the snapshot the statement started from. */
+const beforeRow = (table) => `(select to_jsonb(b) from ${table} b where b.id = c.id)`;
+
+/** Finance tables that are cancelled rather than deleted, so they have no `deleted_at`. */
+const UNDELETABLE = new Set(["receipts"]);
+
+/** RF-FIN-13: days a sent oficio may wait for its answer before finance is told. */
+const UNANSWERED_DAYS = 15;
 
 /** The finance columns of a quote or invoice list: its project and its provider. Expects alias `x`. */
 const FINANCE_JOINS = `
   join projects p on p.id = x.project_id and p.deleted_at is null
   left join providers pr on pr.id = x.provider_id`;
 const FINANCE_COLUMNS = "x.*, p.key as project_key, p.title as project_title, pr.name as provider_name";
+
+/** An invoice with its oficio's folio and what outgoing payments have covered. Expects alias `x`. */
+const INVOICE_COLUMNS = `${FINANCE_COLUMNS}, o.folio as oficio_folio,
+  (select coalesce(sum(pm.amount), 0) from payments pm
+    where pm.invoice_id = x.id and pm.deleted_at is null) as paid_amount`;
+const INVOICE_JOINS = `${FINANCE_JOINS}
+  left join oficios o on o.id = x.oficio_id`;
+
+/**
+ * An oficio with its project, its invoices, their total, what incoming payments have covered, and
+ * how many days a sent or signed one has waited for its answer. Expects alias `o`.
+ */
+const OFICIO_SELECT = `select o.*, p.key as project_key, p.title as project_title,
+    coalesce((select json_agg(json_build_object('id', i.id, 'invoiceFolio', i.invoice_folio,
+                                                'amount', i.amount, 'status', i.status) order by i.id)
+                from invoices i where i.oficio_id = o.id and i.deleted_at is null), '[]'::json) as invoices,
+    (select coalesce(sum(i.amount), 0) from invoices i
+      where i.oficio_id = o.id and i.deleted_at is null) as invoices_total,
+    (select coalesce(sum(pm.amount), 0) from payments pm
+      where pm.oficio_id = o.id and pm.deleted_at is null) as paid_amount,
+    case when o.status in ('sent', 'signed')
+         then current_date - (o.sent_at at time zone 'America/Mexico_City')::date end as days_unanswered
+  from oficios o
+  join projects p on p.id = o.project_id and p.deleted_at is null`;
+
+/** A payment with its project and what it pays. Expects alias `x`. */
+const PAYMENT_SELECT = `select x.*, p.key as project_key, p.title as project_title,
+    pr.name as provider_name, o.folio as oficio_folio, i.invoice_folio
+  from payments x
+  join projects p on p.id = x.project_id and p.deleted_at is null
+  left join providers pr on pr.id = x.provider_id
+  left join oficios o on o.id = x.oficio_id
+  left join invoices i on i.id = x.invoice_id`;
+
+/** A referenced receipt with its project. Expects alias `x`. */
+const RECEIPT_SELECT = `select x.*, p.key as project_key, p.title as project_title
+  from receipts x
+  join projects p on p.id = x.project_id and p.deleted_at is null`;
 /**
  * The CTEs `stats` and `flagged`: each project matching `where` (SQL over alias `p`, live ones
  * only) with its invoice and quote counts and its finance `flags` (DATAMODEL §2.20). A project
- * marked `no_finance` never has a flag. The finance
- * list and the weekly digest read the same flags from here. Each count is a correlated subquery
+ * marked `no_finance` never has a flag: it cannot hold finance records. The finance list and the
+ * digest read the same flags from here. Each count is a correlated subquery
  * on an indexed `project_id`.
  */
 const financeStanding = (where) => `stats as (
@@ -88,6 +136,20 @@ const financeStanding = (where) => `stats as (
                   where q.project_id = p.id and q.deleted_at is null) as quotes,
                 (select count(*)::int from quotes q
                   where q.project_id = p.id and q.deleted_at is null and q.status <> 'rejected') as standing_quotes,
+                (select count(*)::int from oficios o
+                  where o.project_id = p.id and o.deleted_at is null) as oficios,
+                (select count(*)::int from payments pm
+                  where pm.project_id = p.id and pm.deleted_at is null) as payments,
+                (select count(*)::int from receipts r where r.project_id = p.id) as receipts,
+                exists (select 1 from invoices i
+                         where i.project_id = p.id and i.deleted_at is null
+                           and i.status = 'uploaded' and i.oficio_id is null) as unsent,
+                exists (select 1 from oficios o
+                         where o.project_id = p.id and o.deleted_at is null and o.status in ('sent', 'signed')
+                           and o.sent_at < current_timestamp - make_interval(days => ${UNANSWERED_DAYS})) as unanswered,
+                exists (select 1 from payments pm
+                         where pm.project_id = p.id and pm.deleted_at is null
+                           and pm.tracking_folio is null) as no_folio,
                 (p.closed_at is not null or exists (
                    select 1 from flow_phases fp
                      join flow_stages fs on fs.phase_id = fp.id
@@ -105,7 +167,11 @@ const financeStanding = (where) => `stats as (
                        when s.expected > s.uploaded then 'missing_invoices' end,
                   case when s.has_cost and s.standing_quotes = 0 then 'costed_no_quote' end,
                   case when s.has_cost and s.delivered and s.uploaded = 0 then 'delivered_no_invoice' end,
-                  case when not s.no_finance and s.quotes = 0 and s.uploaded = 0 then 'no_finance_records' end
+                  case when s.unsent then 'invoice_not_in_oficio' end,
+                  case when s.unanswered then 'oficio_unanswered' end,
+                  case when s.no_folio then 'payment_no_folio' end,
+                  case when not s.no_finance and s.quotes + s.uploaded + s.oficios + s.payments + s.receipts = 0
+                       then 'no_finance_records' end
                 ], null) as flags
            from stats s
        )`;
@@ -4515,7 +4581,8 @@ class Query {
     const columns = Object.keys(fields);
     const [row] = await this.#rows(
       `with prior as (
-         select * from ${table} x where x.id = $2 and x.deleted_at is null and ${guard}
+         select * from ${table} x
+          where x.id = $2 and ${UNDELETABLE.has(table) ? "true" : "x.deleted_at is null"} and ${guard}
        ),
        changed as (
          update ${table} x
@@ -4605,7 +4672,7 @@ class Query {
 
   async getInvoice(invoiceId) {
     const [row] = await this.#rows(
-      `select ${FINANCE_COLUMNS} from invoices x ${FINANCE_JOINS} where x.id = $1 and x.deleted_at is null`,
+      `select ${INVOICE_COLUMNS} from invoices x ${INVOICE_JOINS} where x.id = $1 and x.deleted_at is null`,
       [invoiceId],
     );
     return row ?? null;
@@ -4614,7 +4681,7 @@ class Query {
   /** Live invoices, newest first, optionally of one project or in one status. */
   async listInvoices({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
-      `select ${FINANCE_COLUMNS} from invoices x ${FINANCE_JOINS}
+      `select ${INVOICE_COLUMNS} from invoices x ${INVOICE_JOINS}
         where x.deleted_at is null
           and ($1::bigint is null or x.project_id = $1::bigint)
           and ($2::text is null or x.status = $2::text)
@@ -4703,7 +4770,10 @@ class Query {
          select count(*)::int as projects,
                 count(*) filter (where 'missing_invoices' = any(flags))::int as missing,
                 count(*) filter (where 'costed_no_quote' = any(flags))::int as no_quote,
-                count(*) filter (where 'delivered_no_invoice' = any(flags))::int as no_invoice
+                count(*) filter (where 'delivered_no_invoice' = any(flags))::int as no_invoice,
+                count(*) filter (where 'invoice_not_in_oficio' = any(flags))::int as unsent,
+                count(*) filter (where 'oficio_unanswered' = any(flags))::int as unanswered,
+                count(*) filter (where 'payment_no_folio' = any(flags))::int as no_folio
            from gaps
        ),
        finance_people as (
@@ -4733,7 +4803,10 @@ class Query {
                 t.projects || ' proyecto(s) con pendientes de finanzas: '
                   || t.missing || ' con facturas faltantes, '
                   || t.no_quote || ' con costo y sin cotización, '
-                  || t.no_invoice || ' entregados sin facturas.' as message
+                  || t.no_invoice || ' entregados sin facturas, '
+                  || t.unsent || ' con facturas sin oficio, '
+                  || t.unanswered || ' con oficios sin respuesta y '
+                  || t.no_folio || ' con pagos sin folio de rastreo.' as message
            from finance_people f, totals t
           where t.projects > 0
          union all
@@ -4752,6 +4825,230 @@ class Query {
        on conflict (user_id, dedup_key) where dedup_key is not null do nothing
        returning *`,
       [now, days],
+    );
+  }
+
+  async getOficio(oficioId) {
+    const [row] = await this.#rows(`${OFICIO_SELECT} where o.id = $1 and o.deleted_at is null`, [oficioId]);
+    return row ?? null;
+  }
+
+  /**
+   * Live oficios, newest first. With `unansweredDays`, only those sent or signed longer ago than
+   * that, oldest first (RF-FIN-13).
+   */
+  async listOficios({ projectId = null, status = null, unansweredDays = null, limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `${OFICIO_SELECT}
+        where o.deleted_at is null
+          and ($1::bigint is null or o.project_id = $1::bigint)
+          and ($2::text is null or o.status = $2::text)
+          and ($3::int is null or (o.status in ('sent', 'signed')
+                                   and o.sent_at < current_timestamp - make_interval(days => $3::int)))
+        order by case when $3::int is not null then o.sent_at end asc nulls last, o.created_at desc, o.id desc
+        limit $4 offset $5`,
+      [projectId, status, unansweredDays, limit, offset],
+    );
+  }
+
+  /**
+   * Creates an oficio and puts `invoiceIds` in it, logging both, in one statement. Only live,
+   * `uploaded` invoices of the same project that are in no oficio are taken; the caller checks
+   * them first.
+   *
+   * @returns {Promise<object>} the new oficio row
+   */
+  async createOficio(fields, invoiceIds, actorId) {
+    const columns = Object.keys(fields);
+    const [row] = await this.#rows(
+      `with changed as (
+         insert into oficios (${columns.join(", ")})
+         select ${columns.join(", ")} from json_populate_record(null::oficios, $2::json)
+         returning *
+       ),
+       attached as (
+         update invoices i set oficio_id = (select id from changed)
+          where i.id = any(coalesce($3::bigint[], '{}')) and i.deleted_at is null and i.oficio_id is null
+            and i.status = 'uploaded' and i.project_id = (select project_id from changed)
+         returning i.*
+       ),
+       ${loggedChange("oficio_created", "oficios", "$1")},
+       ${loggedChange("invoice_updated", "invoices", "$1", beforeRow("invoices"), { source: "attached", name: "logged_attached" })}
+       select * from changed`,
+      [actorId, JSON.stringify(fields), this.#idArray(invoiceIds)],
+    );
+    return row;
+  }
+
+  async updateOficio(oficioId, fields, { actorId, guard }) {
+    return this.#financeUpdate("oficios", oficioId, fields, { action: "oficio_updated", actorId, guard });
+  }
+
+  /**
+   * Replaces the invoices of an oficio still `issued`, logging each invoice that leaves or joins,
+   * in one statement.
+   *
+   * @returns {Promise<boolean>} false when the oficio is missing or no longer `issued`
+   */
+  async setOficioInvoices(oficioId, invoiceIds, actorId) {
+    const [row] = await this.#rows(
+      `with prior as (
+         select * from oficios x where x.id = $2 and x.deleted_at is null and x.status = 'issued'
+       ),
+       detached as (
+         update invoices i set oficio_id = null
+           from prior
+          where i.oficio_id = prior.id and not (i.id = any(coalesce($3::bigint[], '{}')))
+         returning i.*
+       ),
+       attached as (
+         update invoices i set oficio_id = prior.id
+           from prior
+          where i.id = any(coalesce($3::bigint[], '{}')) and i.oficio_id is null and i.deleted_at is null
+            and i.status = 'uploaded' and i.project_id = prior.project_id
+         returning i.*
+       ),
+       ${loggedChange("invoice_updated", "invoices", "$1", beforeRow("invoices"), { source: "detached", name: "logged_detached" })},
+       ${loggedChange("invoice_updated", "invoices", "$1", beforeRow("invoices"), { source: "attached", name: "logged_attached" })}
+       select exists (select 1 from prior) as found`,
+      [actorId, oficioId, this.#idArray(invoiceIds)],
+    );
+    return row.found;
+  }
+
+  /**
+   * Moves an oficio to `status`, stamping `stampColumn` with `at`, when its status is one of `from`.
+   * Leaving `issued` also marks its `uploaded` invoices `sent` (RF-FIN-10). One statement, logged.
+   *
+   * @returns {Promise<object | null>} the oficio row, or null when missing or not movable
+   */
+  async advanceOficio(oficioId, { status, stampColumn, from, at }, actorId) {
+    const [row] = await this.#rows(
+      `with prior as (
+         select * from oficios x where x.id = $2 and x.deleted_at is null and x.status = any($4::text[])
+       ),
+       changed as (
+         update oficios x set status = $3, ${stampColumn} = $5::timestamptz
+           from prior
+          where x.id = prior.id
+         returning x.*
+       ),
+       sent_invoices as (
+         update invoices i set status = 'sent', sent_at = $5::timestamptz
+           from prior
+          where i.oficio_id = prior.id and prior.status = 'issued'
+            and i.status = 'uploaded' and i.deleted_at is null
+         returning i.*
+       ),
+       ${loggedChange("oficio_status_changed", "oficios", "$1", "(select to_jsonb(prior) from prior)")},
+       ${loggedChange("invoice_status_changed", "invoices", "$1", beforeRow("invoices"), { source: "sent_invoices", name: "logged_invoices" })}
+       select * from changed`,
+      [actorId, oficioId, status, from, at],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Deletes an oficio still `issued` and releases its invoices, logged, in one statement.
+   *
+   * @returns {Promise<object | null>} the deleted row, or null when missing or no longer `issued`
+   */
+  async deleteOficio(oficioId, actorId, at) {
+    const [row] = await this.#rows(
+      `with prior as (
+         select * from oficios x where x.id = $2 and x.deleted_at is null and x.status = 'issued'
+       ),
+       changed as (
+         update oficios x set deleted_at = $3::timestamptz from prior where x.id = prior.id returning x.*
+       ),
+       released as (
+         update invoices i set oficio_id = null from prior where i.oficio_id = prior.id returning i.*
+       ),
+       ${loggedChange("oficio_deleted", "oficios", "$1", "(select to_jsonb(prior) from prior)")},
+       ${loggedChange("invoice_updated", "invoices", "$1", beforeRow("invoices"), { source: "released", name: "logged_released" })}
+       select * from changed`,
+      [actorId, oficioId, at],
+    );
+    return row ?? null;
+  }
+
+  async createPayment(fields, actorId) {
+    return this.#financeInsert("payments", fields, { action: "payment_created", actorId });
+  }
+
+  async updatePayment(paymentId, fields, { action = "payment_updated", actorId }) {
+    return this.#financeUpdate("payments", paymentId, fields, { action, actorId });
+  }
+
+  async getPayment(paymentId) {
+    const [row] = await this.#rows(`${PAYMENT_SELECT} where x.id = $1 and x.deleted_at is null`, [paymentId]);
+    return row ?? null;
+  }
+
+  /** Live payments, newest first; `missingFolio` keeps those with no tracking folio (RF-FIN-14). */
+  async listPayments({ projectId = null, direction = null, missingFolio = null, limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `${PAYMENT_SELECT}
+        where x.deleted_at is null
+          and ($1::bigint is null or x.project_id = $1::bigint)
+          and ($2::text is null or x.direction = $2::text)
+          and ($3::boolean is null or (x.tracking_folio is null) = $3::boolean)
+        order by x.paid_on desc nulls last, x.id desc
+        limit $4 offset $5`,
+      [projectId, direction, missingFolio, limit, offset],
+    );
+  }
+
+  async createReceipt(fields, actorId) {
+    return this.#financeInsert("receipts", fields, { action: "receipt_created", actorId });
+  }
+
+  async updateReceipt(receiptId, fields, { action = "receipt_updated", actorId, guard }) {
+    return this.#financeUpdate("receipts", receiptId, fields, { action, actorId, guard });
+  }
+
+  async getReceipt(receiptId) {
+    const [row] = await this.#rows(`${RECEIPT_SELECT} where x.id = $1`, [receiptId]);
+    return row ?? null;
+  }
+
+  /** Referenced receipts, newest first. */
+  async listReceipts({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `${RECEIPT_SELECT}
+        where ($1::bigint is null or x.project_id = $1::bigint)
+          and ($2::text is null or x.status = $2::text)
+        order by x.created_at desc, x.id desc
+        limit $3 offset $4`,
+      [projectId, status, limit, offset],
+    );
+  }
+
+  /**
+   * Reminds `userId` to email the people who uploaded an oficio's invoices: the message is
+   * `lead` + their addresses + `trail`. Nothing when the invoices have no live uploader; a used
+   * `oficio-email:<id>:<step>` key writes nothing.
+   *
+   * @returns {Promise<object[]>} the notifications written
+   */
+  async notifyOficioEmail(oficioId, userId, { step, title, lead, trail }) {
+    return this.#rows(
+      `with emails as (
+         select string_agg(distinct u.email, ', ' order by u.email) as list
+           from invoices i
+           join users u on u.id = i.created_by and u.deleted_at is null
+          where i.oficio_id = $1 and i.deleted_at is null
+       )
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select $2, 'recordatorio', 'proyecto', $4::text, $5::text || e.list || $6::text,
+              'oficios', $1, 'oficio-email:' || $1 || ':' || $3::text
+         from emails e
+        where e.list is not null
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [oficioId, userId, step, title, lead, trail],
     );
   }
 }

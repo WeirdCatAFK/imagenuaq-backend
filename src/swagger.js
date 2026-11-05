@@ -297,10 +297,11 @@ export function buildOpenApiDocument() {
       {
         name: 'finance',
         description:
-          'Quotes, invoices, providers and what each project is missing (RF-FIN-01 to RF-FIN-10, ' +
-          'RF-FIN-18; DATAMODEL §2.20). Areas upload with `project.write`; finance decides quotes and ' +
-          'edits providers with `finance.write`, and reads across projects with `finance.read`. Little ' +
-          'is required: finance reads the gaps instead. Amounts travel as strings with two decimals.',
+          'The finance cycle and what each project is missing (RF-FIN-01 to RF-FIN-18; DATAMODEL §2.20): ' +
+          'quotes, invoices, oficios, payments both ways, referenced receipts and providers. Areas upload ' +
+          'quotes and invoices with `project.write`; the rest is `finance.write`, and validating a receipt ' +
+          '`finance.validate`. Little is required: finance reads the gaps instead. Amounts travel as ' +
+          'strings with two decimals.',
       },
     ],
     components: {
@@ -2166,10 +2167,97 @@ export function buildOpenApiDocument() {
               type: 'array',
               items: {
                 type: 'string',
-                enum: ['missing_invoices', 'costed_no_quote', 'delivered_no_invoice', 'no_finance_records'],
+                enum: [
+                  'missing_invoices',
+                  'costed_no_quote',
+                  'delivered_no_invoice',
+                  'invoice_not_in_oficio',
+                  'oficio_unanswered',
+                  'payment_no_folio',
+                  'no_finance_records',
+                ],
               },
             },
           },
+        },
+        Oficio: {
+          type: 'object',
+          description: 'RF-FIN-11 to RF-FIN-13: a charge to the requesting entity, carrying invoices of one project.',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            projectId: { type: 'integer', readOnly: true },
+            projectKey: { type: 'string', readOnly: true },
+            folio: { type: 'string', maxLength: 100, description: 'Unique, case-insensitive, among live oficios.' },
+            recipient: { type: ['string', 'null'] },
+            amount: { type: 'string', example: '150.50', description: 'Typed; may differ from its invoices.' },
+            note: { type: ['string', 'null'] },
+            stampedFileId: { type: ['integer', 'null'], description: "The stamped document, a file in the project's folder." },
+            invoiceIds: { type: 'array', items: { type: 'integer' }, writeOnly: true },
+            status: { type: 'string', enum: ['issued', 'sent', 'signed', 'answered', 'paid'], readOnly: true },
+            sentAt: { type: ['string', 'null'], format: 'date-time', readOnly: true },
+            signedAt: { type: ['string', 'null'], format: 'date-time', readOnly: true },
+            answeredAt: { type: ['string', 'null'], format: 'date-time', readOnly: true },
+            paidAt: { type: ['string', 'null'], format: 'date-time', readOnly: true },
+            daysUnanswered: { type: ['integer', 'null'], readOnly: true, description: 'Days since sent, while sent or signed.' },
+            invoices: {
+              type: 'array',
+              readOnly: true,
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'integer' },
+                  invoiceFolio: { type: ['string', 'null'] },
+                  amount: { type: 'string' },
+                  status: { type: 'string' },
+                },
+              },
+            },
+            invoicesTotal: { type: 'string', readOnly: true },
+            amountMismatch: { type: 'boolean', readOnly: true, description: '`amount` differs from `invoicesTotal`.' },
+            paidAmount: { type: 'string', readOnly: true, description: 'Sum of its incoming payments.' },
+            balance: { type: 'string', readOnly: true },
+          },
+          required: ['folio', 'amount'],
+        },
+        Payment: {
+          type: 'object',
+          description: 'RF-FIN-14: `incoming` pays an oficio, `outgoing` a provider invoice. Never moves a status.',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            projectId: { type: 'integer', readOnly: true },
+            direction: { type: 'string', enum: ['incoming', 'outgoing'], description: 'Fixed at creation.' },
+            oficioId: { type: ['integer', 'null'], description: 'Required for `incoming`; fixed at creation.' },
+            invoiceId: { type: ['integer', 'null'], description: 'Required for `outgoing`; fixed at creation.' },
+            providerId: { type: ['integer', 'null'] },
+            amount: { type: 'string', example: '40.00' },
+            paidOn: { type: ['string', 'null'], format: 'date' },
+            trackingFolio: { type: ['string', 'null'], description: 'Folio of the financial system. Null = not delivered.' },
+            proofFileId: { type: ['integer', 'null'] },
+            note: { type: ['string', 'null'] },
+          },
+          required: ['amount'],
+        },
+        Receipt: {
+          type: 'object',
+          description: 'RF-FIN-15, RF-FIN-16: a referenced receipt, validated by someone other than its creator.',
+          properties: {
+            id: { type: 'integer', readOnly: true },
+            projectId: { type: 'integer', readOnly: true },
+            quoteId: { type: ['integer', 'null'], description: 'A quote of the same project.' },
+            requester: { type: ['string', 'null'] },
+            amount: { type: 'string', example: '500.00' },
+            reference: { type: ['string', 'null'] },
+            concept: { type: ['string', 'null'] },
+            fileId: { type: ['integer', 'null'] },
+            status: {
+              type: 'string',
+              enum: ['draft', 'pending_validation', 'validated', 'issued', 'paid', 'cancelled'],
+              readOnly: true,
+            },
+            validatedBy: { type: ['integer', 'null'], readOnly: true },
+            validationComment: { type: ['string', 'null'], readOnly: true, description: 'Also the reason of the last rejection.' },
+          },
+          required: ['amount'],
         },
         SharedFolder: {
           type: 'object',
@@ -5093,7 +5181,15 @@ export function buildOpenApiDocument() {
               in: 'query',
               schema: {
                 type: 'string',
-                enum: ['missing_invoices', 'costed_no_quote', 'delivered_no_invoice', 'no_finance_records'],
+                enum: [
+                  'missing_invoices',
+                  'costed_no_quote',
+                  'delivered_no_invoice',
+                  'invoice_not_in_oficio',
+                  'oficio_unanswered',
+                  'payment_no_folio',
+                  'no_finance_records',
+                ],
               },
             },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200, default: 50 } },
@@ -5114,7 +5210,11 @@ export function buildOpenApiDocument() {
           description: 'Needs `project.read` or `finance.read`.',
           parameters: [pathId('id', 'projects.id')],
           responses: {
-            200: { description: '`{ finance: { ...FinanceStanding, quotes: [Quote], invoices: [Invoice] } }`.' },
+            200: {
+              description:
+                '`{ finance: { ...FinanceStanding, quotes: [Quote], invoices: [Invoice], oficios: [Oficio], ' +
+                'payments: [Payment], receipts: [Receipt] } }`.',
+            },
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such project.', 'Project not found.'),
@@ -5371,6 +5471,353 @@ export function buildOpenApiDocument() {
             403: FORBIDDEN,
             404: errorResponse('Missing or deleted.', 'Invoice not found.'),
             409: errorResponse('Already sent.', 'An invoice already sent cannot be deleted.'),
+          },
+        },
+      },
+      '/api/finance/invoices/{id}/status': {
+        post: {
+          tags: ['finance'],
+          summary: 'Move an invoice to in_payment or paid',
+          description:
+            'Needs `finance.write` (RF-FIN-10). `in_payment` (from uploaded or sent) needs `paymentFolio`, the folio ' +
+            'that proves it went to payment; `paid` only from `in_payment`. `sent` is set by its oficio.',
+          parameters: [pathId('id', 'invoices.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string', enum: ['in_payment', 'paid'] },
+                    paymentFolio: { type: 'string' },
+                  },
+                  required: ['status'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The invoice.', 'invoice', 'Invoice'),
+            400: errorResponse('An unknown status or a missing folio.', 'paymentFolio is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Invoice not found.'),
+            409: errorResponse('Not from its status.', 'An invoice that is uploaded cannot move to paid.'),
+          },
+        },
+      },
+      '/api/finance/oficios': {
+        get: {
+          tags: ['finance'],
+          summary: 'Oficios across projects',
+          description:
+            'Needs `finance.read`. With `unansweredDays`, only those sent or signed longer ago, oldest first (RF-FIN-13).',
+          parameters: [
+            { name: 'status', in: 'query', schema: { type: 'string', enum: ['issued', 'sent', 'signed', 'answered', 'paid'] } },
+            { name: 'projectId', in: 'query', schema: { type: 'integer' } },
+            { name: 'unansweredDays', in: 'query', schema: { type: 'integer', minimum: 0 } },
+          ],
+          responses: { 200: wrapped('The oficios.', 'oficios', 'Oficio', true), 401: UNAUTHORIZED, 403: FORBIDDEN },
+        },
+      },
+      '/api/finance/projects/{id}/oficios': {
+        post: {
+          tags: ['finance'],
+          summary: 'Issue an oficio with some of the project invoices',
+          description:
+            'Needs `finance.write`. Its invoices must be of this project, `uploaded` and in no other oficio.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('Oficio'),
+          responses: {
+            201: wrapped('The oficio.', 'oficio', 'Oficio'),
+            400: errorResponse('A bad field or an invoice of another project.', 'Invoice 7 is not an invoice of this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse(
+              'The folio is used, an invoice is taken, or the project has no finance.',
+              'Invoice 7 is already sent or in another oficio.',
+            ),
+          },
+        },
+      },
+      '/api/finance/oficios/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: 'One oficio',
+          parameters: [pathId('id', 'oficios.id')],
+          responses: {
+            200: wrapped('The oficio.', 'oficio', 'Oficio'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Oficio not found.'),
+          },
+        },
+        patch: {
+          tags: ['finance'],
+          summary: 'Correct an oficio',
+          description:
+            'Needs `finance.write`. Its fields change at any step (the stamped document arrives once signed); ' +
+            '`invoiceIds` replaces its invoices only while `issued`.',
+          parameters: [pathId('id', 'oficios.id')],
+          requestBody: jsonBody('Oficio'),
+          responses: {
+            200: wrapped('The oficio.', 'oficio', 'Oficio'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Oficio not found.'),
+            409: errorResponse('Invoices of an oficio already sent.', 'The invoices of an oficio already sent cannot change.'),
+          },
+        },
+        delete: {
+          tags: ['finance'],
+          summary: 'Delete an oficio still issued',
+          description: 'Needs `finance.write`. Its invoices are released.',
+          parameters: [pathId('id', 'oficios.id')],
+          responses: {
+            200: wrapped('The deleted oficio.', 'oficio', 'Oficio'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Oficio not found.'),
+            409: errorResponse('Already sent.', 'An oficio already sent cannot be deleted.'),
+          },
+        },
+      },
+      '/api/finance/oficios/{id}/status': {
+        post: {
+          tags: ['finance'],
+          summary: 'Move an oficio forward',
+          description:
+            'Needs `finance.write` (RF-FIN-12). Forward only, may skip; only the step reached is dated. Leaving ' +
+            '`issued` marks its invoices `sent`. Leaving `issued` and reaching `paid` remind the caller, by ' +
+            'notification, to email the people who uploaded its invoices.',
+          parameters: [pathId('id', 'oficios.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { status: { type: 'string', enum: ['sent', 'signed', 'answered', 'paid'] } },
+                  required: ['status'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The oficio.', 'oficio', 'Oficio'),
+            400: errorResponse('An unknown step.', 'status must be one of: sent, signed, answered, paid.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Oficio not found.'),
+            409: errorResponse('Not ahead of its step.', 'An oficio that is answered cannot move to signed.'),
+          },
+        },
+      },
+      '/api/finance/payments': {
+        get: {
+          tags: ['finance'],
+          summary: 'Payments across projects',
+          description: 'Needs `finance.read`. `missingFolio=true` keeps those without a tracking folio (RF-FIN-14).',
+          parameters: [
+            { name: 'direction', in: 'query', schema: { type: 'string', enum: ['incoming', 'outgoing'] } },
+            { name: 'projectId', in: 'query', schema: { type: 'integer' } },
+            { name: 'missingFolio', in: 'query', schema: { type: 'boolean' } },
+          ],
+          responses: { 200: wrapped('The payments.', 'payments', 'Payment', true), 401: UNAUTHORIZED, 403: FORBIDDEN },
+        },
+      },
+      '/api/finance/projects/{id}/payments': {
+        post: {
+          tags: ['finance'],
+          summary: 'Record a payment',
+          description:
+            'Needs `finance.write`. `incoming` names an oficio of the project, `outgoing` one of its invoices. ' +
+            'It never moves a status; the oficio or invoice shows its `balance`.',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('Payment'),
+          responses: {
+            201: wrapped('The payment.', 'payment', 'Payment'),
+            400: errorResponse('A bad field or a target of another project.', 'oficioId is not an oficio of this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('The project has no finance.', 'This project is marked as having no finance.'),
+          },
+        },
+      },
+      '/api/finance/payments/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: 'One payment',
+          parameters: [pathId('id', 'payments.id')],
+          responses: {
+            200: wrapped('The payment.', 'payment', 'Payment'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Payment not found.'),
+          },
+        },
+        patch: {
+          tags: ['finance'],
+          summary: 'Correct a payment, typically adding its tracking folio',
+          description: 'Needs `finance.write`. Direction and target are fixed.',
+          parameters: [pathId('id', 'payments.id')],
+          requestBody: jsonBody('Payment'),
+          responses: {
+            200: wrapped('The payment.', 'payment', 'Payment'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Payment not found.'),
+          },
+        },
+        delete: {
+          tags: ['finance'],
+          summary: 'Delete a payment',
+          description: 'Needs `finance.write`.',
+          parameters: [pathId('id', 'payments.id')],
+          responses: {
+            200: wrapped('The deleted payment.', 'payment', 'Payment'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Missing or deleted.', 'Payment not found.'),
+          },
+        },
+      },
+      '/api/finance/receipts': {
+        get: {
+          tags: ['finance'],
+          summary: 'Referenced receipts across projects',
+          description: 'Needs `finance.read`.',
+          parameters: [
+            {
+              name: 'status',
+              in: 'query',
+              schema: { type: 'string', enum: ['draft', 'pending_validation', 'validated', 'issued', 'paid', 'cancelled'] },
+            },
+            { name: 'projectId', in: 'query', schema: { type: 'integer' } },
+          ],
+          responses: { 200: wrapped('The receipts.', 'receipts', 'Receipt', true), 401: UNAUTHORIZED, 403: FORBIDDEN },
+        },
+      },
+      '/api/finance/projects/{id}/receipts': {
+        post: {
+          tags: ['finance'],
+          summary: 'Draft a referenced receipt',
+          description: 'Needs `finance.write` (RF-FIN-15).',
+          parameters: [pathId('id', 'projects.id')],
+          requestBody: jsonBody('Receipt'),
+          responses: {
+            201: wrapped('The receipt.', 'receipt', 'Receipt'),
+            400: errorResponse('A bad field or a quote of another project.', 'quoteId is not a quote of this project.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such project.', 'Project not found.'),
+            409: errorResponse('The project has no finance.', 'This project is marked as having no finance.'),
+          },
+        },
+      },
+      '/api/finance/receipts/{id}': {
+        get: {
+          tags: ['finance'],
+          summary: 'One receipt',
+          parameters: [pathId('id', 'receipts.id')],
+          responses: {
+            200: wrapped('The receipt.', 'receipt', 'Receipt'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such receipt.', 'Receipt not found.'),
+          },
+        },
+        patch: {
+          tags: ['finance'],
+          summary: 'Correct a draft',
+          description: 'Needs `finance.write`.',
+          parameters: [pathId('id', 'receipts.id')],
+          requestBody: jsonBody('Receipt'),
+          responses: {
+            200: wrapped('The receipt.', 'receipt', 'Receipt'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such receipt.', 'Receipt not found.'),
+            409: errorResponse('Not a draft.', 'Only a draft receipt can be changed.'),
+          },
+        },
+      },
+      '/api/finance/receipts/{id}/submit': {
+        post: {
+          tags: ['finance'],
+          summary: 'Send a draft to be validated',
+          description: 'Needs `finance.write` (RF-FIN-16).',
+          parameters: [pathId('id', 'receipts.id')],
+          responses: {
+            200: wrapped('The receipt.', 'receipt', 'Receipt'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such receipt.', 'Receipt not found.'),
+            409: errorResponse('Not a draft.', 'Only a draft receipt can be submitted.'),
+          },
+        },
+      },
+      '/api/finance/receipts/{id}/validation': {
+        post: {
+          tags: ['finance'],
+          summary: 'Validate a receipt, or send it back to draft',
+          description:
+            'Needs `finance.validate` (RF-FIN-16), and never by whoever created it (403). `rejected` returns it to ' +
+            '`draft` with the comment as the reason.',
+          parameters: [pathId('id', 'receipts.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    decision: { type: 'string', enum: ['approved', 'rejected'] },
+                    comment: { type: 'string' },
+                  },
+                  required: ['decision'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The receipt.', 'receipt', 'Receipt'),
+            400: errorResponse('No decision.', 'decision is required.'),
+            401: UNAUTHORIZED,
+            403: errorResponse('Missing the permission, or its creator.', 'A receipt cannot be validated by whoever created it.'),
+            404: errorResponse('No such receipt.', 'Receipt not found.'),
+            409: errorResponse('Not awaiting validation.', 'Only a receipt awaiting validation can be validated.'),
+          },
+        },
+      },
+      '/api/finance/receipts/{id}/status': {
+        post: {
+          tags: ['finance'],
+          summary: 'Issue, mark paid or cancel a receipt',
+          description: 'Needs `finance.write`. `issued` only once validated, `paid` only once issued; cancel anything not paid.',
+          parameters: [pathId('id', 'receipts.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { status: { type: 'string', enum: ['issued', 'paid', 'cancelled'] } },
+                  required: ['status'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The receipt.', 'receipt', 'Receipt'),
+            400: errorResponse('An unknown status.', 'status must be one of: issued, paid, cancelled.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such receipt.', 'Receipt not found.'),
+            409: errorResponse('Not from its status.', 'A receipt that is draft cannot move to issued.'),
           },
         },
       },
