@@ -88,6 +88,27 @@ router.post("/folders/:id/files", async (req, res) => {
   res.status(201).json({ file });
 });
 
+router.post("/folders/:id/uploads", async (req, res) => {
+  const { name, mime } = req.body ?? {};
+  const uploadId = await documents.beginUpload(folderId(req), { name, mime });
+  res.status(201).json({ uploadId });
+});
+
+router.put("/uploads/:id/:partNumber", async (req, res) => {
+  const result = await documents.uploadChunk(req.params.id, Number(req.params.partNumber), req);
+  res.json(result);
+});
+
+router.post("/uploads/:id/complete", async (req, res) => {
+  const file = await documents.finishUpload(req.params.id);
+  res.status(201).json({ file });
+});
+
+router.delete("/uploads/:id", async (req, res) => {
+  await documents.abortUpload(req.params.id);
+  res.status(204).end();
+});
+
 router.patch("/:id", async (req, res) => {
   const { name, folderId: target } = req.body ?? {};
   res.json({ file: await documents.updateFile(fileId(req), { name, folderId: target }) });

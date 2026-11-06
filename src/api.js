@@ -73,7 +73,7 @@ export const ROUTERS = {
  * Routes that stream the request body themselves. express.json() must leave them unread,
  * or uploading a .json file would store an empty one.
  */
-const RAW_BODY_ROUTES = /^\/api\/documents\/folders\/\d+\/files(\?|$)/;
+const RAW_BODY_ROUTES = /^\/api\/documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)(\?|$)/;
 
 export default class Api {
   /**
