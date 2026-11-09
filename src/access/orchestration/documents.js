@@ -1,13 +1,22 @@
 // Folders, files and share links. Names and folders live in Postgres and bytes in MinIO under
 // their SHA-256, so renames and moves never touch MinIO. Upload the bytes first, then insert the row.
 // Every folder is readable by anyone the router lets in; area grants decide only who writes.
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { putContent, readContent, deleteContent, StorageError } from "../primitives/minioStorage.js";
+import {
+  putContent,
+  readContent,
+  deleteContent,
+  beginMultipart,
+  uploadPart,
+  completeMultipart,
+  abortMultipart,
+  StorageError,
+} from "../primitives/minioStorage.js";
 import {
   FOREIGN_KEY_VIOLATION,
   CHECK_VIOLATION,
@@ -19,6 +28,10 @@ import {
 
 const NAME_MAX = 255;
 const MIME_MAX = 255;
+
+/** Pending chunked uploads, keyed by our own UUID. Lost on restart, so the client retries. */
+const pendingUploads = new Map();
+const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 const LEVELS = ["read", "write"];
 const QUERY_MAX = 100;
 
@@ -467,16 +480,27 @@ class Documents {
   }
 
   /**
-   * Changes the retention. The route requires `document.manage`.
+   * Changes the retention: `months` for ordinary files, and for the files a finance record points
+   * at `financeMonths` or `financeKeepForever`. Each omitted setting keeps its value. The route
+   * requires `document.manage`.
    *
-   * @throws {ApiError} 400 unless `months` is a positive integer.
+   * @throws {ApiError} 400 on a month count that is not a positive integer, a non-boolean
+   *   `financeKeepForever`, or nothing to change.
    */
-  async setRetention(months) {
-    if (!Number.isInteger(months) || months < 1) {
-      throw ApiError.badRequest("months must be a positive integer.");
+  async setRetention({ months, financeMonths, financeKeepForever } = {}) {
+    for (const [field, value] of Object.entries({ months, financeMonths })) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+        throw ApiError.badRequest(`${field} must be a positive integer.`);
+      }
+    }
+    if (financeKeepForever !== undefined && typeof financeKeepForever !== "boolean") {
+      throw ApiError.badRequest("financeKeepForever must be a boolean.");
+    }
+    if (months === undefined && financeMonths === undefined && financeKeepForever === undefined) {
+      throw ApiError.badRequest("months, financeMonths or financeKeepForever is required.");
     }
     const before = await query.getRetention();
-    const row = await query.setRetention(months, currentActor().id);
+    const row = await query.setRetention({ months, financeMonths, financeKeepForever }, currentActor().id);
     await events.emit({
       action: "record_updated",
       target: { table: "file_retention", id: 1 },
@@ -510,6 +534,137 @@ class Documents {
       }
     }
     return { expired: rows.length, reclaimed };
+  }
+
+  /**
+   * Starts a chunked upload. The caller sends parts one at a time, then completes.
+   *
+   * @param {number} folderId
+   * @param {{name: string, mime?: string|null}} input
+   * @returns {Promise<string>} The upload id the client uses for subsequent calls.
+   * @throws {ApiError} 400, 403, 404.
+   */
+  async beginUpload(folderId, { name, mime = null }) {
+    const actor = currentActor();
+    const id = requireId(folderId, "folderId");
+    const cleanName = requireName(name);
+    const cleanMime = optionalText(mime, "mime", MIME_MAX);
+    await this.#writable(id);
+
+    sweepStaleUploads();
+
+    let multipart;
+    try {
+      multipart = await beginMultipart();
+    } catch (err) {
+      throw translateStorage(err);
+    }
+
+    const uploadId = randomUUID();
+    pendingUploads.set(uploadId, {
+      userId: actor.id,
+      folderId: id,
+      name: cleanName,
+      mime: cleanMime,
+      key: multipart.key,
+      s3UploadId: multipart.s3UploadId,
+      parts: [],
+      bytes: 0,
+      createdAt: Date.now(),
+    });
+    return uploadId;
+  }
+
+  /**
+   * Receives one chunk. Parts must arrive in order, starting at 1.
+   *
+   * @param {string} uploadId @param {number} partNumber 1-based.
+   * @param {import('node:stream').Readable} body
+   * @returns {Promise<{partNumber: number, size: number}>}
+   * @throws {ApiError} 400, 403, 404, 413.
+   */
+  async uploadChunk(uploadId, partNumber, body) {
+    const session = this.#requireUpload(uploadId);
+    const num = Number(partNumber);
+    if (!Number.isInteger(num) || num < 1) {
+      throw ApiError.badRequest("partNumber must be a positive integer.");
+    }
+
+    let result;
+    try {
+      result = await uploadPart(session.key, session.s3UploadId, num, body);
+    } catch (err) {
+      throw translateStorage(err);
+    }
+
+    const limit = maxUploadBytes();
+    if (limit != null && session.bytes + result.size > limit) {
+      await this.abortUpload(uploadId).catch(() => {});
+      throw new ApiError(413, `Upload exceeds ${limit} bytes.`);
+    }
+
+    session.bytes += result.size;
+    session.parts.push({ partNumber: num, etag: result.etag });
+    return { partNumber: num, size: result.size };
+  }
+
+  /**
+   * Assembles the parts, content-addresses the result and inserts the file row.
+   *
+   * @param {string} uploadId
+   * @returns {Promise<object>} The file, same shape as a single upload.
+   * @throws {ApiError} 400, 403, 404, 503.
+   */
+  async finishUpload(uploadId) {
+    const session = this.#requireUpload(uploadId);
+    if (session.parts.length === 0) throw ApiError.badRequest("No parts uploaded.");
+
+    let stored;
+    try {
+      stored = await completeMultipart(session.key, session.s3UploadId, session.parts);
+    } catch (err) {
+      pendingUploads.delete(uploadId);
+      throw translateStorage(err);
+    }
+    pendingUploads.delete(uploadId);
+
+    try {
+      const row = await query.createFile({
+        folderId: session.folderId,
+        authorId: session.userId,
+        hash: stored.hash,
+        name: session.name,
+        size: stored.size,
+        mime: session.mime,
+      });
+      await events.emit({ action: "file_uploaded", target: { table: "files", id: row.id }, after: row });
+      return shapeFile(row);
+    } catch (err) {
+      throw translate(err);
+    }
+  }
+
+  /**
+   * Cancels a chunked upload and cleans up S3 state.
+   *
+   * @param {string} uploadId
+   * @throws {ApiError} 404.
+   */
+  async abortUpload(uploadId) {
+    const session = this.#requireUpload(uploadId);
+    pendingUploads.delete(uploadId);
+    await abortMultipart(session.key, session.s3UploadId);
+  }
+
+  /**
+   * @returns {object} The pending upload session.
+   * @throws {ApiError} 404, 403.
+   */
+  #requireUpload(uploadId) {
+    const session = pendingUploads.get(uploadId);
+    if (!session) throw ApiError.notFound("Upload not found.");
+    if (session.userId !== currentActor().id) throw ApiError.forbidden("Not your upload.");
+    return session;
   }
 
   /** @throws {ApiError} 404 when the token is unknown, revoked, expired or its folder deleted. */
@@ -584,12 +739,28 @@ class Documents {
   }
 }
 
+function sweepStaleUploads() {
+  const cutoff = Date.now() - UPLOAD_TTL_MS;
+  for (const [id, session] of pendingUploads) {
+    if (session.createdAt < cutoff) {
+      pendingUploads.delete(id);
+      abortMultipart(session.key, session.s3UploadId).catch(() => {});
+    }
+  }
+}
+
 function isAdmin(actor) {
   return actor?.role === "admin";
 }
 
 function shapeRetention(row) {
-  return { months: row.months, updatedBy: row.updated_by, updatedAt: row.updated_at };
+  return {
+    months: row.months,
+    financeMonths: row.finance_months,
+    financeKeepForever: row.finance_keep_forever,
+    updatedBy: row.updated_by,
+    updatedAt: row.updated_at,
+  };
 }
 
 /** MAX_UPLOAD_BYTES, or no limit when unset. */

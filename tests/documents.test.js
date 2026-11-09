@@ -182,6 +182,47 @@ describe("/api/documents", () => {
       const logs = await logsFor("files", res.body.file.id);
       assert.deepEqual(logs.map((l) => l.action), ["file_uploaded"]);
     });
+
+    test("chunked upload assembles parts and serves the same bytes back", async () => {
+      const folder = await root();
+      const partA = randomBytes(5 * 1024 * 1024 + 1);
+      const partB = randomBytes(1024);
+      const allBytes = Buffer.concat([partA, partB]);
+
+      const init = await server.post(`/api/documents/folders/${folder.id}/uploads`, {
+        token: tokens.owner,
+        body: { name: "chunked.bin", mime: "application/octet-stream" },
+      });
+      assert.equal(init.status, 201);
+      const { uploadId } = init.body;
+
+      const p1 = await server.put(`/api/documents/uploads/${uploadId}/1`, {
+        token: tokens.owner,
+        raw: partA,
+        headers: { "content-type": "application/octet-stream" },
+      });
+      assert.equal(p1.status, 200);
+      assert.equal(p1.body.partNumber, 1);
+
+      const p2 = await server.put(`/api/documents/uploads/${uploadId}/2`, {
+        token: tokens.owner,
+        raw: partB,
+        headers: { "content-type": "application/octet-stream" },
+      });
+      assert.equal(p2.status, 200);
+
+      const complete = await server.post(`/api/documents/uploads/${uploadId}/complete`, {
+        token: tokens.owner,
+      });
+      assert.equal(complete.status, 201);
+      assert.equal(complete.body.file.name, "chunked.bin");
+      assert.equal(complete.body.file.size, allBytes.length);
+      assert.match(complete.body.file.hash, /^[0-9a-f]{64}$/);
+
+      const got = await download(complete.body.file.id);
+      assert.equal(got.status, 200);
+      assert.ok(got.bytes.equals(allBytes));
+    });
   });
 
   describe("the tree", () => {

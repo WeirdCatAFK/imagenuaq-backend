@@ -55,6 +55,29 @@ const HANDLERS = {
       dedupKey: `stage_signed_off:${approval.id}`,
     };
   },
+  project_closed: (event) => {
+    const gaps = (event.financeGaps ?? []).filter((flag) => flag !== "no_finance_records");
+    if (gaps.length === 0) return null;
+    return {
+      projectId: event.target.id,
+      permission: "finance.read",
+      exceptActor: true,
+      title: "Proyecto cerrado con pendientes",
+      lead: "Se cerró",
+      trail: ` con pendientes de finanzas: ${gaps.map((flag) => FINANCE_GAPS[flag] ?? flag).join(", ")}.`,
+      dedupKey: `project_closed:${event.target.id}`,
+    };
+  },
+};
+
+/**
+ * Cómo se lee cada pendiente de finanzas en un aviso (RF-FIN-08). `no_finance_records` no avisa
+ * por sí solo: un proyecto sin costo sin facturas es lo normal.
+ */
+const FINANCE_GAPS = {
+  missing_invoices: "faltan facturas",
+  costed_no_quote: "tiene costo y no tiene cotización",
+  delivered_no_invoice: "se entregó y no tiene facturas",
 };
 
 const MAX_TITLE = 300;
@@ -211,22 +234,52 @@ class Notifications {
     return this.deliver(await query.notifyFilesExpiring(now.toISOString(), days));
   }
 
+  /**
+   * Resumen de pendientes de finanzas: a finanzas, cuántos proyectos tienen cada pendiente; a cada
+   * líder de área, cuáles de los suyos. Una sola vez por persona cada `days` días.
+   */
+  async notifyFinanceGaps(now = new Date(), days = 3) {
+    return this.deliver(await query.notifyFinanceGaps(now.toISOString(), days));
+  }
+
+  /**
+   * Recuerda a quien movió un oficio que escriba el correo a quienes subieron sus facturas: al
+   * enviarlo (`step` = `sent`), que sus facturas van en él; al pagarse (`paid`), que ya se pagó.
+   * Avisar al solicitante es un correo de finanzas, no un aviso del sistema. Una vez por oficio y paso.
+   */
+  async remindOficioEmail(oficio, userId, step) {
+    const sent = step === "sent";
+    return this.deliver(
+      await query.notifyOficioEmail(oficio.id, userId, {
+        step,
+        title: sent ? "Avisa del oficio enviado" : "Avisa del oficio pagado",
+        lead: `Oficio ${oficio.folio} ${sent ? "enviado" : "pagado"}: escribe el correo a `,
+        trail: sent ? " de que sus facturas van en este oficio." : " de que ya se pagó.",
+      }),
+    );
+  }
+
   /** Registra este módulo como suscriptor de eventos de dominio. Se llama una vez al iniciar la aplicación. */
   subscribe() {
     events.on("notifications", (event) => this.handle(event));
   }
 
   /**
-   * Avisa según HANDLERS, con una sola consulta por evento. Quien hizo la acción no recibe su
-   * propio aviso, salvo en `stage_activated`.
+   * Avisa según HANDLERS, con una sola consulta por evento: por etapa (`stageId`) o, por proyecto, a
+   * quien tenga un permiso (`projectId` y `permission`). Quien hizo la acción no recibe su propio
+   * aviso, salvo en `stage_activated`.
    */
   async handle(event) {
     const spec = HANDLERS[event?.action]?.(event);
-    if (!spec?.stageId) return;
+    if (!spec?.stageId && !spec?.projectId) return;
 
-    const { stageId, exceptActor = false, ...message } = spec;
+    const { stageId, projectId, exceptActor = false, ...message } = spec;
     const exceptUserId = exceptActor ? (currentActor()?.id ?? null) : null;
-    this.deliver(await query.notifyStage(stageId, { ...message, exceptUserId }));
+    this.deliver(
+      stageId
+        ? await query.notifyStage(stageId, { ...message, exceptUserId })
+        : await query.notifyPermission(projectId, { ...message, exceptUserId }),
+    );
   }
 }
 

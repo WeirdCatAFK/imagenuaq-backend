@@ -10,6 +10,10 @@ import {
   GetObjectCommand,
   CopyObjectCommand,
   DeleteObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
@@ -233,6 +237,117 @@ export async function statContent(hash) {
     if (isNotFound(error)) return null;
     throw asStorageError(error);
   }
+}
+
+/**
+ * Starts a multipart upload at a temporary key, for chunked uploads that arrive over
+ * multiple HTTP requests.
+ *
+ * @returns {Promise<{key: string, s3UploadId: string}>}
+ */
+export async function beginMultipart() {
+  const s3 = getClient();
+  const key = `${TMP_PREFIX}${randomUUID()}`;
+  try {
+    const res = await s3.send(new CreateMultipartUploadCommand({ Bucket: bucket, Key: key }));
+    return { key, s3UploadId: res.UploadId };
+  } catch (error) {
+    throw asStorageError(error);
+  }
+}
+
+/**
+ * Uploads one part of a multipart upload, counting bytes as they pass.
+ *
+ * @param {string} key Temporary key from beginMultipart.
+ * @param {string} s3UploadId S3 upload id from beginMultipart.
+ * @param {number} partNumber 1-based. @param {import('node:stream').Readable} body
+ * @returns {Promise<{etag: string, size: number}>}
+ */
+export async function uploadPart(key, s3UploadId, partNumber, body) {
+  const s3 = getClient();
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of body) {
+    chunks.push(chunk);
+    size += chunk.length;
+  }
+  const buf = Buffer.concat(chunks, size);
+
+  try {
+    const res = await s3.send(
+      new UploadPartCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: s3UploadId,
+        PartNumber: partNumber,
+        Body: buf,
+        ContentLength: size,
+      }),
+    );
+    return { etag: res.ETag, size };
+  } catch (error) {
+    throw asStorageError(error);
+  }
+}
+
+/**
+ * Completes a multipart upload and content-addresses the result like putContent.
+ *
+ * @param {string} key Temporary key. @param {string} s3UploadId S3 upload id.
+ * @param {Array<{partNumber: number, etag: string}>} parts Ordered by partNumber.
+ * @returns {Promise<{hash: string, size: number, existed: boolean}>}
+ */
+export async function completeMultipart(key, s3UploadId, parts) {
+  const s3 = getClient();
+  try {
+    await s3.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: s3UploadId,
+        MultipartUpload: {
+          Parts: parts.map((p) => ({ PartNumber: p.partNumber, ETag: p.etag })),
+        },
+      }),
+    );
+
+    const obj = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    const digest = createHash('sha256');
+    let size = 0;
+    for await (const chunk of obj.Body) {
+      digest.update(chunk);
+      size += chunk.length;
+    }
+    const hash = digest.digest('hex');
+    const contentK = contentKey(hash);
+    const existed = (await statContent(hash)) !== null;
+
+    if (!existed) {
+      await s3.send(
+        new CopyObjectCommand({ Bucket: bucket, Key: contentK, CopySource: `${bucket}/${key}` }),
+      );
+    }
+    return { hash, size, existed };
+  } catch (error) {
+    throw asStorageError(error);
+  } finally {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => {});
+  }
+}
+
+/**
+ * Aborts a multipart upload. Best-effort, swallows errors.
+ *
+ * @param {string} key
+ * @param {string} s3UploadId
+ */
+export async function abortMultipart(key, s3UploadId) {
+  try {
+    await getClient().send(
+      new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: s3UploadId }),
+    );
+  } catch {}
 }
 
 /**

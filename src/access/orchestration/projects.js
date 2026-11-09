@@ -4,6 +4,7 @@
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import documents from "./documents.js";
+import finance from "./finance.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -216,6 +217,7 @@ class Projects {
         input.carriedOver === undefined ? null : requireBoolean(input.carriedOver, "carriedOver"),
       startsOn: input.startsOn === undefined ? null : optionalDate(input.startsOn, "startsOn"),
       dueOn: input.dueOn === undefined ? null : optionalDate(input.dueOn, "dueOn"),
+      noFinance: input.noFinance === undefined ? null : requireBoolean(input.noFinance, "noFinance"),
     };
 
     if (Object.values(payload).every((value) => value === null)) {
@@ -224,6 +226,7 @@ class Projects {
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    if (payload.noFinance && !before.no_finance) await finance.assertCanSkip(id);
 
     let row;
     try {
@@ -272,8 +275,10 @@ class Projects {
   /**
    * Closes a project. Refused while any stage is still `active` or `waiting_external`:
    * RF-EST-05 asks after what is pending, and an open stage is the cheapest pending thing to
-   * see. The invoice and evidence halves of that requirement wait for FIN and ARC.
+   * see. Missing invoices never refuse it (RF-FIN-08): they come back as `financeGaps` and travel
+   * on the `project_closed` event, which tells finance (DATAMODEL §2.20).
    *
+   * @returns {Promise<{project: object, financeGaps: string[]}>}
    * @throws {ApiError} 404, 409 when a stage is open or it is already closed.
    */
   async close(projectId) {
@@ -294,14 +299,16 @@ class Projects {
     const row = await query.stampProject(id, "closed");
     if (!row) throw ApiError.conflict("Project is already closed.");
 
+    const financeGaps = await finance.gaps(id);
     await events.emit({
-      action: "record_updated",
+      action: "project_closed",
       target: { table: "projects", id },
       before,
       after: row,
+      financeGaps,
     });
 
-    return this.getById(id);
+    return { project: await this.getById(id), financeGaps };
   }
 
   /**
@@ -662,10 +669,13 @@ class Projects {
    * Finance says a project needs a quote or an invoice, without holding `project.write`.
    *
    * @param {number} projectId
-   * @param {{ kind: 'quote'|'invoice', needed?: boolean, note?: string }} input
-   * @throws {ApiError} 400 on an unknown kind, 404.
+   * For an invoice, `count` declares how many the project should have (RF-FIN-07), null clears it;
+   * withdrawing the request clears it too.
+   *
+   * @param {{ kind: 'quote'|'invoice', needed?: boolean, note?: string, count?: number|null }} input
+   * @throws {ApiError} 400 on an unknown kind or a count that is not a non-negative integer, 404.
    */
-  async requestFinance(projectId, { kind, needed = true, note = null }) {
+  async requestFinance(projectId, { kind, needed = true, note = null, count }) {
     const id = requireId(projectId, "projectId");
     const key = FINANCE_KEYS[kind];
     if (key === undefined) {
@@ -673,7 +683,19 @@ class Projects {
         `kind must be one of: ${Object.keys(FINANCE_KEYS).join(", ")}.`,
       );
     }
-    if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    if (count !== undefined && count !== null && (!Number.isInteger(count) || count < 0)) {
+      throw ApiError.badRequest("count must be a non-negative integer or null.");
+    }
+    const project = await query.getProject(id);
+    if (!project) throw ApiError.notFound("Project not found.");
+
+    if (kind === "invoice" && (count !== undefined || needed === false)) {
+      const expected = needed === false ? null : count;
+      if (expected !== project.expected_invoice_count) {
+        const after = await query.setExpectedInvoices(id, expected);
+        await events.emit({ action: "record_updated", target: { table: "projects", id }, before: project, after });
+      }
+    }
 
     if (needed === false) {
       const removed = await query.deleteFieldValue(id, key);
@@ -996,6 +1018,8 @@ function shapeProject(row) {
     statusSince: row.status_since,
     priority: row.priority,
     hasCost: row.has_cost,
+    expectedInvoiceCount: row.expected_invoice_count ?? null,
+    noFinance: row.no_finance ?? false,
     inClosure: row.in_closure ?? false,
     carriedOver: row.carried_over,
     startsOn: asDate(row.starts_on),
@@ -1029,6 +1053,8 @@ function shapeListed(row) {
     statusSince: row.status_since,
     priority: row.priority,
     hasCost: row.has_cost,
+    expectedInvoiceCount: row.expected_invoice_count ?? null,
+    noFinance: row.no_finance ?? false,
     inClosure: row.in_closure ?? false,
     carriedOver: row.carried_over,
     startsOn: asDate(row.starts_on),
@@ -1122,6 +1148,9 @@ function translate(err) {
   if (err?.code === CHECK_VIOLATION) {
     if (err.constraint === "projects_date_range") {
       return ApiError.badRequest("dueOn must not be earlier than startsOn.");
+    }
+    if (err.constraint === "projects_no_finance_without_cost") {
+      return ApiError.badRequest("A project with a cost cannot be marked as having no finance.");
     }
     if (err.constraint === "project_stages_blocked_reason_present") {
       return ApiError.badRequest("blockedReason is required when a stage waits on a third party.");

@@ -24,6 +24,7 @@ import documentsRouter from './routes/documents.js';
 import sharedRouter from './routes/shared.js';
 import tasksRouter from './routes/tasks.js';
 import calendarRouter from './routes/calendar.js';
+import financeRouter from './routes/finance.js';
 import docsRouter from './routes/docs.js';
 import notificationsRouter from './routes/notifications.js';
 
@@ -63,6 +64,7 @@ export const ROUTERS = {
   shared: sharedRouter,
   tasks: tasksRouter,
   calendar: calendarRouter,
+  finance: financeRouter,
   docs: docsRouter,
 
 };
@@ -71,7 +73,7 @@ export const ROUTERS = {
  * Routes that stream the request body themselves. express.json() must leave them unread,
  * or uploading a .json file would store an empty one.
  */
-const RAW_BODY_ROUTES = /^\/api\/documents\/folders\/\d+\/files(\?|$)/;
+const RAW_BODY_ROUTES = /^\/api\/documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)(\?|$)/;
 
 export default class Api {
   /**

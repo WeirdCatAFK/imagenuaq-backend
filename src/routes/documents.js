@@ -35,7 +35,7 @@ router.get("/retention", async (_req, res) => {
 });
 
 router.put("/retention", requirePermission("document.manage"), async (req, res) => {
-  res.json({ retention: await documents.setRetention(req.body?.months) });
+  res.json({ retention: await documents.setRetention(req.body ?? {}) });
 });
 
 router.get("/:id", async (req, res) => {
@@ -86,6 +86,27 @@ router.post("/folders/:id/files", async (req, res) => {
     body: req,
   });
   res.status(201).json({ file });
+});
+
+router.post("/folders/:id/uploads", async (req, res) => {
+  const { name, mime } = req.body ?? {};
+  const uploadId = await documents.beginUpload(folderId(req), { name, mime });
+  res.status(201).json({ uploadId });
+});
+
+router.put("/uploads/:id/:partNumber", async (req, res) => {
+  const result = await documents.uploadChunk(req.params.id, Number(req.params.partNumber), req);
+  res.json(result);
+});
+
+router.post("/uploads/:id/complete", async (req, res) => {
+  const file = await documents.finishUpload(req.params.id);
+  res.status(201).json({ file });
+});
+
+router.delete("/uploads/:id", async (req, res) => {
+  await documents.abortUpload(req.params.id);
+  res.status(204).end();
 });
 
 router.patch("/:id", async (req, res) => {
