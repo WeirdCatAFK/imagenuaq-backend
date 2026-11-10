@@ -3286,10 +3286,9 @@ class Query {
    */
   async listDueSheets(now) {
     return this.#rows(
-      `select s.*, u.role as registrar_role
+      `select s.*
          from sheets s
          join microsoft_accounts ma on ma.id = s.microsoft_account_id
-         left join users u on u.id = s.registered_by
         where s.sync_interval_minutes is not null
           and s.schema_version_id is not null
           and s.deleted_at is null
