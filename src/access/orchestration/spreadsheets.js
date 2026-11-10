@@ -13,7 +13,7 @@ import statuses from "./statuses.js";
 import { fieldList } from "./schemas.js";
 import { validateColumnMap, applyMapping, rowHash } from "../../utils/columnMap.js";
 import events from "../../utils/events.js";
-import { currentActor } from "../../utils/context.js";
+import { currentActor, runWithContext } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
 import {
   UNIQUE_VIOLATION,
@@ -528,6 +528,50 @@ class Spreadsheets {
   }
 
   /**
+   * Sets or clears the auto-sync interval.
+   *
+   * @param {number} sheetId
+   * @param {number|null} minutes  Positive integer, or null to disable.
+   * @returns {Promise<object>}
+   * @throws {ApiError} 404 when the sheet is gone.
+   */
+  async setSyncInterval(sheetId, minutes) {
+    const row = await query.setSyncInterval(requireId(sheetId, "sheetId"), minutes);
+    if (!row) throw ApiError.notFound("Spreadsheet not found.");
+    return shapeSheet(await query.getSheet(row.id));
+  }
+
+  /**
+   * Scheduler entry point: imports new rows from every sheet whose sync interval has
+   * elapsed. Runs under the authority of whoever registered each sheet.
+   *
+   * @returns {Promise<{ synced: number, failed: number }>}
+   */
+  async syncDueSheets(now) {
+    const due = await query.listDueSheets(now);
+    let synced = 0;
+    let failed = 0;
+
+    for (const sheet of due) {
+      try {
+        const actor = { id: sheet.registered_by, role: "admin" };
+        await runWithContext({ actor }, async () => {
+          const token = await microsoft.accessTokenFor(sheet.microsoft_account_id, actor);
+          const read = await readAllRows(token, sheet.drive_id, sheet.item_id, sheet.table_name);
+          if (!read) return;
+          await this.importRows(sheet, read, { dryRun: false });
+        });
+        synced++;
+      } catch (err) {
+        console.error(`spreadsheet-sync: sheet ${sheet.id} failed:`, err.message ?? err);
+        failed++;
+      }
+    }
+
+    return { synced, failed };
+  }
+
+  /**
    * Soft-deletes a registration. Anyone with the write permission may remove any sheet:
    * the registry is shared work, not personal, and the account behind it stays connected.
    *
@@ -614,6 +658,7 @@ function shapeSheet(row) {
     schemaVersionId: row.schema_version_id,
     columnMap: row.column_map,
     mapped: row.schema_version_id !== null,
+    syncIntervalMinutes: row.sync_interval_minutes ?? null,
     schemaName: row.schema_name ?? null,
     schemaVersion: row.schema_version ?? null,
     lastImportedAt: row.last_imported_at,

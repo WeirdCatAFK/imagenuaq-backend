@@ -3268,6 +3268,38 @@ class Query {
     return row ?? null;
   }
 
+  /** Sets or clears the auto-sync interval. Returns the full row, or null when gone. */
+  async setSyncInterval(sheetId, minutes) {
+    const [row] = await this.#rows(
+      `update sheets
+        set sync_interval_minutes = $2::smallint
+      where id = $1 and deleted_at is null
+      returning *`,
+      [sheetId, minutes],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Sheets whose sync interval elapsed since their last import. Skips revoked
+   * Microsoft accounts and unmapped sheets.
+   */
+  async listDueSheets(now) {
+    return this.#rows(
+      `select s.*, u.role as registrar_role
+         from sheets s
+         join microsoft_accounts ma on ma.id = s.microsoft_account_id
+         left join users u on u.id = s.registered_by
+        where s.sync_interval_minutes is not null
+          and s.schema_version_id is not null
+          and s.deleted_at is null
+          and ma.revoked_at is null
+          and (s.last_imported_at is null
+               or s.last_imported_at + make_interval(mins => s.sync_interval_minutes) <= $1)`,
+      [now],
+    );
+  }
+
   /** Soft delete. Returns the row as it was, or null when there was no live row. */
   async deleteSheet(sheetId) {
     const [row] = await this.#rows(
