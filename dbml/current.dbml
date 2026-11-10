@@ -389,12 +389,14 @@ Table "sheets" {
   "deleted_at" timestamptz
   "microsoft_account_id" int8 [not null, note: 'Con el acceso de que cuenta se lee este libro']
   "registered_by" int8 [note: 'Quien lo registro']
+  "sync_interval_minutes" int2 [note: 'NULL = manual only. Positive integer = minutes between automatic imports.']
 
   Indexes {
     microsoft_account_id [type: btree, name: "idx_sheets_microsoft_account_id"]
   }
   Note: '''RF-MIG-01, RF-MIG-02: el libro de Excel que sigue vivo durante la transicion, y como sus columnas caen en un formato.
 CHECK sheets_column_map_is_object: jsonb_typeof(column_map) = \'object\'::text
+CHECK sheets_sync_interval_minutes_check: (sync_interval_minutes IS NULL) OR (sync_interval_minutes > 0)
 INDEX uq_sheets_item (drive_id, item_id, COALESCE(table_name, \'\'::character varying))'''
 }
 

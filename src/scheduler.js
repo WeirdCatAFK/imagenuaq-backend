@@ -4,6 +4,7 @@ import cron from 'node-cron';
 
 import documents from './access/orchestration/documents.js';
 import notifications from './access/orchestration/notifications.js';
+import spreadsheets from './access/orchestration/spreadsheets.js';
 
 const TIME_ZONE = 'America/Mexico_City';
 
@@ -40,6 +41,12 @@ export const JOBS = [
     schedule: '30 3 * * *',
     description: 'Deletes notifications older than six months.',
     run: () => notifications.deleteExpired(),
+  },
+  {
+    name: 'spreadsheet-sync',
+    schedule: '*/5 * * * *',
+    description: 'Imports new rows from spreadsheets that have a sync interval configured.',
+    run: (now) => spreadsheets.syncDueSheets(now),
   },
 ];
 

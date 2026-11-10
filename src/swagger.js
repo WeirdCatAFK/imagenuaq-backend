@@ -940,6 +940,11 @@ export function buildOpenApiDocument() {
             },
             columnMap: { type: 'object', description: 'Excel header -> field key. Empty until mapped.' },
             mapped: { type: 'boolean', description: 'schemaVersionId is not null.' },
+            syncIntervalMinutes: {
+              type: ['integer', 'null'],
+              minimum: 15,
+              description: 'Minutes between automatic imports. Null means manual only.',
+            },
             lastImportedAt: { type: ['string', 'null'], format: 'date-time' },
             markedRows: {
               type: 'integer',
@@ -4609,6 +4614,42 @@ export function buildOpenApiDocument() {
               'That book has no format yet: send schemaVersionId to try one.',
             ),
             502: errorResponse('Microsoft refused or is unreachable.', 'Microsoft Graph is unavailable.'),
+          },
+        },
+      },
+      '/api/spreadsheets/{id}/sync': {
+        put: {
+          tags: ['spreadsheets'],
+          summary: 'Set or clear the auto-sync interval',
+          description:
+            'Needs spreadsheet.write. Stores how often the scheduler should import new rows ' +
+            'from this book. `null` disables auto-sync (manual only). The minimum is 15 minutes.',
+          parameters: [pathId('id', 'sheets.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    intervalMinutes: {
+                      type: 'integer',
+                      nullable: true,
+                      minimum: 15,
+                      description: 'Minutes between automatic imports, or null for manual only.',
+                    },
+                  },
+                  required: ['intervalMinutes'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The updated registration.', 'sheet', 'Sheet'),
+            400: errorResponse('Invalid value.', 'intervalMinutes must be at least 15.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such book.', 'Spreadsheet not found.'),
           },
         },
       },

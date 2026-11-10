@@ -4,7 +4,8 @@ import { Router } from "express";
 
 import spreadsheets from "../access/orchestration/spreadsheets.js";
 import { authenticate, requirePermission } from "../middlewares/auth.js";
-import { idParam } from "../utils/params.js";
+import { idParam, positiveInt } from "../utils/params.js";
+import { ApiError } from "../utils/ApiError.js";
 
 const router = Router();
 const sheetId = (req) => idParam(req, "id", "spreadsheet id");
@@ -56,6 +57,18 @@ router.put("/:id/mapping", async (req, res) => {
 
 router.delete("/:id/mapping", async (req, res) => {
   res.json({ sheet: await spreadsheets.clearMapping(sheetId(req)) });
+});
+
+router.put("/:id/sync", async (req, res) => {
+  const { intervalMinutes } = req.body ?? {};
+  const minutes =
+    intervalMinutes === null || intervalMinutes === undefined
+      ? null
+      : positiveInt(intervalMinutes, "intervalMinutes");
+  if (minutes !== null && minutes < 15) {
+    throw ApiError.badRequest("intervalMinutes must be at least 15.");
+  }
+  res.json({ sheet: await spreadsheets.setSyncInterval(sheetId(req), minutes) });
 });
 
 router.post("/:id/import", requirePermission("request.write"), async (req, res) => {
