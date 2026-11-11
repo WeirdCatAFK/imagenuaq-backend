@@ -4440,6 +4440,56 @@ class Query {
     );
   }
 
+  /** RF-EST-10: tells area leads that someone in their area had an absence approved (dates only, no motive). */
+  async notifyAbsenceApproval(eventId, userId, { exceptUserId = null, startsAt, endsAt }) {
+    return this.#rows(
+      `with absent_user as (
+         select u.id, u.full_name from users u where u.id = $1
+       ),
+       recipients as (
+         select distinct am.user_id
+           from area_members am
+           join area_members absent_am on absent_am.area_id = am.area_id
+          where absent_am.user_id = $1 and am.is_area_leader and am.user_id <> $1
+       )
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select r.user_id, 'alerta', 'ausencia', 'Ausencia aprobada',
+              au.full_name || ' estará ausente del '
+              || to_char($3::timestamptz at time zone 'America/Mexico_City', 'DD/MM/YYYY')
+              || ' al '
+              || to_char($4::timestamptz at time zone 'America/Mexico_City', 'DD/MM/YYYY') || '.',
+              'absences', $2, 'absence_approved:' || $2
+         from recipients r
+         cross join absent_user au
+         join users u on u.id = r.user_id and u.deleted_at is null
+        where r.user_id is distinct from $5::bigint
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [userId, eventId, startsAt, endsAt, exceptUserId],
+    );
+  }
+
+  /** Notifies every live holder of `permission` (through their role). No project context. */
+  async notifyByPermission({ permission, exceptUserId = null, title, lead, trail, dedupKey, sourceType, sourceId }) {
+    return this.#rows(
+      `insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select u.id, 'alerta', 'ausencia', $3::text,
+              $4::text || $5::text,
+              $6::text, $7::bigint, $8::text
+         from users u
+         join role_permissions rp on rp.role_id = u.role_id
+         join permissions pm on pm.id = rp.permission_id and pm.code = $1::text
+        where u.deleted_at is null and u.id is distinct from $2::bigint
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [permission, exceptUserId, title, lead, trail, sourceType, sourceId, dedupKey],
+    );
+  }
+
   /**
    * Today's birthdays, told to every live user, in one statement: the person whose birthday it
    * is gets a greeting, everyone else a heads-up. "Today" is `now` in Querétaro time, and a 29
@@ -5080,6 +5130,338 @@ class Query {
        on conflict (user_id, dedup_key) where dedup_key is not null do nothing
        returning *`,
       [oficioId, userId, step, title, lead, trail],
+    );
+  }
+
+  /** Active absence types, or all when `activeOnly` is false. */
+  async listAbsenceTypes(activeOnly = true) {
+    return this.#rows(
+      `select * from absence_types
+        where $1::boolean is false or is_active = true
+        order by label`,
+      [activeOnly],
+    );
+  }
+
+  async getAbsenceType(id) {
+    const [row] = await this.#rows(
+      `select * from absence_types where id = $1`,
+      [id],
+    );
+    return row ?? null;
+  }
+
+  async createAbsenceType({ code, label, unit, consumes_balance, requires_document }) {
+    const [row] = await this.#rows(
+      `insert into absence_types (code, label, unit, consumes_balance, requires_document)
+       values ($1, $2, $3, $4, $5)
+       returning *`,
+      [code, label, unit, consumes_balance, requires_document],
+    );
+    return row;
+  }
+
+  async updateAbsenceType(id, fields) {
+    const columns = Object.keys(fields);
+    if (columns.length === 0) return this.getAbsenceType(id);
+    const sets = columns.map((col, i) => `${col} = $${i + 2}`);
+    const [row] = await this.#rows(
+      `update absence_types set ${sets.join(", ")} where id = $1 returning *`,
+      [id, ...Object.values(fields)],
+    );
+    return row ?? null;
+  }
+
+  /** Entitlements for one contract type, with the absence type's code and label. */
+  async listEntitlements(contractTypeId) {
+    return this.#rows(
+      `select cte.*, at.code as type_code, at.label as type_label
+         from contract_type_entitlements cte
+         join absence_types at on at.id = cte.absence_type_id
+        where cte.contract_type_id = $1
+        order by at.label, cte.valid_from desc`,
+      [contractTypeId],
+    );
+  }
+
+  /** The entitlement in force on `onDate` for a (contract type, absence type) pair, or null. */
+  async getEffectiveEntitlement(contractTypeId, absenceTypeId, onDate) {
+    const [row] = await this.#rows(
+      `select cte.*, at.code as type_code, at.label as type_label
+         from contract_type_entitlements cte
+         join absence_types at on at.id = cte.absence_type_id
+        where cte.contract_type_id = $1
+          and cte.absence_type_id = $2
+          and cte.valid_from <= $3::date
+          and (cte.valid_to is null or cte.valid_to >= $3::date)`,
+      [contractTypeId, absenceTypeId, onDate],
+    );
+    return row ?? null;
+  }
+
+  /** Removes an entitlement that is being replaced on the same start date. */
+  async deleteEntitlement(id) {
+    await this.#rows(`delete from contract_type_entitlements where id = $1`, [id]);
+  }
+
+  /** Closes an open entitlement by setting its valid_to; null when already closed or missing. */
+  async closeEntitlement(id, validTo) {
+    const [row] = await this.#rows(
+      `update contract_type_entitlements set valid_to = $2::date
+        where id = $1 and valid_to is null
+       returning *`,
+      [id, validTo],
+    );
+    return row ?? null;
+  }
+
+  async createEntitlement({ contract_type_id, absence_type_id, amount, valid_from, valid_to }) {
+    const [row] = await this.#rows(
+      `insert into contract_type_entitlements
+              (contract_type_id, absence_type_id, amount, valid_from, valid_to)
+       values ($1, $2, $3::numeric, $4::date, $5::date)
+       returning *`,
+      [contract_type_id, absence_type_id, amount, valid_from, valid_to],
+    );
+    return row;
+  }
+
+  async updateEntitlement(id, fields) {
+    const columns = Object.keys(fields);
+    if (columns.length === 0) return null;
+    const sets = columns.map((col, i) => `${col} = $${i + 2}`);
+    const [row] = await this.#rows(
+      `update contract_type_entitlements set ${sets.join(", ")} where id = $1 returning *`,
+      [id, ...Object.values(fields)],
+    );
+    return row ?? null;
+  }
+
+  async getBalance(userId, absenceTypeId, cycleStart) {
+    const [row] = await this.#rows(
+      `select lb.*, at.code as type_code, at.label as type_label
+         from leave_balances lb
+         join absence_types at on at.id = lb.absence_type_id
+        where lb.user_id = $1 and lb.absence_type_id = $2 and lb.cycle_start = $3::date`,
+      [userId, absenceTypeId, cycleStart],
+    );
+    return row ?? null;
+  }
+
+  async listBalances(userId) {
+    return this.#rows(
+      `select lb.*, at.code as type_code, at.label as type_label, at.consumes_balance
+         from leave_balances lb
+         join absence_types at on at.id = lb.absence_type_id
+        where lb.user_id = $1
+        order by lb.cycle_start desc, at.label`,
+      [userId],
+    );
+  }
+
+  async upsertBalance(userId, absenceTypeId, cycleStart, cycleEnd, granted) {
+    const [row] = await this.#rows(
+      `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted)
+       values ($1, $2, $3::date, $4::date, $5)
+       on conflict (user_id, absence_type_id, cycle_start)
+       do update set granted = excluded.granted
+       returning *`,
+      [userId, absenceTypeId, cycleStart, cycleEnd, granted],
+    );
+    return row;
+  }
+
+  /** Adds `delta` to `used`; negative to restore on cancellation. */
+  async adjustBalanceUsed(userId, absenceTypeId, cycleStart, delta) {
+    const [row] = await this.#rows(
+      `update leave_balances set used = used + $4
+        where user_id = $1 and absence_type_id = $2 and cycle_start = $3::date
+       returning *`,
+      [userId, absenceTypeId, cycleStart, delta],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Creates the event, the absence row, the participant and the first history entry in one
+   * statement. Returns the joined result, or null when the event type does not exist.
+   */
+  async createAbsence({ title, description, allDay, startsAt, endsAt, rule, recurrenceUntil,
+                         createdBy, reason, absenceTypeId, documentFileId, userId, areaId }) {
+    const [row] = await this.#rows(
+      `with evt as (
+         insert into events (event_type_id, title, description, all_day, starts_at, ends_at,
+                             timezone, rule, recurrence_until, created_by)
+         select id, $1, $2, $3, $4::timestamptz, $5::timestamptz, 'America/Mexico_City',
+                $6, $7::timestamptz, $8::bigint
+           from event_types where code = 'ausencia'
+         returning *
+       ),
+       abs as (
+         insert into absences (event_id, reason, absence_type_id, document_file_id)
+         select evt.id, $9, $10::bigint, $11::bigint from evt
+         returning *
+       ),
+       part as (
+         insert into event_participants (event_id, user_id, area_id)
+         select evt.id, $12::bigint, $13::bigint from evt
+         returning *
+       ),
+       hist as (
+         insert into absence_status_history (event_id, status, changed_by)
+         select evt.id, 'requested', $8::bigint from evt
+       )
+       select abs.event_id, abs.reason, abs.status, abs.absence_type_id, abs.document_file_id,
+              abs.created_at, evt.starts_at, evt.ends_at, evt.all_day, evt.title,
+              evt.rule, evt.recurrence_until, part.user_id, part.area_id
+         from abs
+         join evt on evt.id = abs.event_id
+         join part on part.event_id = evt.id`,
+      [title, description, allDay, startsAt, endsAt, rule, recurrenceUntil,
+       createdBy, reason, absenceTypeId, documentFileId, userId, areaId],
+    );
+    return row ?? null;
+  }
+
+  /** One absence with its event, participant, and type; null when missing. */
+  async getAbsence(eventId) {
+    const [row] = await this.#rows(
+      `select a.event_id, a.reason, a.status, a.absence_type_id, a.document_file_id,
+              a.approved_by, a.approved_at, a.created_at,
+              at.code as type_code, at.label as type_label, at.consumes_balance,
+              e.starts_at, e.ends_at, e.all_day, e.title, e.description,
+              e.rule, e.recurrence_until,
+              ep.user_id, ep.area_id, u.full_name as user_name,
+              ar.name as area_name, approver.full_name as approved_by_name
+         from absences a
+         join events e on e.id = a.event_id
+         join absence_types at on at.id = a.absence_type_id
+         join event_participants ep on ep.event_id = a.event_id
+         left join users u on u.id = ep.user_id
+         left join areas ar on ar.id = ep.area_id
+         left join users approver on approver.id = a.approved_by
+        where a.event_id = $1`,
+      [eventId],
+    );
+    return row ?? null;
+  }
+
+  /** Absences filtered by user, area, status and type. */
+  async listAbsences({ userId = null, areaId = null, status = null, absenceTypeId = null,
+                        limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `select a.event_id, a.reason, a.status, a.absence_type_id, a.document_file_id,
+              a.approved_by, a.approved_at, a.created_at,
+              at.code as type_code, at.label as type_label, at.consumes_balance,
+              e.starts_at, e.ends_at, e.all_day, e.title,
+              ep.user_id, ep.area_id, u.full_name as user_name,
+              ar.name as area_name
+         from absences a
+         join events e on e.id = a.event_id
+         join absence_types at on at.id = a.absence_type_id
+         join event_participants ep on ep.event_id = a.event_id
+         left join users u on u.id = ep.user_id
+         left join areas ar on ar.id = ep.area_id
+        where ($1::bigint is null or ep.user_id = $1::bigint)
+          and ($2::bigint is null or ep.area_id = $2::bigint)
+          and ($3::text is null or a.status = $3::text)
+          and ($4::bigint is null or a.absence_type_id = $4::bigint)
+        order by a.created_at desc, a.event_id desc
+        limit $5 offset $6`,
+      [userId, areaId, status, absenceTypeId, limit, offset],
+    );
+  }
+
+  /** Transitions an absence's status and records the change in one statement. */
+  async updateAbsenceStatus(eventId, { status, changedBy, note, approvedBy, approvedAt, documentFileId }) {
+    const [row] = await this.#rows(
+      `with changed as (
+         update absences set status = $2,
+           approved_by = coalesce($4::bigint, approved_by),
+           approved_at = coalesce($5::timestamptz, approved_at),
+           document_file_id = coalesce($7::bigint, document_file_id)
+         where event_id = $1
+         returning *
+       ),
+       hist as (
+         insert into absence_status_history (event_id, status, changed_by, note)
+         values ($1, $2, $3::bigint, $6)
+       )
+       select changed.*, e.starts_at, e.ends_at, e.all_day,
+              ep.user_id, ep.area_id
+         from changed
+         join events e on e.id = changed.event_id
+         join event_participants ep on ep.event_id = changed.event_id`,
+      [eventId, status, changedBy, approvedBy, approvedAt, note, documentFileId ?? null],
+    );
+    return row ?? null;
+  }
+
+  /** Finds the system folder for absence documents by name. */
+  async getAbsenceDocumentFolder() {
+    const [row] = await this.#rows(
+      `select id from folders where name = 'Oficios de ausencia' and parent_id is null and deleted_at is null limit 1`,
+      [],
+    );
+    return row ?? null;
+  }
+
+  /** Links a file to an absence as its backing document. */
+  async setAbsenceDocument(eventId, fileId) {
+    await this.#rows(
+      `update absences set document_file_id = $2 where event_id = $1`,
+      [eventId, fileId],
+    );
+  }
+
+  /** Deletes a requested absence and its event. Null when missing or not in requested status. */
+  async deleteAbsence(eventId) {
+    const [row] = await this.#rows(
+      `with guard as (
+         select event_id from absences where event_id = $1 and status = 'requested'
+       ),
+       del_hist as (
+         delete from absence_status_history where event_id = (select event_id from guard)
+       ),
+       del_abs as (
+         delete from absences where event_id = (select event_id from guard)
+       ),
+       del_part as (
+         delete from event_participants where event_id = (select event_id from guard)
+       )
+       delete from events where id = (select event_id from guard)
+       returning id`,
+      [eventId],
+    );
+    return row ?? null;
+  }
+
+  async absenceStatusHistory(eventId) {
+    return this.#rows(
+      `select h.*, u.full_name as changed_by_name
+         from absence_status_history h
+         left join users u on u.id = h.changed_by
+        where h.event_id = $1
+        order by h.changed_at`,
+      [eventId],
+    );
+  }
+
+  /** Who is away on each day in [from, to], from the availability view only (RF-AUS-10, RF-AUS-12). */
+  async listAvailability({ from, to, areaId = null, userId = null }) {
+    return this.#rows(
+      `select d::date as day, av.user_id, u.full_name as user_name,
+              av.area_id, a.name as area_name
+         from generate_series($1::date, $2::date, interval '1 day') d
+         join absence_availability av
+           on (d::timestamp at time zone 'America/Mexico_City') < av.ends_at
+          and ((d + interval '1 day')::timestamp at time zone 'America/Mexico_City') > av.starts_at
+         left join users u on u.id = av.user_id
+         left join areas a on a.id = av.area_id
+        where ($3::bigint is null or av.area_id = $3::bigint)
+          and ($4::bigint is null or av.user_id = $4::bigint)
+        order by d, a.name, u.full_name`,
+      [from, to, areaId, userId],
     );
   }
 }
