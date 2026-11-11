@@ -55,6 +55,26 @@ const HANDLERS = {
       dedupKey: `stage_signed_off:${approval.id}`,
     };
   },
+  absence_created: (event) => ({
+    permission: "absence.approve",
+    exceptActor: true,
+    title: "Nueva solicitud de ausencia",
+    lead: "Se registró una solicitud de ausencia",
+    trail: ".",
+    dedupKey: `absence_created:${event.target.id}`,
+    absenceEventId: event.target.id,
+  }),
+  absence_status_changed: (event) => {
+    if (event.after?.status !== "approved") return null;
+    return {
+      absenceUserId: event.after.user_id,
+      eventId: event.target.id,
+      startsAt: event.after.starts_at,
+      endsAt: event.after.ends_at,
+      title: "Ausencia aprobada",
+      dedupKey: `absence_approved:${event.target.id}`,
+    };
+  },
   project_closed: (event) => {
     const gaps = (event.financeGaps ?? []).filter((flag) => flag !== "no_finance_records");
     if (gaps.length === 0) return null;
@@ -271,15 +291,24 @@ class Notifications {
    */
   async handle(event) {
     const spec = HANDLERS[event?.action]?.(event);
-    if (!spec?.stageId && !spec?.projectId) return;
+    if (!spec?.stageId && !spec?.projectId && !spec?.absenceUserId && !spec?.absenceEventId) return;
 
-    const { stageId, projectId, exceptActor = false, ...message } = spec;
+    const { stageId, projectId, absenceUserId, absenceEventId, exceptActor = false, ...rest } = spec;
     const exceptUserId = exceptActor ? (currentActor()?.id ?? null) : null;
-    this.deliver(
-      stageId
-        ? await query.notifyStage(stageId, { ...message, exceptUserId })
-        : await query.notifyPermission(projectId, { ...message, exceptUserId }),
-    );
+
+    if (absenceEventId) {
+      this.deliver(await query.notifyByPermission({
+        ...rest, exceptUserId, sourceType: "absences", sourceId: absenceEventId,
+      }));
+    } else if (absenceUserId) {
+      this.deliver(await query.notifyAbsenceApproval(rest.eventId, absenceUserId, {
+        exceptUserId, startsAt: rest.startsAt, endsAt: rest.endsAt,
+      }));
+    } else if (stageId) {
+      this.deliver(await query.notifyStage(stageId, { ...rest, exceptUserId }));
+    } else {
+      this.deliver(await query.notifyPermission(projectId, { ...rest, exceptUserId }));
+    }
   }
 }
 
