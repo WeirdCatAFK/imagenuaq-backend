@@ -5447,6 +5447,193 @@ class Query {
     );
   }
 
+  async listPrintMachines() {
+    return this.#rows("select * from print_machines order by name");
+  }
+
+  async createPrintMachine({ name }) {
+    const [row] = await this.#rows(
+      "insert into print_machines (name) values ($1) returning *",
+      [name],
+    );
+    return row;
+  }
+
+  async updatePrintMachine(id, { name, isActive }) {
+    const [row] = await this.#rows(
+      `update print_machines
+          set name = coalesce($2::varchar, name),
+              is_active = coalesce($3::boolean, is_active)
+        where id = $1 returning *`,
+      [id, name ?? null, isActive ?? null],
+    );
+    return row;
+  }
+
+  async listPantones({ entity = null } = {}) {
+    return this.#rows(
+      `select * from pantone_catalog
+        where ($1::text is null or lower(entity_name) like '%' || lower($1) || '%')
+        order by entity_name, pantone_code`,
+      [entity],
+    );
+  }
+
+  async lookupPantones(entityName) {
+    return this.#rows(
+      `select * from pantone_catalog
+        where lower(entity_name) = lower($1) and is_active
+        order by pantone_code`,
+      [entityName],
+    );
+  }
+
+  async createPantone({ entityName, pantoneCode, hexValue }) {
+    const [row] = await this.#rows(
+      `insert into pantone_catalog (entity_name, pantone_code, hex_value)
+       values ($1, $2, $3) returning *`,
+      [entityName, pantoneCode, hexValue ?? null],
+    );
+    return row;
+  }
+
+  async updatePantone(id, { entityName, pantoneCode, hexValue, isActive }) {
+    const [row] = await this.#rows(
+      `update pantone_catalog
+          set entity_name  = coalesce($2::varchar, entity_name),
+              pantone_code = coalesce($3::varchar, pantone_code),
+              hex_value    = coalesce($4::varchar, hex_value),
+              is_active    = coalesce($5::boolean, is_active)
+        where id = $1 returning *`,
+      [id, entityName ?? null, pantoneCode ?? null, hexValue ?? null, isActive ?? null],
+    );
+    return row;
+  }
+
+  async deletePantone(id) {
+    const [row] = await this.#rows(
+      "delete from pantone_catalog where id = $1 returning *",
+      [id],
+    );
+    return row;
+  }
+
+  async nextPrintOrderNumber(year) {
+    const [{ max: last }] = await this.#rows(
+      `select max(order_number) as max from print_orders
+        where order_number like $1`,
+      [`OT-${year}-%`],
+    );
+    if (!last) return `OT-${year}-0001`;
+    const seq = parseInt(last.split("-")[2], 10) + 1;
+    return `OT-${year}-${String(seq).padStart(4, "0")}`;
+  }
+
+  async listPrintOrders({ status = null, projectId = null } = {}) {
+    return this.#rows(
+      `select po.*, p.key as project_key, p.title as project_title,
+              p.requester as project_requester, pm.name as machine_name
+         from print_orders po
+         join projects p on p.id = po.project_id
+         join print_machines pm on pm.id = po.machine_id
+        where ($1::text is null or po.status = $1)
+          and ($2::bigint is null or po.project_id = $2)
+        order by po.created_at desc`,
+      [status, projectId],
+    );
+  }
+
+  async getPrintOrder(id) {
+    const [row] = await this.#rows(
+      `select po.*, p.key as project_key, p.title as project_title,
+              p.requester as project_requester, pm.name as machine_name
+         from print_orders po
+         join projects p on p.id = po.project_id
+         join print_machines pm on pm.id = po.machine_id
+        where po.id = $1`,
+      [id],
+    );
+    return row;
+  }
+
+  async createPrintOrder(fields) {
+    const [row] = await this.#rows(
+      `insert into print_orders
+         (project_id, order_number, machine_id, entity_name, pantone_code,
+          pantalla, trabajo, papel_type, papel_size, cantidad, laminas,
+          frente, vuelta, corte, folio, paquetes_d, pegado, copiante, notes, created_by)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       returning *`,
+      [
+        fields.projectId, fields.orderNumber, fields.machineId,
+        fields.entityName ?? null, fields.pantoneCode ?? null,
+        fields.pantalla ?? null, fields.trabajo,
+        fields.papelType ?? null, fields.papelSize ?? null,
+        fields.cantidad ?? null, fields.laminas ?? null,
+        fields.frente ?? false, fields.vuelta ?? false,
+        fields.corte ?? null, fields.folio ?? null,
+        fields.paquetes_d ?? null, fields.pegado ?? false, fields.copiante ?? false,
+        fields.notes ?? null, fields.createdBy,
+      ],
+    );
+    return row;
+  }
+
+  async updatePrintOrder(id, fields) {
+    const [row] = await this.#rows(
+      `update print_orders set
+         machine_id   = coalesce($2::bigint, machine_id),
+         entity_name  = coalesce($3::varchar, entity_name),
+         pantone_code = coalesce($4::varchar, pantone_code),
+         pantalla     = coalesce($5::varchar, pantalla),
+         trabajo      = coalesce($6::varchar, trabajo),
+         papel_type   = coalesce($7::varchar, papel_type),
+         papel_size   = coalesce($8::varchar, papel_size),
+         cantidad     = coalesce($9::int, cantidad),
+         laminas      = coalesce($10::int, laminas),
+         frente       = coalesce($11::boolean, frente),
+         vuelta       = coalesce($12::boolean, vuelta),
+         corte        = coalesce($13::varchar, corte),
+         folio        = coalesce($14::varchar, folio),
+         paquetes_d   = coalesce($15::int, paquetes_d),
+         pegado       = coalesce($16::boolean, pegado),
+         copiante     = coalesce($17::boolean, copiante),
+         notes        = coalesce($18::text, notes),
+         updated_at   = now()
+       where id = $1 returning *`,
+      [
+        id, fields.machineId ?? null, fields.entityName ?? null,
+        fields.pantoneCode ?? null, fields.pantalla ?? null,
+        fields.trabajo ?? null, fields.papelType ?? null,
+        fields.papelSize ?? null, fields.cantidad ?? null,
+        fields.laminas ?? null, fields.frente ?? null,
+        fields.vuelta ?? null, fields.corte ?? null,
+        fields.folio ?? null, fields.paquetesD ?? null,
+        fields.pegado ?? null, fields.copiante ?? null,
+        fields.notes ?? null,
+      ],
+    );
+    return row;
+  }
+
+  async updatePrintOrderStatus(id, { status, completedAt }) {
+    const [row] = await this.#rows(
+      `update print_orders
+          set status = $2, completed_at = $3::timestamptz, updated_at = now()
+        where id = $1 returning *`,
+      [id, status, completedAt ?? null],
+    );
+    return row;
+  }
+
+  async deletePrintOrder(id) {
+    const [row] = await this.#rows(
+      "delete from print_orders where id = $1 returning *",
+      [id],
+    );
+    return row;
+  }
+
   /** Who is away on each day in [from, to], from the availability view only (RF-AUS-10, RF-AUS-12). */
   async listAvailability({ from, to, areaId = null, userId = null }) {
     return this.#rows(

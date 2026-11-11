@@ -887,6 +887,60 @@ CHECK receipts_status_valid: (status)::text = ANY ((ARRAY[\'draft\'::character v
 CHECK receipts_amount_positive: amount >= (0)::numeric'''
 }
 
+Table "print_machines" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(50) [unique, not null]
+  "is_active" bool [not null, default: true]
+}
+
+Table "pantone_catalog" {
+  "id" int8 [pk, not null, increment]
+  "entity_name" varchar(200) [not null]
+  "pantone_code" varchar(50) [not null]
+  "hex_value" varchar(7)
+  "is_active" bool [not null, default: true]
+
+  Indexes {
+    (entity_name, pantone_code) [type: btree, unique, name: "pantone_catalog_entity_name_pantone_code_key"]
+  }
+}
+
+Table "print_orders" {
+  "id" int8 [pk, not null, increment]
+  "project_id" int8 [not null]
+  "order_number" varchar(50) [unique, not null]
+  "machine_id" int8 [not null]
+  "status" varchar(20) [not null, default: 'pending']
+  "entity_name" varchar(200)
+  "pantone_code" varchar(50)
+  "pantalla" varchar(100)
+  "trabajo" varchar(300) [not null]
+  "papel_type" varchar(100)
+  "papel_size" varchar(50)
+  "cantidad" int4
+  "laminas" int4
+  "frente" bool [not null, default: false]
+  "vuelta" bool [not null, default: false]
+  "corte" varchar(50)
+  "folio" varchar(50)
+  "paquetes_d" int4
+  "pegado" bool [not null, default: false]
+  "copiante" bool [not null, default: false]
+  "notes" text
+  "created_by" int8 [not null]
+  "created_at" timestamptz [not null]
+  "updated_at" timestamptz [not null]
+  "completed_at" timestamptz
+
+  Indexes {
+    project_id [type: btree, name: "idx_print_orders_project"]
+    status [type: btree, name: "idx_print_orders_status"]
+  }
+  Note: '''CHECK print_orders_status_check: (status)::text = ANY ((ARRAY[\'pending\'::character varying, \'in_progress\'::character varying, \'completed\'::character varying, \'cancelled\'::character varying])::text[])
+DEFAULT created_at: now()
+DEFAULT updated_at: now()'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -1016,6 +1070,12 @@ Ref "payments_proof_file_id_fkey":"files"."id" < "payments"."proof_file_id"
 Ref "payments_provider_id_fkey":"providers"."id" < "payments"."provider_id"
 
 Ref "period_closures_created_by_fkey":"users"."id" < "period_closures"."created_by" [delete: set null]
+
+Ref "print_orders_created_by_fkey":"users"."id" < "print_orders"."created_by"
+
+Ref "print_orders_machine_id_fkey":"print_machines"."id" < "print_orders"."machine_id"
+
+Ref "print_orders_project_id_fkey":"projects"."id" < "print_orders"."project_id"
 
 Ref "project_field_values_produced_by_stage_id_fkey":"project_stages"."id" < "project_field_values"."produced_by_stage_id"
 
