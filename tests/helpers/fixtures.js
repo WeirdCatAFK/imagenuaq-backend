@@ -65,6 +65,7 @@ const UNSEEDED_TABLES = [
   'notifications',
   'logs',
   'approvals',
+  'print_orders',
   'project_field_values',
   'project_stages',
   'flow_stages',
