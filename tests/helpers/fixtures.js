@@ -51,6 +51,8 @@ const UNSEEDED_TABLES = [
   'oficios',
   'quotes',
   'providers',
+  'absence_status_history',
+  'leave_balances',
   'absences',
   'event_participants',
   'collection_events',
