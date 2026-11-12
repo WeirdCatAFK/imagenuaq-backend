@@ -5332,6 +5332,29 @@ class Query {
     return row ?? null;
   }
 
+  /**
+   * Rewrites the type, reason and dates of an absence, only while it is requested. The status
+   * check is in the statement so an approval that lands first wins. Returns false otherwise.
+   */
+  async updateRequestedAbsence(eventId, { absenceTypeId, startsAt, endsAt, reason, title }) {
+    const [row] = await this.#rows(
+      `with abs as (
+         update absences
+            set absence_type_id = $2::bigint, reason = $3::text
+          where event_id = $1::bigint and status = 'requested'
+         returning event_id
+       )
+       update events e
+          set starts_at = $4::timestamptz, ends_at = $5::timestamptz,
+              title = $6::text, description = $3::text
+         from abs
+        where e.id = abs.event_id
+       returning e.id`,
+      [eventId, absenceTypeId, reason, startsAt, endsAt, title],
+    );
+    return Boolean(row);
+  }
+
   /** One absence with its event, participant, and type; null when missing. */
   async getAbsence(eventId) {
     const [row] = await this.#rows(

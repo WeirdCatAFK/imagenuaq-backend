@@ -338,6 +338,66 @@ class Absences {
   }
 
   /**
+   * Changes the dates, type or reason of an absence that is still requested. An approved one has
+   * already drawn on the balance (RF-AUS-06), so changing it means cancelling and requesting
+   * again. Only its person, or someone with absence.request_others, may edit it.
+   *
+   * @returns {Promise<object>} The absence as it is now.
+   * @throws {ApiError} 400, 403, 404, 409 when it is no longer requested.
+   */
+  async update(eventId, input) {
+    const id = requireId(eventId, "eventId");
+    const row = await query.getAbsence(id);
+    if (!row) throw ApiError.notFound("Absence not found.");
+
+    const actor = currentActor();
+    if (!actor) throw ApiError.badRequest("No acting user.");
+    if (row.user_id !== actor.id) {
+      const perms = await query.getRolePermissionCodes(actor.roleId);
+      if (!perms.includes("absence.request_others")) {
+        throw ApiError.forbidden("You can only edit your own absences.");
+      }
+    }
+    if (row.status !== "requested") {
+      throw ApiError.conflict("Only a requested absence can be edited. Cancel it and request it again.");
+    }
+
+    const changes = ["absenceTypeId", "startsAt", "endsAt", "reason"].filter((key) => input?.[key] !== undefined);
+    if (changes.length === 0) throw ApiError.badRequest("Nothing to change.");
+
+    const absenceTypeId = input.absenceTypeId === undefined
+      ? row.absence_type_id
+      : requireId(input.absenceTypeId, "absenceTypeId");
+    const startsAt = input.startsAt === undefined
+      ? new Date(row.starts_at).toISOString()
+      : requireTimestamp(input.startsAt, "startsAt");
+    const endsAt = input.endsAt === undefined
+      ? new Date(row.ends_at).toISOString()
+      : requireTimestamp(input.endsAt, "endsAt");
+    if (endsAt <= startsAt) throw ApiError.badRequest("endsAt must be after startsAt.");
+    const reason = input.reason === undefined ? row.reason : requireText(input.reason, "reason", TEXT_MAX);
+
+    const type = await query.getAbsenceType(absenceTypeId);
+    if (!type || !type.is_active) throw ApiError.badRequest("Absence type not found or inactive.");
+
+    const updated = await query.updateRequestedAbsence(id, {
+      absenceTypeId, startsAt, endsAt, reason, title: type.label,
+    });
+    if (!updated) {
+      throw ApiError.conflict("Only a requested absence can be edited. Cancel it and request it again.");
+    }
+
+    await events.emit({
+      action: "record_updated",
+      target: { table: "absences", id },
+      before: { absence_type_id: row.absence_type_id, starts_at: row.starts_at, ends_at: row.ends_at },
+      after: { absence_type_id: absenceTypeId, starts_at: startsAt, ends_at: endsAt },
+    });
+
+    return this.get(id);
+  }
+
+  /**
    * Moves an absence between statuses. RF-AUS-06: deducts on approve, restores on cancel.
    *
    * @throws {ApiError} 400, 403, 404

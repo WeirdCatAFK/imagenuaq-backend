@@ -277,6 +277,63 @@ describe("/api/absences", () => {
       assert.ok(res.body.warning);
     });
 
+    test("a requested absence can be edited by its person", async () => {
+      const created = await createAbsence();
+      const eventId = created.body.absence.eventId;
+
+      const res = await server.patch(`/api/absences/${eventId}`, {
+        token: workerToken,
+        body: { startsAt: "2026-06-20T08:00:00Z", endsAt: "2026-06-22T08:00:00Z", reason: "Trámite" },
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.absence.reason, "Trámite");
+      assert.equal(new Date(res.body.absence.startsAt).toISOString(), "2026-06-20T08:00:00.000Z");
+      assert.equal(new Date(res.body.absence.endsAt).toISOString(), "2026-06-22T08:00:00.000Z");
+      assert.equal(res.body.absence.status, "requested");
+
+      const [log] = await sql(
+        `select l.after_data from logs l join actions a on a.id = l.action_id
+          where a.code = 'record_updated' and l.target_table = 'absences' and l.target_id = $1`,
+        [eventId],
+      );
+      assert.ok(log, "the edit is audited");
+      assert.ok(!JSON.stringify(log.after_data).includes("Trámite"), "the reason stays out of the log");
+    });
+
+    test("an approved absence is not edited: cancel and request again", async () => {
+      const created = await createAbsence();
+      const eventId = created.body.absence.eventId;
+      await server.post(`/api/absences/${eventId}/status`, { token: leadToken, body: { status: "approved" } });
+
+      const res = await server.patch(`/api/absences/${eventId}`, {
+        token: workerToken,
+        body: { reason: "Otra" },
+      });
+      assert.equal(res.status, 409);
+    });
+
+    test("someone else's absence is not edited without absence.request_others", async () => {
+      const created = await createAbsence();
+      const res = await server.patch(`/api/absences/${created.body.absence.eventId}`, {
+        token: leadToken,
+        body: { reason: "Ajena" },
+      });
+      assert.equal(res.status, 403);
+    });
+
+    test("an edit with nothing to change, or a reversed range, is a 400", async () => {
+      const created = await createAbsence();
+      const eventId = created.body.absence.eventId;
+
+      assert.equal((await server.patch(`/api/absences/${eventId}`, { token: workerToken, body: {} })).status, 400);
+      const reversed = await server.patch(`/api/absences/${eventId}`, {
+        token: workerToken,
+        body: { endsAt: "2026-06-14T08:00:00Z" },
+      });
+      assert.equal(reversed.status, 400);
+      assert.equal(reversed.body.error.message, "endsAt must be after startsAt.");
+    });
+
     test("status history records transitions", async () => {
       const created = await createAbsence();
       const eventId = created.body.absence.eventId;
