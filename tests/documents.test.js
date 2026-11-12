@@ -577,6 +577,34 @@ describe("/api/documents", () => {
       assert.equal(res.body.folder.access, "owner");
     });
 
+    test("absence documents are hidden without absence.read_detail and never shared (RF-AUS-13)", async () => {
+      const [oficios] = await sql(
+        "insert into folders (parent_id, name, owner_id) values (null, 'Oficios de ausencia', $1) returning id",
+        [users.admin.id],
+      );
+      const sub = await createFolder({ parentId: oficios.id, name: "2026" }, tokens.admin);
+      const file = await upload(sub.body.folder.id, "oficio-medico.pdf", randomBytes(8), { token: tokens.admin });
+
+      for (const path of [
+        `/api/documents/folders/${oficios.id}`,
+        `/api/documents/folders/${sub.body.folder.id}`,
+        `/api/documents/${file.body.file.id}/content`,
+      ]) {
+        assert.equal((await server.get(path, { token: tokens.colleague })).status, 404, path);
+      }
+      const top = await server.get("/api/documents/folders", { token: tokens.colleague });
+      assert.ok(!top.body.folders.some((f) => f.id === oficios.id));
+      const found = await server.get("/api/documents/search?q=oficio-medico", { token: tokens.colleague });
+      assert.equal(found.body.files.length, 0);
+
+      assert.equal((await server.get(`/api/documents/${file.body.file.id}/content`, { token: tokens.admin })).status, 200);
+      const link = await server.post(`/api/documents/folders/${oficios.id}/links`, {
+        token: tokens.admin,
+        body: { expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+      });
+      assert.equal(link.status, 403);
+    });
+
     test("a role without document.read gets a 403", async () => {
       const res = await server.get("/api/documents/folders", { token: tokens.finance });
       assert.equal(res.status, 403);

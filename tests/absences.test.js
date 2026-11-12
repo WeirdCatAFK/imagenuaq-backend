@@ -312,6 +312,30 @@ describe("/api/absences", () => {
       assert.equal(res.status, 409);
     });
 
+    test("someone else's absence is not removed without absence.request_others", async () => {
+      const created = await createAbsence();
+      const eventId = created.body.absence.eventId;
+
+      const del = await server.delete(`/api/absences/${eventId}`, { token: leadToken });
+      assert.equal(del.status, 403);
+      assert.equal((await server.get(`/api/absences/${eventId}`, { token: workerToken })).status, 200);
+    });
+
+    test("history notes are hidden from readers without the detail", async () => {
+      const created = await createAbsence();
+      const eventId = created.body.absence.eventId;
+      await server.post(`/api/absences/${eventId}/status`, {
+        token: leadToken,
+        body: { status: "rejected", note: "Motivo privado" },
+      });
+
+      const own = await server.get(`/api/absences/${eventId}/history`, { token: workerToken });
+      assert.equal(own.body.history.at(-1).note, "Motivo privado");
+      const other = await server.get(`/api/absences/${eventId}/history`, { token: leadToken });
+      assert.equal(other.status, 200);
+      assert.ok(other.body.history.every((entry) => entry.note === null));
+    });
+
     test("someone else's absence is not edited without absence.request_others", async () => {
       const created = await createAbsence();
       const res = await server.patch(`/api/absences/${created.body.absence.eventId}`, {

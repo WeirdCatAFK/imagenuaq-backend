@@ -41,6 +41,16 @@ function actorId() {
   return actor.id;
 }
 
+/**
+ * Whether the actor may see the motive and document of `userId`'s absences: their own, an admin,
+ * or a holder of absence.read_detail (RF-AUS-13).
+ */
+async function seesDetail(userId) {
+  const actor = currentActor();
+  if (actor.role === "admin" || userId === actor.id) return true;
+  return (await query.getRolePermissionCodes(actor.roleId)).includes("absence.read_detail");
+}
+
 /** @throws {ApiError} 400 */
 function requireAmount(value, field) {
   const text = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : "";
@@ -275,12 +285,7 @@ class Absences {
     const id = requireId(eventId, "eventId");
     const row = await query.getAbsence(id);
     if (!row) throw ApiError.notFound("Absence not found.");
-    const actor = currentActor();
-    const perms = await query.getRolePermissionCodes(actor.roleId);
-    const full = actor.role === "admin"
-      || perms.includes("absence.read_detail")
-      || row.user_id === actor.id;
-    return full ? shapeAbsence(row) : shapeAbsencePublic(row);
+    return (await seesDetail(row.user_id)) ? shapeAbsence(row) : shapeAbsencePublic(row);
   }
 
   /**
@@ -458,22 +463,43 @@ class Absences {
   }
 
   /**
-   * Removes a requested absence before anyone acts on it.
+   * Removes a requested absence before anyone acts on it. Only its person, or someone with
+   * absence.request_others, may remove it (RF-USR-05).
    *
-   * @throws {ApiError} 404
+   * @throws {ApiError} 403, 404
    */
   async remove(eventId) {
     const id = requireId(eventId, "eventId");
+    const existing = await query.getAbsence(id);
+    if (!existing) throw ApiError.notFound("Absence not found or not in requested status.");
+
+    const actor = currentActor();
+    if (existing.user_id !== actor.id) {
+      const perms = await query.getRolePermissionCodes(actor.roleId);
+      if (!perms.includes("absence.request_others")) {
+        throw ApiError.forbidden("You can only remove your own absences.");
+      }
+    }
+
     const row = await query.deleteAbsence(id);
     if (!row) throw ApiError.notFound("Absence not found or not in requested status.");
   }
 
   /**
+   * The status changes of an absence. Notes can repeat the motive, so they follow the same rule as
+   * get() (RF-AUS-13).
+   *
    * @returns {Promise<object[]>}
+   * @throws {ApiError} 404
    */
   async statusHistory(eventId) {
     const id = requireId(eventId, "eventId");
-    return (await query.absenceStatusHistory(id)).map(shapeStatusEntry);
+    const row = await query.getAbsence(id);
+    if (!row) throw ApiError.notFound("Absence not found.");
+    const full = await seesDetail(row.user_id);
+    return (await query.absenceStatusHistory(id))
+      .map(shapeStatusEntry)
+      .map((entry) => (full ? entry : { ...entry, note: null }));
   }
 
   /**
