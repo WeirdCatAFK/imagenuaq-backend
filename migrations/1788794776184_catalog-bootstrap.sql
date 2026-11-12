@@ -83,12 +83,8 @@ ON CONFLICT (name) DO NOTHING;
 -- a wrong one silently explains consumed history against a cap that never existed. An
 -- empty table makes the omission visible; a guessed 20 does not.
 
-INSERT INTO contract_types (name) VALUES
-    ('Honorarios'),
-    ('Eventual'),
-    ('Base de confianza'),
-    ('Base sindicalizada')
-ON CONFLICT (name) DO NOTHING;
+-- Not seeded either: the schemes are coordination's data, entered from the app or by
+-- scripts/createAdmin.js on a fresh install.
 
 
 -- 4. Areas - RF-USR-01
@@ -98,15 +94,8 @@ ON CONFLICT (name) DO NOTHING;
 -- rows and not a parent_id. Nothing here freezes the list - RF-USR-09 requires adding
 -- areas without a deploy, and the `area.manage` permission is what will allow it.
 
-INSERT INTO areas (name) VALUES
-    ('Secretaría Particular'),
-    ('Producción Audiovisual'),
-    ('Diseño Gráfico'),
-    ('Diseño Web'),
-    ('Administración'),
-    ('Imprenta'),
-    ('Impresión')
-ON CONFLICT (name) DO NOTHING;
+-- Not seeded: coordination enters its areas from the app (RF-USR-09), and
+-- scripts/createAdmin.js creates the DEFAULT_AREA one on a fresh install.
 
 
 -- 5. Event types
@@ -249,19 +238,6 @@ WHERE t.code = 'dia_institucional'
 DELETE FROM event_types et
 WHERE et.code IN ('horario', 'proyecto', 'ausencia', 'festivo')
   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.event_type_id = et.id);
-
-DELETE FROM areas a
-WHERE a.name IN ('Secretaría Particular', 'Producción Audiovisual', 'Diseño Gráfico',
-                 'Diseño Web', 'Administración', 'Imprenta', 'Impresión')
-  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.primary_area_id = a.id)
-  AND NOT EXISTS (SELECT 1 FROM area_members am WHERE am.area_id = a.id)
-  AND NOT EXISTS (SELECT 1 FROM folder_areas fa WHERE fa.area_id = a.id)
-  AND NOT EXISTS (SELECT 1 FROM event_participants ep WHERE ep.area_id = a.id);
-
-DELETE FROM contract_types ct
-WHERE ct.name IN ('Honorarios', 'Eventual', 'Base de confianza', 'Base sindicalizada')
-  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.contract_type_id = ct.id)
-  AND NOT EXISTS (SELECT 1 FROM contract_type_entitlements cte WHERE cte.contract_type_id = ct.id);
 
 DELETE FROM roles r
 WHERE r.name IN ('worker', 'area_lead', 'admin', 'finance')

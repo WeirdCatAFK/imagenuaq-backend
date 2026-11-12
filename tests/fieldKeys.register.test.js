@@ -60,6 +60,16 @@ describe("POST /api/schemas/field-keys", () => {
   });
 
   test("an existing key is reused with its type and refused with another", async () => {
+    const format = await server.post("/api/schemas", {
+      token: adminToken,
+      body: {
+        code: `${TEST_SCHEMA_PREFIX}orden`,
+        name: "Con orden",
+        fields: { deliverables: [], information: [{ code: "numero_orden", name: "Número de orden", type: "text" }] },
+      },
+    });
+    assert.equal(format.status, 201);
+
     const same = await register({ key: "numero_orden", name: "Otro nombre", type: "text" });
     assert.equal(same.status, 201);
     assert.equal(same.body.fieldKey.name, "Número de orden", "the format's name stays");

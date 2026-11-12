@@ -9,7 +9,6 @@ import {
   reset,
   resetCases,
   createActive,
-  areaId,
   sql,
   tokenFor,
   logsFor,
@@ -35,8 +34,15 @@ describe("/api/documents", () => {
     server = await startServer();
     await reset();
 
-    areaX = { id: await areaId("Diseño Gráfico") };
-    areaY = { id: await areaId("Diseño Web") };
+    [areaX, areaY] = await Promise.all(
+      ["Diseño Gráfico", "Diseño Web"].map(async (name) => {
+        const [row] = await sql(
+          "insert into areas (name) values ($1) on conflict (name) do update set name = excluded.name returning id",
+          [name],
+        );
+        return row;
+      }),
+    );
 
     users = {
       admin: await createActive({ email: ACCOUNTS.admin, role: "admin" }),

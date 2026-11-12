@@ -36,18 +36,27 @@ describe("GET /api/schemas/field-keys", () => {
     await server.close();
   });
 
-  beforeEach(() => resetCases(ACCOUNTS));
+  beforeEach(async () => {
+    await resetCases(ACCOUNTS);
+    const campo = (code, type = "text") => ({ code, name: code, type, note: "", required: false });
+    await createSchema(
+      "papel",
+      { deliverables: [campo("tiraje", "quantity")], information: [campo("numero_orden"), campo("descripcion")] },
+      "Papel institucional",
+    );
+    await createSchema("foto", { deliverables: [], information: [campo("descripcion")] }, "Fotografía");
+  });
 
   const vocabulario = async (token = adminToken) =>
     (await server.get("/api/schemas/field-keys", { token })).body.fieldKeys;
 
   const crear = (body, token = adminToken) => server.post("/api/schemas", { token, body });
 
-  test("trae las claves sembradas con su tipo y en qué formatos viven", async () => {
+  test("trae las claves de los formatos con su tipo y en qué formatos viven", async () => {
     const claves = await vocabulario();
     const porClave = Object.fromEntries(claves.map((una) => [una.key, una]));
 
-    assert.ok(porClave.numero_orden, "la sembró papel_institucional");
+    assert.ok(porClave.numero_orden, "la declara Papel institucional");
     assert.equal(porClave.numero_orden.type, "text");
     assert.ok(porClave.numero_orden.schemas.includes("Papel institucional"));
 
@@ -132,7 +141,7 @@ describe("GET /api/schemas/field-keys", () => {
   });
 
   describe("el tipo de una clave no cambia", () => {
-    test("reusar una clave sembrada con otro tipo se rechaza, nombrando dónde vive", async () => {
+    test("reusar una clave con otro tipo se rechaza, nombrando dónde vive", async () => {
       const res = await crear({
         code: `${TEST_SCHEMA_PREFIX}choca`,
         name: "Choca",
@@ -183,9 +192,6 @@ describe("GET /api/schemas/field-keys", () => {
     });
 
     test("un clon hereda tipos que ya son consistentes, así que pasa", async () => {
-      const [starter] = (await vocabulario()).filter((una) => una.key === "tiraje");
-      assert.ok(starter, "tiraje viene sembrada");
-
       const formato = await createSchema("fuente_clon", {
         deliverables: [{ code: "tiraje", name: "Tiraje", type: "quantity" }],
         information: [],

@@ -165,18 +165,17 @@ describe('/api/schemas', () => {
   });
 
   describe('reads', () => {
-    test('lists every schema with its latest version, starters included', async () => {
+    test('lists every schema with its latest version', async () => {
       await createSchema('uno');
       const res = await server.get('/api/schemas', { token: workerToken });
 
       assert.equal(res.status, 200);
       const codes = res.body.schemas.map((s) => s.code);
       assert.ok(codes.includes(`${TEST_SCHEMA_PREFIX}uno`));
-      const starter = res.body.schemas.find((x) => x.code === 'papel_institucional');
-      assert.ok(starter, 'the seeded starter format');
-      assert.deepEqual(Object.keys(starter.fields), ['deliverables', 'information']);
-      assert.ok(starter.fields.deliverables.some((f) => f.code === 'tiraje' && f.required === true));
-      assert.ok(starter.fields.information.some((f) => f.code === 'numero_orden'));
+      const made = res.body.schemas.find((x) => x.code === `${TEST_SCHEMA_PREFIX}uno`);
+      assert.deepEqual(Object.keys(made.fields), ['deliverables', 'information']);
+      assert.ok(made.fields.deliverables.some((f) => f.code === 'entregable' && f.required === true));
+      assert.ok(made.fields.information.some((f) => f.code === 'dependencia'));
     });
 
     test('says who published the version and how much uses the format', async () => {

@@ -220,7 +220,7 @@ describe('/api/areas', () => {
 
       test('omitting parentAreaId hangs the area under DEFAULT_AREA', async () => {
         const coordinacion = await areaId(process.env.DEFAULT_AREA);
-        assert.ok(coordinacion, 'DEFAULT_AREA must name a seeded area in .env.test');
+        assert.ok(coordinacion, 'reset() creates the DEFAULT_AREA area');
 
         const res = await server.post('/api/areas', {
           token: adminToken,

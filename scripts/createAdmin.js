@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Creates an admin, or restores one: an existing address is promoted and its password reset, and
-// `admin` gets every permission back. npm run admin:create -- --email a@uaq.mx --name "Nombre"
+// Creates or restores an admin: npm run admin:create -- --email a@uaq.mx --name "Nombre"
 // [--contract <id|name>] [--area <id|name>]. Password from ADMIN_PASSWORD or a prompt, never argv.
+// On an empty database it creates the --contract name and, without --area, the DEFAULT_AREA area.
 
 import { openStore, closeStore } from '../src/access/primitives/database.js';
 import query from '../src/access/resources/query.js';
@@ -132,21 +132,31 @@ try {
     console.log(`  Live admins: ${before} -> ${after}.\n`);
   } else {
     const contractRef = arg('contract');
-    const contract = contractRef
+    let contract = contractRef
       ? await query.findContractType(contractRef)
       : await query.firstContractType();
+    let contractCreated = false;
 
     if (!contract) {
-      fail(
-        contractRef
-          ? `No contract type matches "${contractRef}".`
-          : 'No contract types exist. Run `npm run migrate:up` first.',
-      );
+      if (!contractRef || /^\d+$/.test(contractRef)) {
+        fail(
+          contractRef
+            ? `No contract type matches "${contractRef}".`
+            : 'No contract types exist yet. Pass --contract "<name>" to create the first one.',
+        );
+      }
+      contract = await query.createContractType(contractRef);
+      contractCreated = true;
     }
 
     const areaRef = arg('area');
-    const area = areaRef ? await query.findArea(areaRef) : await areas.defaultArea();
+    let area = areaRef ? await query.findArea(areaRef) : await areas.defaultArea();
     if (areaRef && !area) fail(`No area matches "${areaRef}".`);
+    let areaCreated = false;
+    if (!area && !areaRef && process.env.DEFAULT_AREA?.trim()) {
+      area = await query.createArea({ name: process.env.DEFAULT_AREA.trim(), description: null });
+      areaCreated = true;
+    }
 
     const created = await query.createUser({
       email,
@@ -159,8 +169,12 @@ try {
     await auth.setPassword(created.id, password);
 
     const after = await query.countLiveUsersWithRole(ADMIN_ROLE);
-    const defaulted = contractRef ? '' : ' (default -- first in the catalog)';
-    const areaDefaulted = area && !areaRef ? ' (default -- DEFAULT_AREA)' : '';
+    const defaulted = contractCreated
+      ? ' (created)'
+      : contractRef ? '' : ' (default -- first in the catalog)';
+    const areaDefaulted = areaCreated
+      ? ' (created from DEFAULT_AREA)'
+      : area && !areaRef ? ' (default -- DEFAULT_AREA)' : '';
     console.log(`\n  Admin created: ${email} (id ${created.id}).`);
     console.log(`  Contract type: ${contract.name}${defaulted}.`);
     console.log(`  Area: ${area ? area.name : 'none'}${areaDefaulted}.`);
