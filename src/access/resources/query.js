@@ -1883,8 +1883,8 @@ class Query {
       ),
       execution as (
         insert into project_stages (flow_stage_id, attempt, status, assigned_to, started_at)
-        select definition.id, 1, $10, $11::bigint,
-          case when $10 = 'active' then current_timestamp end
+        select definition.id, 1, $10::text, $11::bigint,
+          case when $10::text = 'active' then current_timestamp end
         from definition
         returning *
       )
