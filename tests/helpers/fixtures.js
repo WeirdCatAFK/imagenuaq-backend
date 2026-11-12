@@ -129,6 +129,7 @@ export async function resetCases(keepEmails = []) {
     keepEmails.length ? keepEmails : [''],
   ]);
   await sql('delete from areas where name like $1', [`${TEST_PREFIX}%`]);
+  await sql("delete from print_machines where name not in ('SORM', 'GTO')");
   await sql(
     `delete from contract_types ct
       where ct.name like $1
