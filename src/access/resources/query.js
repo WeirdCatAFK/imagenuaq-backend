@@ -581,6 +581,15 @@ class Query {
     return this.#rows("select id, name from contract_types order by name");
   }
 
+  /** Inserts a contract scheme. Raises the unique violation on a taken name (uq_contract_types_name). */
+  async createContractType(name) {
+    const [row] = await this.#rows(
+      "insert into contract_types (name) values ($1) returning id, name",
+      [name],
+    );
+    return row;
+  }
+
   /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
   async firstContractType() {
     const [row] = await this.#rows(

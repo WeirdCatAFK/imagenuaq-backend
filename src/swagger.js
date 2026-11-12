@@ -756,6 +756,11 @@ export function buildOpenApiDocument() {
           },
           required: ['id', 'name', 'description'],
         },
+        ContractTypeRequest: {
+          type: 'object',
+          properties: { name: { type: 'string', maxLength: 200 } },
+          required: ['name'],
+        },
         RoleRequest: {
           type: 'object',
           properties: {
@@ -3460,6 +3465,27 @@ export function buildOpenApiDocument() {
           responses: {
             200: wrapped('Every scheme, by name.', 'contractTypes', 'ContractType', true),
             401: UNAUTHORIZED,
+          },
+        },
+        post: {
+          tags: ['contract-types'],
+          summary: 'Create a contract scheme',
+          description:
+            'Admin only. No migration seeds the schemes; coordination enters them here. ' +
+            'Its caps are entitlement rows, added afterwards (RF-AUS-04).',
+          requestBody: jsonBody('ContractTypeRequest'),
+          responses: {
+            201: wrapped('The created scheme.', 'contractType', 'ContractType'),
+            400: errorResponse(
+              'The name is missing or longer than 200 characters.',
+              'name is required.',
+            ),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            409: errorResponse(
+              'The name is taken.',
+              'A contract type with that name already exists.',
+            ),
           },
         },
       },

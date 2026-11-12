@@ -1,20 +1,27 @@
-// The contract types list. Cases match on names, never ids: ids differ between databases.
+// The contract types: the list and the admin's create. Cases match on names, never ids: ids
+// differ between databases.
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { startServer } from './helpers/server.js';
-import { reset, createActive, tokenFor } from './helpers/fixtures.js';
+import { reset, createActive, tokenFor, TEST_PREFIX } from './helpers/fixtures.js';
 
-describe('GET /api/contract-types', () => {
+describe('/api/contract-types', () => {
   let server;
   let workerToken;
+  let adminToken;
 
   before(async () => {
     server = await startServer();
     await reset();
     await createActive({ email: 'disenador@uaq.mx', role: 'worker' });
+    await createActive({ email: 'coordinacion@uaq.mx', role: 'admin' });
     workerToken = await tokenFor(server, 'disenador@uaq.mx');
+    adminToken = await tokenFor(server, 'coordinacion@uaq.mx');
   });
+
+  const create = (name, token = adminToken) =>
+    server.post('/api/contract-types', { token, body: { name } });
 
   after(async () => {
     await reset();
@@ -35,19 +42,34 @@ describe('GET /api/contract-types', () => {
     assert.ok(Array.isArray(res.body.contractTypes));
   });
 
-  test('carries the four RF-AUS-02 schemes and becario', async () => {
-    const res = await server.get('/api/contract-types', { token: workerToken });
-    const names = res.body.contractTypes.map((type) => type.name);
+  test('an admin adds a scheme and it is listed', async () => {
+    const res = await create(`${TEST_PREFIX}Becario`);
 
-    for (const expected of [
-      'Honorarios',
-      'Eventual',
-      'Base de confianza',
-      'Base sindicalizada',
-      'Becario',
-    ]) {
-      assert.ok(names.includes(expected), `${expected} is missing from the catalogue`);
-    }
+    assert.equal(res.status, 201);
+    assert.equal(res.body.contractType.name, `${TEST_PREFIX}Becario`);
+    const list = await server.get('/api/contract-types', { token: workerToken });
+    assert.ok(list.body.contractTypes.some((type) => type.id === res.body.contractType.id));
+  });
+
+  test('a worker may not add one', async () => {
+    const res = await create(`${TEST_PREFIX}Eventual`, workerToken);
+
+    assert.equal(res.status, 403);
+  });
+
+  test('a blank name is 400', async () => {
+    const res = await create('   ');
+
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error.message, 'name is required.');
+  });
+
+  test('a taken name is 409', async () => {
+    await create(`${TEST_PREFIX}Honorarios`);
+    const res = await create(`${TEST_PREFIX}Honorarios`);
+
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error.message, 'A contract type with that name already exists.');
   });
 
   test('every row is an id and a name, and nothing else', async () => {
@@ -61,11 +83,13 @@ describe('GET /api/contract-types', () => {
   });
 
   test('is ordered by name, not by id', async () => {
+    await create(`${TEST_PREFIX}B base`);
+    await create(`${TEST_PREFIX}A alta`);
     const res = await server.get('/api/contract-types', { token: workerToken });
     const names = res.body.contractTypes.map((type) => type.name);
 
     assert.ok(
-      names.indexOf('Base de confianza') < names.indexOf('Honorarios'),
+      names.indexOf(`${TEST_PREFIX}A alta`) < names.indexOf(`${TEST_PREFIX}B base`),
       `not ordered by name: ${names.join(', ')}`,
     );
   });
