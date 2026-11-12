@@ -303,6 +303,16 @@ export function buildOpenApiDocument() {
           '`finance.validate`. Little is required: finance reads the gaps instead. Amounts travel as ' +
           'strings with two decimals.',
       },
+      {
+        name: 'absences',
+        description:
+          'Staff absences and leave (RF-AUS-01 to RF-AUS-15): types, requests, approval, balances ' +
+          'and who is away. Availability is public, and the reason and the oficio are not (RF-AUS-13).',
+      },
+      {
+        name: 'print',
+        description: 'The print shop (RF-IMP-01 to RF-IMP-08): presses, the pantone catalog and work orders.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -2655,6 +2665,7 @@ export function buildOpenApiDocument() {
             isActive: { type: 'boolean' },
           },
         },
+        ...EXTRA_SCHEMAS,
       },
       responses: {
         Unauthorized: errorResponse(
@@ -5926,8 +5937,8 @@ export function buildOpenApiDocument() {
         },
       },
       '/api/calendar/events/{eventId}': {
-        parameters: [pathId('eventId', 'A global event.')],
         patch: {
+          parameters: [pathId('eventId', 'A global event.')],
           tags: ['calendar'],
           summary: 'Change or move a global event',
           description: 'Needs calendar.write. Stage and absence events are not global and answer 404.',
@@ -5941,6 +5952,7 @@ export function buildOpenApiDocument() {
           },
         },
         delete: {
+          parameters: [pathId('eventId', 'A global event.')],
           tags: ['calendar'],
           summary: 'Delete a global event',
           responses: {
@@ -5967,8 +5979,8 @@ export function buildOpenApiDocument() {
         },
       },
       '/api/calendar/notes/{noteId}': {
-        parameters: [pathId('noteId', 'A note.')],
         patch: {
+          parameters: [pathId('noteId', 'A note.')],
           tags: ['calendar'],
           summary: 'Rewrite a note or move it to another day',
           description: 'Only its author; coordination may also change a global note.',
@@ -5981,6 +5993,7 @@ export function buildOpenApiDocument() {
           },
         },
         delete: {
+          parameters: [pathId('noteId', 'A note.')],
           tags: ['calendar'],
           summary: 'Remove a note',
           responses: {
@@ -6017,8 +6030,8 @@ export function buildOpenApiDocument() {
         },
       },
       '/api/calendar/closures/{closureId}': {
-        parameters: [pathId('closureId', 'A closure window.')],
         patch: {
+          parameters: [pathId('closureId', 'A closure window.')],
           tags: ['calendar'],
           summary: 'Change or move a closure window',
           requestBody: jsonBody('PeriodClosure'),
@@ -6031,6 +6044,7 @@ export function buildOpenApiDocument() {
           },
         },
         delete: {
+          parameters: [pathId('closureId', 'A closure window.')],
           tags: ['calendar'],
           summary: 'Delete a closure window',
           responses: {
@@ -6797,9 +6811,879 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      ...EXTRA_PATHS,
     },
     security: [{ bearerAuth: [] }],
   };
 }
 
 export default buildOpenApiDocument;
+
+/** A response wrapping one value under `key`, for values that have no named schema. */
+const wrappedInline = (description, key, schema) => ({
+  description,
+  content: {
+    'application/json': {
+      schema: { type: 'object', properties: { [key]: schema }, required: [key] },
+    },
+  },
+});
+
+/** A bare JSON array of a named schema, for the few routes that answer without an envelope. */
+const bareArray = (description, schema) => ({
+  description,
+  content: {
+    'application/json': {
+      schema: { type: 'array', items: { $ref: `#/components/schemas/${schema}` } },
+    },
+  },
+});
+
+const OK_TRUE = wrappedInline('Done.', 'ok', { type: 'boolean', const: true });
+
+const ABSENCE_STATUSES = ['requested', 'approved', 'rejected', 'cancelled', 'taken'];
+const PRINT_STATUSES = ['pending', 'in_progress', 'completed', 'cancelled'];
+const DATE = { type: 'string', format: 'date', example: '2026-11-20' };
+const NULLABLE_DATE = { type: ['string', 'null'], format: 'date' };
+const AMOUNT = { type: 'string', pattern: '^\\d{1,6}(\\.\\d{1,2})?$', example: '20' };
+const UPLOAD_ID = { name: 'id', in: 'path', required: true, schema: { type: 'string' }, description: 'The uploadId.' };
+const BINARY_BODY = { required: true, content: { '*/*': { schema: { type: 'string', format: 'binary' } } } };
+
+/** The schemas the absences, entitlements, print and chunked-upload routes add. */
+const EXTRA_SCHEMAS = {
+  AbsenceType: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      code: { type: 'string', example: 'vacaciones' },
+      label: { type: 'string', example: 'Vacaciones' },
+      unit: { type: 'string', enum: ['day', 'hour'] },
+      consumesBalance: { type: 'boolean' },
+      requiresDocument: { type: 'boolean' },
+      isActive: { type: 'boolean' },
+    },
+  },
+  CreateAbsenceTypeRequest: {
+    type: 'object',
+    properties: {
+      code: { type: 'string', pattern: '^[a-z][a-z0-9_]*$', maxLength: 50 },
+      label: { type: 'string', maxLength: 200 },
+      unit: { type: 'string', enum: ['day', 'hour'] },
+      consumesBalance: { type: 'boolean', default: true },
+      requiresDocument: { type: 'boolean', default: false },
+    },
+    required: ['code', 'label', 'unit'],
+  },
+  UpdateAbsenceTypeRequest: {
+    type: 'object',
+    description: 'Only the keys sent change, and at least one is required. The code never changes.',
+    properties: {
+      label: { type: 'string', maxLength: 200 },
+      unit: { type: 'string', enum: ['day', 'hour'] },
+      consumesBalance: { type: 'boolean' },
+      requiresDocument: { type: 'boolean' },
+      isActive: { type: 'boolean' },
+    },
+  },
+  Entitlement: {
+    type: 'object',
+    description: 'What a contract scheme grants of one absence type during a validity period (RF-AUS-04).',
+    properties: {
+      id: { type: 'integer' },
+      contractTypeId: { type: 'integer' },
+      absenceTypeId: { type: 'integer' },
+      absenceTypeCode: { type: ['string', 'null'] },
+      absenceTypeLabel: { type: ['string', 'null'] },
+      amount: { type: 'number', example: 20 },
+      validFrom: DATE,
+      validTo: { ...NULLABLE_DATE, description: 'Null while the period is in force.' },
+    },
+  },
+  SetEntitlementRequest: {
+    type: 'object',
+    properties: {
+      absenceTypeId: { type: 'integer', minimum: 1 },
+      amount: AMOUNT,
+      validFrom: DATE,
+    },
+    required: ['absenceTypeId', 'amount', 'validFrom'],
+  },
+  UpdateEntitlementRequest: {
+    type: 'object',
+    description: 'Only the keys sent change, and at least one is required.',
+    properties: { amount: AMOUNT, validFrom: DATE, validTo: NULLABLE_DATE },
+  },
+  Balance: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      userId: { type: 'integer' },
+      absenceTypeId: { type: 'integer' },
+      absenceTypeCode: { type: ['string', 'null'] },
+      absenceTypeLabel: { type: ['string', 'null'] },
+      cycleStart: DATE,
+      cycleEnd: DATE,
+      granted: { type: 'number' },
+      used: { type: 'number' },
+      remaining: { type: 'number' },
+      note: { type: ['string', 'null'] },
+    },
+  },
+  Absence: {
+    type: 'object',
+    description:
+      '`reason` and `documentFileId` are null unless the caller holds `absence.read_detail` or ' +
+      'the absence is their own (RF-AUS-13).',
+    properties: {
+      eventId: { type: 'integer' },
+      status: { type: 'string', enum: ABSENCE_STATUSES },
+      absenceTypeId: { type: 'integer' },
+      typeCode: { type: ['string', 'null'] },
+      typeLabel: { type: ['string', 'null'] },
+      consumesBalance: { type: ['boolean', 'null'] },
+      reason: { type: ['string', 'null'] },
+      documentFileId: { type: ['integer', 'null'] },
+      approvedBy: { type: ['integer', 'null'] },
+      approvedAt: { type: ['string', 'null'], format: 'date-time' },
+      startsAt: { type: 'string', format: 'date-time' },
+      endsAt: { type: 'string', format: 'date-time' },
+      allDay: { type: 'boolean' },
+      rule: { type: ['string', 'null'] },
+      recurrenceUntil: { type: ['string', 'null'], format: 'date-time' },
+      userId: { type: 'integer' },
+      userName: { type: ['string', 'null'] },
+      areaId: { type: ['integer', 'null'] },
+      createdAt: { type: 'string', format: 'date-time' },
+    },
+  },
+  UpdateAbsenceRequest: {
+    type: 'object',
+    description: 'Only the keys sent change, and at least one is required.',
+    properties: {
+      absenceTypeId: { type: 'integer', minimum: 1 },
+      startsAt: { type: 'string', format: 'date-time' },
+      endsAt: { type: 'string', format: 'date-time', description: 'Later than startsAt.' },
+      reason: { type: 'string', maxLength: 4000 },
+    },
+  },
+  CreateAbsenceRequest: {
+    type: 'object',
+    description: 'Requesting for someone else needs `absence.request_others`.',
+    properties: {
+      userId: { type: 'integer', minimum: 1 },
+      absenceTypeId: { type: 'integer', minimum: 1 },
+      startsAt: { type: 'string', format: 'date-time' },
+      endsAt: { type: 'string', format: 'date-time', description: 'Later than startsAt.' },
+      reason: { type: 'string', maxLength: 4000 },
+      documentFileId: { type: 'integer', minimum: 1 },
+    },
+    required: ['userId', 'absenceTypeId', 'startsAt', 'endsAt', 'reason'],
+  },
+  AbsenceStatusRequest: {
+    type: 'object',
+    description:
+      'requested moves to approved, rejected or cancelled, and approved to cancelled or taken. ' +
+      'Approval deducts the balance, and cancelling an approved absence restores it (RF-AUS-06).',
+    properties: {
+      status: { type: 'string', enum: ABSENCE_STATUSES },
+      note: { type: 'string', maxLength: 4000 },
+      documentFileId: { type: 'integer', minimum: 1 },
+    },
+    required: ['status'],
+  },
+  AbsenceStatusEntry: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      eventId: { type: 'integer' },
+      status: { type: 'string', enum: ABSENCE_STATUSES },
+      changedBy: { type: ['integer', 'null'] },
+      changedAt: { type: 'string', format: 'date-time' },
+      note: { type: ['string', 'null'] },
+    },
+  },
+  AvailabilityDay: {
+    type: 'object',
+    description: 'One person away on one day. It never carries the reason (RF-AUS-12).',
+    properties: {
+      day: DATE,
+      user_id: { type: 'integer' },
+      user_name: { type: ['string', 'null'] },
+      area_id: { type: ['integer', 'null'] },
+      area_name: { type: ['string', 'null'] },
+    },
+  },
+  PrintMachine: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      name: { type: 'string', example: 'SORM' },
+      isActive: { type: 'boolean' },
+    },
+  },
+  PrintMachineRequest: {
+    type: 'object',
+    description: 'On create, name is required. On update, every key is optional.',
+    properties: { name: { type: 'string', maxLength: 50 }, isActive: { type: 'boolean' } },
+  },
+  Pantone: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      entityName: { type: 'string', example: 'Ingenieria' },
+      pantoneCode: { type: 'string', example: '200' },
+      hexValue: { type: ['string', 'null'], example: '#d30028' },
+      isActive: { type: 'boolean' },
+    },
+  },
+  PantoneRequest: {
+    type: 'object',
+    description: 'On create, entityName and pantoneCode are required. On update, every key is optional.',
+    properties: {
+      entityName: { type: 'string', maxLength: 200 },
+      pantoneCode: { type: 'string', maxLength: 50 },
+      hexValue: { type: 'string', maxLength: 7 },
+      isActive: { type: 'boolean' },
+    },
+  },
+  PrintOrder: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      projectId: { type: 'integer' },
+      projectKey: { type: ['string', 'null'] },
+      projectTitle: { type: ['string', 'null'] },
+      projectRequester: { type: ['string', 'null'] },
+      orderNumber: { type: 'string', description: 'Numbered per year.' },
+      machineId: { type: 'integer' },
+      machineName: { type: ['string', 'null'] },
+      status: { type: 'string', enum: PRINT_STATUSES },
+      entityName: { type: ['string', 'null'] },
+      pantoneCode: { type: ['string', 'null'] },
+      pantalla: { type: ['string', 'null'] },
+      trabajo: { type: 'string' },
+      papelType: { type: ['string', 'null'] },
+      papelSize: { type: ['string', 'null'] },
+      cantidad: { type: ['integer', 'null'] },
+      laminas: { type: ['integer', 'null'] },
+      frente: { type: 'boolean' },
+      vuelta: { type: 'boolean' },
+      corte: { type: ['string', 'null'] },
+      folio: { type: ['string', 'null'] },
+      paquetesD: { type: ['integer', 'null'] },
+      pegado: { type: 'boolean' },
+      copiante: { type: 'boolean' },
+      notes: { type: ['string', 'null'] },
+      createdBy: { type: ['integer', 'null'] },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: ['string', 'null'], format: 'date-time' },
+      completedAt: { type: ['string', 'null'], format: 'date-time' },
+    },
+  },
+  PrintOrderRequest: {
+    type: 'object',
+    description:
+      'On create, projectId, machineId and trabajo are required. On update the project stays and ' +
+      'the other keys replace what the order holds.',
+    properties: {
+      projectId: { type: 'integer', minimum: 1 },
+      machineId: { type: 'integer', minimum: 1 },
+      trabajo: { type: 'string', maxLength: 300 },
+      entityName: { type: 'string' },
+      pantoneCode: { type: 'string' },
+      pantalla: { type: 'string' },
+      papelType: { type: 'string' },
+      papelSize: { type: 'string' },
+      cantidad: { type: 'integer' },
+      laminas: { type: 'integer' },
+      frente: { type: 'boolean' },
+      vuelta: { type: 'boolean' },
+      corte: { type: 'string' },
+      folio: { type: 'string' },
+      paquetesD: { type: 'integer' },
+      pegado: { type: 'boolean' },
+      copiante: { type: 'boolean' },
+      notes: { type: 'string' },
+    },
+  },
+};
+
+const absenceId = pathId('id', 'absences.event_id');
+const NO_ABSENCE = errorResponse('No such absence.', 'Absence not found.');
+const NO_ORDER = errorResponse('No such order.', 'Orden no encontrada.');
+const NO_PANTONE = errorResponse('No such pantone.', 'Pantone no encontrado.');
+const NOT_YOUR_UPLOAD = errorResponse("Someone else's upload.", 'Not your upload.');
+const NO_UPLOAD = errorResponse('Unknown or expired.', 'Upload not found.');
+
+/** The paths for absences, contract-type entitlements, the print shop and chunked uploads. */
+const EXTRA_PATHS = {
+  '/api/absences/types': {
+    get: {
+      tags: ['absences'],
+      summary: 'List the absence types',
+      description: 'Needs absence.read. Inactive types are included, flagged by isActive.',
+      responses: {
+        200: wrapped('Every type.', 'types', 'AbsenceType', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['absences'],
+      summary: 'Add an absence type',
+      description: 'Needs absence.manage. The catalog is configurable at runtime (RF-AUS-03).',
+      requestBody: jsonBody('CreateAbsenceTypeRequest'),
+      responses: {
+        201: wrapped('The new type.', 'type', 'AbsenceType'),
+        400: errorResponse('A missing or malformed field.', 'code must be lowercase letters, digits and underscores.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        409: errorResponse('The code is taken.', 'An absence type with that code already exists.'),
+      },
+    },
+  },
+  '/api/absences/types/{id}': {
+    patch: {
+      tags: ['absences'],
+      summary: 'Change an absence type',
+      description: 'Needs absence.manage. Absences reference the type, so retire it with isActive false.',
+      parameters: [pathId('id', 'absence_types.id')],
+      requestBody: jsonBody('UpdateAbsenceTypeRequest'),
+      responses: {
+        200: wrapped('The type as it is now.', 'type', 'AbsenceType'),
+        400: errorResponse('Nothing to change, or a bad field.', 'Nothing to change.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such type.', 'Absence type not found.'),
+      },
+    },
+  },
+  '/api/absences/availability': {
+    get: {
+      tags: ['absences'],
+      summary: 'Who is away, day by day',
+      description:
+        'Needs absence.read. It reads the absence_availability view, so it carries dates and ' +
+        'people but never the reason (RF-AUS-12). Each row is one person away on one day.',
+      parameters: [
+        { name: 'from', in: 'query', required: true, schema: DATE },
+        { name: 'to', in: 'query', required: true, schema: DATE, description: 'Inclusive, and not before from.' },
+        { name: 'areaId', in: 'query', schema: { type: 'integer', minimum: 1 } },
+        { name: 'userId', in: 'query', schema: { type: 'integer', minimum: 1 } },
+      ],
+      responses: {
+        200: bareArray('The days, ordered by day, area and name.', 'AvailabilityDay'),
+        400: errorResponse('A missing or reversed range.', 'to must not be before from.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/absences/balances': {
+    get: {
+      tags: ['absences'],
+      summary: "A person's balances, by query",
+      description: 'Needs absence.read. The same as /api/absences/balances/{id}, with the user in userId.',
+      parameters: [{ name: 'userId', in: 'query', required: true, schema: { type: 'integer', minimum: 1 } }],
+      responses: {
+        200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
+        400: errorResponse('No userId.', 'userId is required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/absences/balances/{id}': {
+    get: {
+      tags: ['absences'],
+      summary: "A person's balances",
+      description: 'Needs absence.read. What each absence type grants the person per cycle, with use and remainder.',
+      parameters: [pathId('id', 'users.id')],
+      responses: {
+        200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/absences': {
+    get: {
+      tags: ['absences'],
+      summary: 'List absences',
+      description:
+        'Needs absence.read. Everyone sees who is away. The reason and the document come back ' +
+        'only to absence.read_detail or to the person the absence belongs to (RF-AUS-13).',
+      parameters: [
+        { name: 'userId', in: 'query', schema: { type: 'integer', minimum: 1 } },
+        { name: 'areaId', in: 'query', schema: { type: 'integer', minimum: 1 } },
+        { name: 'status', in: 'query', schema: { type: 'string', enum: ABSENCE_STATUSES } },
+        { name: 'absenceTypeId', in: 'query', schema: { type: 'integer', minimum: 1 } },
+        { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 200 } },
+        { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 } },
+      ],
+      responses: {
+        200: bareArray('The absences.', 'Absence'),
+        400: errorResponse('A bad filter.', 'status must be one of: requested, approved, rejected, cancelled, taken.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['absences'],
+      summary: 'Request an absence',
+      description:
+        'Needs absence.write. The absence starts as requested. Going over the balance warns and ' +
+        'does not block (RF-AUS-07), and the response then carries `warning`.',
+      requestBody: jsonBody('CreateAbsenceRequest'),
+      responses: {
+        201: {
+          description: 'The absence, plus a warning when it exceeds the balance.',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  absence: { $ref: '#/components/schemas/Absence' },
+                  warning: { type: ['string', 'null'], example: 'Exceeds available balance by 2 day(s).' },
+                },
+                required: ['absence'],
+              },
+            },
+          },
+        },
+        400: errorResponse('A missing field, a reversed range, or an inactive type.', 'endsAt must be after startsAt.'),
+        401: UNAUTHORIZED,
+        403: errorResponse('For someone else, without absence.request_others.', 'You can only request absences for yourself.'),
+      },
+    },
+  },
+  '/api/absences/{id}': {
+    get: {
+      tags: ['absences'],
+      summary: 'One absence',
+      description: 'Needs absence.read. It hides the reason and the document as the list does (RF-AUS-13).',
+      parameters: [absenceId],
+      responses: {
+        200: wrapped('The absence.', 'absence', 'Absence'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ABSENCE,
+      },
+    },
+    patch: {
+      tags: ['absences'],
+      summary: 'Edit a requested absence',
+      description:
+        'Needs absence.write, and it is your own absence or you hold absence.request_others. ' +
+        'Only while it is requested: an approved one has drawn on the balance, so it is cancelled ' +
+        'and requested again. The audit log records the dates and the type, never the reason.',
+      parameters: [absenceId],
+      requestBody: jsonBody('UpdateAbsenceRequest'),
+      responses: {
+        200: wrapped('The absence as it is now.', 'absence', 'Absence'),
+        400: errorResponse('Nothing to change, a reversed range, or an inactive type.', 'Nothing to change.'),
+        401: UNAUTHORIZED,
+        403: errorResponse("Someone else's absence, without absence.request_others.", 'You can only edit your own absences.'),
+        404: NO_ABSENCE,
+        409: errorResponse('No longer requested.', 'Only a requested absence can be edited. Cancel it and request it again.'),
+      },
+    },
+    delete: {
+      tags: ['absences'],
+      summary: 'Withdraw a request',
+      description: 'Needs absence.write. Only while it is requested. After that, cancel it through /status.',
+      parameters: [absenceId],
+      responses: {
+        200: wrappedInline('Withdrawn.', 'deleted', { type: 'boolean', const: true }),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such absence, or no longer requested.', 'Absence not found or not in requested status.'),
+      },
+    },
+  },
+  '/api/absences/{id}/status': {
+    post: {
+      tags: ['absences'],
+      summary: 'Approve, reject, cancel or mark taken',
+      description: 'Needs absence.approve. Every move lands in the status history.',
+      parameters: [absenceId],
+      requestBody: jsonBody('AbsenceStatusRequest'),
+      responses: {
+        200: wrapped('The absence after the move.', 'absence', 'Absence'),
+        400: errorResponse('A move the current status does not allow.', 'Cannot move from approved to rejected.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ABSENCE,
+      },
+    },
+  },
+  '/api/absences/{id}/document': {
+    post: {
+      tags: ['absences'],
+      summary: 'Attach the oficio',
+      description:
+        'Needs absence.approve. The body is the file itself, streamed, as in a folder upload. ' +
+        'The server stores it in the "Oficios de ausencia" folder and links it to the absence.',
+      parameters: [absenceId, { name: 'name', in: 'query', required: true, schema: { type: 'string', maxLength: 255 } }],
+      requestBody: BINARY_BODY,
+      responses: {
+        201: wrapped('The stored file.', 'file', 'FileEntry'),
+        400: errorResponse('No name.', 'name is required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ABSENCE,
+        413: errorResponse('Larger than MAX_UPLOAD_BYTES.'),
+        503: errorResponse('No oficios folder yet, or the file store did not answer.', 'Absence document folder not configured.'),
+      },
+    },
+  },
+  '/api/absences/{id}/history': {
+    get: {
+      tags: ['absences'],
+      summary: "An absence's status history",
+      description: 'Needs absence.read. It lives apart from the audit log on purpose (RF-AUS-13).',
+      parameters: [absenceId],
+      responses: {
+        200: wrapped('Oldest first.', 'history', 'AbsenceStatusEntry', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/contract-types/{id}/entitlements': {
+    get: {
+      tags: ['contract-types'],
+      summary: "A scheme's entitlements",
+      description: 'Needs absence.read. Every period, the one in force and the closed ones (RF-AUS-04).',
+      parameters: [pathId('id', 'contract_types.id')],
+      responses: {
+        200: wrapped('Every period.', 'entitlements', 'Entitlement', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['contract-types'],
+      summary: 'Set what a scheme grants',
+      description:
+        'Needs absence.manage. The amount never changes in place: the period in force closes the ' +
+        'day before validFrom and a new one opens, so consumed history keeps its cap (RF-AUS-04).',
+      parameters: [pathId('id', 'contract_types.id')],
+      requestBody: jsonBody('SetEntitlementRequest'),
+      responses: {
+        201: wrapped('The new period.', 'entitlement', 'Entitlement'),
+        400: errorResponse('A missing or malformed field.', 'amount must be a non-negative amount with at most two decimals.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        409: errorResponse('The period overlaps another.', 'Entitlement periods overlap.'),
+      },
+    },
+  },
+  '/api/contract-types/{id}/entitlements/{eid}': {
+    patch: {
+      tags: ['contract-types'],
+      summary: 'Correct an entitlement',
+      description: 'Needs absence.manage. It fixes a typo before anyone consumes the period. A real change goes through POST.',
+      parameters: [pathId('id', 'contract_types.id'), pathId('eid', 'contract_type_entitlements.id')],
+      requestBody: jsonBody('UpdateEntitlementRequest'),
+      responses: {
+        200: wrapped('The entitlement as it is now.', 'entitlement', 'Entitlement'),
+        400: errorResponse('Nothing to change, or a bad field.', 'Nothing to change.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such entitlement.', 'Entitlement not found.'),
+        409: errorResponse('The period overlaps another.', 'Entitlement periods overlap.'),
+      },
+    },
+  },
+  '/api/print/machines': {
+    get: {
+      tags: ['print'],
+      summary: 'List the presses',
+      description: 'Needs print.read.',
+      responses: {
+        200: wrapped('Every machine.', 'machines', 'PrintMachine', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['print'],
+      summary: 'Add a press',
+      description: 'Needs print.manage. Presses are configurable at runtime (RF-IMP-02).',
+      requestBody: jsonBody('PrintMachineRequest'),
+      responses: {
+        201: wrapped('The new machine.', 'machine', 'PrintMachine'),
+        400: errorResponse('No name.', 'name is required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        409: errorResponse('The name is taken.', 'Ya existe una maquina con ese nombre.'),
+      },
+    },
+  },
+  '/api/print/machines/{id}': {
+    patch: {
+      tags: ['print'],
+      summary: 'Rename or retire a press',
+      description: 'Needs print.manage. Orders keep referencing the press, so retire it with isActive false.',
+      parameters: [pathId('id', 'print_machines.id')],
+      requestBody: jsonBody('PrintMachineRequest'),
+      responses: {
+        200: wrapped('The machine as it is now.', 'machine', 'PrintMachine'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such machine.', 'Maquina no encontrada.'),
+      },
+    },
+  },
+  '/api/print/pantones': {
+    get: {
+      tags: ['print'],
+      summary: 'List the pantone catalog',
+      description: 'Needs print.read.',
+      parameters: [{ name: 'entity', in: 'query', schema: { type: 'string' }, description: 'Only this entity.' }],
+      responses: {
+        200: wrapped('The pantones.', 'pantones', 'Pantone', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['print'],
+      summary: 'Add a pantone',
+      description: 'Needs print.manage (RF-IMP-06).',
+      requestBody: jsonBody('PantoneRequest'),
+      responses: {
+        201: wrapped('The new pantone.', 'pantone', 'Pantone'),
+        400: errorResponse('A missing field.', 'entityName is required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        409: errorResponse('That entity already has that code.', 'Ese pantone ya existe para esa entidad.'),
+      },
+    },
+  },
+  '/api/print/pantones/lookup': {
+    get: {
+      tags: ['print'],
+      summary: "An entity's pantones, for an order form",
+      description: 'Needs print.read. A missing or empty entity returns an empty list.',
+      parameters: [{ name: 'entity', in: 'query', schema: { type: 'string' }, description: 'The requester, as the project names it.' }],
+      responses: {
+        200: wrapped('The matches.', 'pantones', 'Pantone', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/print/pantones/{id}': {
+    patch: {
+      tags: ['print'],
+      summary: 'Change a pantone',
+      description: 'Needs print.manage.',
+      parameters: [pathId('id', 'pantone_catalog.id')],
+      requestBody: jsonBody('PantoneRequest'),
+      responses: {
+        200: wrapped('The pantone as it is now.', 'pantone', 'Pantone'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_PANTONE,
+      },
+    },
+    delete: {
+      tags: ['print'],
+      summary: 'Remove a pantone',
+      description: 'Needs print.manage.',
+      parameters: [pathId('id', 'pantone_catalog.id')],
+      responses: { 200: OK_TRUE, 401: UNAUTHORIZED, 403: FORBIDDEN, 404: NO_PANTONE },
+    },
+  },
+  '/api/print/orders': {
+    get: {
+      tags: ['print'],
+      summary: 'List work orders',
+      description: 'Needs print.read.',
+      parameters: [
+        { name: 'status', in: 'query', schema: { type: 'string', enum: PRINT_STATUSES } },
+        { name: 'projectId', in: 'query', schema: { type: 'integer', minimum: 1 } },
+      ],
+      responses: {
+        200: wrapped('The orders.', 'orders', 'PrintOrder', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['print'],
+      summary: 'Create a work order',
+      description:
+        "Needs print.create. The order takes the year's next number and writes it to the " +
+        "project's values, so billing reads it without capturing it again (RF-IMP-08).",
+      requestBody: jsonBody('PrintOrderRequest'),
+      responses: {
+        201: wrapped('The new order.', 'order', 'PrintOrder'),
+        400: errorResponse('A missing project, machine or trabajo.', 'trabajo is required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/print/orders/{id}': {
+    get: {
+      tags: ['print'],
+      summary: 'One work order',
+      description: 'Needs print.read.',
+      parameters: [pathId('id', 'print_orders.id')],
+      responses: {
+        200: wrapped('The order.', 'order', 'PrintOrder'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ORDER,
+      },
+    },
+    patch: {
+      tags: ['print'],
+      summary: 'Change a work order',
+      description: 'Needs print.write. A completed or cancelled order no longer changes.',
+      parameters: [pathId('id', 'print_orders.id')],
+      requestBody: jsonBody('PrintOrderRequest'),
+      responses: {
+        200: wrapped('The order as it is now.', 'order', 'PrintOrder'),
+        400: errorResponse('A finished order.', 'No se puede modificar una orden completada o cancelada.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ORDER,
+      },
+    },
+    delete: {
+      tags: ['print'],
+      summary: 'Delete a pending work order',
+      description: 'Needs print.write. Only while it is pending. After that, cancel it.',
+      parameters: [pathId('id', 'print_orders.id')],
+      responses: {
+        200: OK_TRUE,
+        400: errorResponse('No longer pending.', 'Solo se pueden eliminar ordenes pendientes.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ORDER,
+      },
+    },
+  },
+  '/api/print/orders/{id}/status': {
+    post: {
+      tags: ['print'],
+      summary: 'Move a work order',
+      description:
+        'Needs print.write. pending moves to in_progress or cancelled, and in_progress to ' +
+        'completed or cancelled. Completion stamps completedAt.',
+      parameters: [pathId('id', 'print_orders.id')],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: { status: { type: 'string', enum: PRINT_STATUSES } },
+              required: ['status'],
+            },
+          },
+        },
+      },
+      responses: {
+        200: wrapped('The order after the move.', 'order', 'PrintOrder'),
+        400: errorResponse('A move the current status does not allow.', 'No se puede cambiar de completed a pending.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: NO_ORDER,
+      },
+    },
+  },
+  '/api/documents/folders/{id}/uploads': {
+    post: {
+      tags: ['documents'],
+      summary: 'Start a chunked upload',
+      description:
+        'For files too large for one request: send the parts in order with PUT, then complete. ' +
+        'It needs write access to the folder. An unfinished upload expires after 24 hours.',
+      parameters: [pathId('id', 'folders.id')],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', maxLength: 255 },
+                mime: { type: ['string', 'null'], maxLength: 255 },
+              },
+              required: ['name'],
+            },
+          },
+        },
+      },
+      responses: {
+        201: wrappedInline('The id for the calls that follow.', 'uploadId', { type: 'string' }),
+        400: errorResponse('A bad name.', 'name cannot contain slashes or control characters, or be . or ..'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('Missing or deleted.', 'Folder not found.'),
+      },
+    },
+  },
+  '/api/documents/uploads/{id}/{partNumber}': {
+    put: {
+      tags: ['documents'],
+      summary: 'Send one part',
+      description: "The body is the raw bytes of the part. Parts go in order from 1, and only the upload's starter sends them.",
+      parameters: [UPLOAD_ID, { name: 'partNumber', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } }],
+      requestBody: BINARY_BODY,
+      responses: {
+        200: {
+          description: 'The part arrived.',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: { partNumber: { type: 'integer' }, size: { type: 'integer' } },
+              },
+            },
+          },
+        },
+        400: errorResponse('A bad part number.', 'partNumber must be a positive integer.'),
+        401: UNAUTHORIZED,
+        403: NOT_YOUR_UPLOAD,
+        404: NO_UPLOAD,
+        413: errorResponse('The parts so far pass MAX_UPLOAD_BYTES.'),
+      },
+    },
+  },
+  '/api/documents/uploads/{id}/complete': {
+    post: {
+      tags: ['documents'],
+      summary: 'Finish a chunked upload',
+      description: 'It assembles the parts and stores the file by its SHA-256, as a single upload does.',
+      parameters: [UPLOAD_ID],
+      responses: {
+        201: wrapped('The file.', 'file', 'FileEntry'),
+        400: errorResponse('No parts yet.', 'No parts uploaded.'),
+        401: UNAUTHORIZED,
+        403: NOT_YOUR_UPLOAD,
+        404: NO_UPLOAD,
+        503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+      },
+    },
+  },
+  '/api/documents/uploads/{id}': {
+    delete: {
+      tags: ['documents'],
+      summary: 'Abandon a chunked upload',
+      description: 'It discards the parts sent so far.',
+      parameters: [UPLOAD_ID],
+      responses: {
+        204: { description: 'Discarded.' },
+        401: UNAUTHORIZED,
+        403: NOT_YOUR_UPLOAD,
+        404: NO_UPLOAD,
+      },
+    },
+  },
+};
