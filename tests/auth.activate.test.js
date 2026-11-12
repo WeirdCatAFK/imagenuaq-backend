@@ -168,7 +168,7 @@ describe('POST /api/auth/activate', () => {
 
       const { password_hash: hash } = await findUser(user.id);
 
-      assert.match(hash, /^\$2[aby]\$12\$/);
+      assert.match(hash, /^\$2[aby]\$\d{2}\$/);
       assert.equal(hash.includes(NEW_PASSWORD), false);
     });
 

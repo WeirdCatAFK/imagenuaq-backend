@@ -7,11 +7,11 @@ import { getStore } from '../../src/access/primitives/database.js';
 import { seal } from '../../src/utils/crypto.js';
 
 /** Matches SALT_ROUNDS in orchestration/auth.js; a mismatch would still verify, silently. */
-const SALT_ROUNDS = 12;
+const SALT_ROUNDS = Number(process.env.BCRYPT_ROUNDS) || 12;
 
 export const PASSWORD = 'correct horse battery staple';
 
-/** Hashed once per process: bcrypt at cost 12 is ~300ms. */
+/** Hashed once per process, at the cost .env.test sets. */
 let cachedHash = null;
 async function passwordHash() {
   cachedHash ??= await bcrypt.hash(PASSWORD, SALT_ROUNDS);

@@ -1,5 +1,6 @@
 // Logins, invites and session tokens: hashing passwords, signing and checking tokens. Every
 // token says what it is for (`purpose`), so an invite can never be used as a login.
+import { randomUUID } from "node:crypto";
 import bcrypt from "bcrypt";
 import * as jose from "jose";
 
@@ -7,15 +8,18 @@ import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
 
-const SALT_ROUNDS = 12;
+/**
+ * bcrypt cost. Always 12 outside tests; under NODE_ENV=test, BCRYPT_ROUNDS may lower it so the
+ * suite does not spend a quarter second on every hash and login.
+ */
+const SALT_ROUNDS =
+  process.env.NODE_ENV === "test" ? Number(process.env.BCRYPT_ROUNDS) || 12 : 12;
 
 /**
- * A syntactically valid bcrypt hash of a string nobody will ever send, compared against
- * when the email matches no account. bcrypt.compare() rejects a malformed hash outright,
- * so the padding has to be real.
+ * A real bcrypt hash of a random string, compared against when the email matches no account.
+ * Hashed at SALT_ROUNDS so an unknown email costs exactly what a wrong password costs.
  */
-const ABSENT_USER_HASH =
-  "$2b$12$Y8bJW7j4VeZFKWsqTRTpiug1BeJKXqA.7A6wSVndckjEKYw5rGz36";
+const ABSENT_USER_HASH = bcrypt.hashSync(randomUUID(), SALT_ROUNDS);
 
 /** Session lifetime. Long enough that staff are not re-typing a password daily. */
 const TOKEN_TTL = "7d";
