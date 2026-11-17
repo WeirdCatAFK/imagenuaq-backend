@@ -3,13 +3,13 @@
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { UNIQUE_VIOLATION, requireText } from "../../utils/validate.js";
+import { UNIQUE_VIOLATION, requireId, requireText } from "../../utils/validate.js";
 
 const NAME_MAX = 200;
 
 class ContractTypes {
   /**
-   * Every contract scheme, ordered by name.
+   * Every active contract scheme, ordered by name.
    *
    * @returns {Promise<Array<{ id: number, name: string }>>}
    */
@@ -18,7 +18,8 @@ class ContractTypes {
   }
 
   /**
-   * Adds a scheme. Its caps are entitlement rows, set afterwards (RF-AUS-04).
+   * Adds a scheme, or brings back a deactivated one of the same name with its caps. Its caps are
+   * entitlement rows, set afterwards (RF-AUS-04).
    *
    * @param {{ name?: unknown }} input
    * @returns {Promise<{ id: number, name: string }>}
@@ -40,6 +41,25 @@ class ContractTypes {
       }
       throw err;
     }
+  }
+
+  /**
+   * Deactivates a scheme. The row stays, so people on it and the caps it granted keep their
+   * history (RF-AUS-04); it only leaves the list.
+   *
+   * @throws {ApiError} 404 when no active scheme has that id.
+   */
+  async deactivate(contractTypeId) {
+    const id = requireId(contractTypeId, "contractTypeId");
+    const row = await query.deactivateContractType(id);
+    if (!row) throw ApiError.notFound("Contract type not found.");
+    await events.emit({
+      action: "record_updated",
+      target: { table: "contract_types", id: row.id },
+      before: { is_active: true },
+      after: { is_active: false },
+    });
+    return shapeContractType(row);
   }
 }
 

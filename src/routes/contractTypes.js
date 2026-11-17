@@ -19,6 +19,10 @@ router.post("/", requireRole("admin"), async (req, res) => {
   res.status(201).json({ contractType: await contractTypes.create(req.body ?? {}) });
 });
 
+router.delete("/:id", requireRole("admin"), async (req, res) => {
+  res.json({ contractType: await contractTypes.deactivate(idParam(req, "id", "contract type id")) });
+});
+
 router.get("/:id/entitlements", requirePermission("absence.read"), async (req, res) => {
   res.json({ entitlements: await absences.listEntitlements(idParam(req, "id", "contract type id")) });
 });

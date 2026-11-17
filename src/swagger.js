@@ -3467,7 +3467,7 @@ export function buildOpenApiDocument() {
       '/api/contract-types': {
         get: {
           tags: ['contract-types'],
-          summary: 'List every contract scheme',
+          summary: 'List every active contract scheme',
           description:
             'Readable by any signed-in user. `users.contract_type_id` is NOT NULL, so the ' +
             'form that creates an account has to name one of these -- and hard-coding the ' +
@@ -7347,6 +7347,22 @@ const EXTRA_PATHS = {
         200: wrapped('Oldest first.', 'history', 'AbsenceStatusEntry', true),
         401: UNAUTHORIZED,
         403: FORBIDDEN,
+      },
+    },
+  },
+  '/api/contract-types/{id}': {
+    delete: {
+      tags: ['contract-types'],
+      summary: 'Deactivate a contract scheme',
+      description:
+        'Admin only. The row stays, with the people on it and the caps it granted (RF-AUS-04); it ' +
+        'leaves the list. Creating the same name again brings it back.',
+      parameters: [pathId('id', 'contract_types.id')],
+      responses: {
+        200: wrapped('The deactivated scheme.', 'contractType', 'ContractType'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No active scheme has that id.', 'Contract type not found.'),
       },
     },
   },

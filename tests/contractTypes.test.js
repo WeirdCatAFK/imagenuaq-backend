@@ -72,6 +72,32 @@ describe('/api/contract-types', () => {
     assert.equal(res.body.error.message, 'A contract type with that name already exists.');
   });
 
+  test('an admin deactivates a scheme: it leaves the list, and its name brings it back', async () => {
+    const created = await create(`${TEST_PREFIX}Temporal`);
+    const id = created.body.contractType.id;
+
+    const gone = await server.delete(`/api/contract-types/${id}`, { token: adminToken });
+    assert.equal(gone.status, 200);
+    const list = await server.get('/api/contract-types', { token: workerToken });
+    assert.ok(!list.body.contractTypes.some((type) => type.id === id));
+
+    const again = await server.delete(`/api/contract-types/${id}`, { token: adminToken });
+    assert.equal(again.status, 404);
+
+    const back = await create(`${TEST_PREFIX}Temporal`);
+    assert.equal(back.status, 201);
+    assert.equal(back.body.contractType.id, id);
+  });
+
+  test('a worker may not deactivate one', async () => {
+    const created = await create(`${TEST_PREFIX}Practicante`);
+    const res = await server.delete(`/api/contract-types/${created.body.contractType.id}`, {
+      token: workerToken,
+    });
+
+    assert.equal(res.status, 403);
+  });
+
   test('every row is an id and a name, and nothing else', async () => {
     const res = await server.get('/api/contract-types', { token: workerToken });
 
