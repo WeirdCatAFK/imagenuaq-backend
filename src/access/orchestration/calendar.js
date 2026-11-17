@@ -12,6 +12,7 @@ import {
   optionalId,
   optionalText,
   optionalBoolean,
+  optionalInstant,
   requireId,
   requireText,
 } from "../../utils/validate.js";
@@ -239,14 +240,6 @@ function readClosure(input, creating) {
   return { name, startsOn, endsOn };
 }
 
-function optionalInstant(value, field) {
-  if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
-    throw ApiError.badRequest(`${field} must be a date and time in ISO 8601.`);
-  }
-  return new Date(value).toISOString();
-}
-
 async function translate(write) {
   try {
     return await write();
@@ -260,6 +253,7 @@ async function translate(write) {
 function shapeEvent(row, actor) {
   const stage = row.stage_id !== null;
   if (row.type === "nota") return shapeNoteOccurrence(row, actor);
+  if (row.booking_id !== null) return shapeBookingOccurrence(row, actor);
   return {
     id: row.id,
     kind: stage ? "stage" : row.is_global ? "global" : "other",
@@ -305,6 +299,34 @@ function shapeNoteOccurrence(row, actor) {
     editable: mine || (scope === "global" && actor.role === "admin"),
     areaId: row.area_id,
     areaName: row.area_name,
+    userId: null,
+    userName: null,
+  };
+}
+
+/** A vehicle booking as the calendar draws it (RF-CAL-04); its booker or coordination may move it. */
+function shapeBookingOccurrence(row, actor) {
+  return {
+    id: row.id,
+    kind: "vehicle",
+    type: "vehiculo",
+    title: `${row.vehicle_name} · ${row.title}`,
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+    allDay: false,
+    editable: String(row.booked_by) === String(actor.id) || actor.role === "admin",
+    bookingId: row.booking_id,
+    vehicleId: row.vehicle_id,
+    vehicleName: row.vehicle_name,
+    bookingKind: row.booking_kind,
+    destination: row.title,
+    notes: row.booking_notes,
+    projectId: row.booking_project_id,
+    projectKey: row.booking_project_key,
+    bookedBy: row.booked_by,
+    bookedByName: row.booked_by_name,
+    areaId: null,
+    areaName: null,
     userId: null,
     userName: null,
   };

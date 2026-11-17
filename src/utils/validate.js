@@ -135,3 +135,17 @@ export function optionalDate(value, field) {
   }
   return text;
 }
+
+/**
+ * An ISO 8601 date and time as a UTC ISO string, or null when blank.
+ *
+ * @returns {string | null}
+ * @throws {ApiError} 400 on anything that is not one.
+ */
+export function optionalInstant(value, field) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw ApiError.badRequest(`${field} must be a date and time in ISO 8601.`);
+  }
+  return new Date(value).toISOString();
+}

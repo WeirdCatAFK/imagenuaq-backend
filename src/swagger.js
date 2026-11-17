@@ -313,6 +313,10 @@ export function buildOpenApiDocument() {
         name: 'print',
         description: 'The print shop (RF-IMP-01 to RF-IMP-08): presses, the pantone catalog and work orders.',
       },
+      {
+        name: 'vehicles',
+        description: 'Vehicles and their bookings for delivering and picking up material (RF-CAL-04).',
+      },
     ],
     components: {
       securitySchemes: {
@@ -7026,6 +7030,58 @@ const EXTRA_SCHEMAS = {
     description: 'On create, name is required. On update, every key is optional.',
     properties: { name: { type: 'string', maxLength: 50 }, isActive: { type: 'boolean' } },
   },
+  Vehicle: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      name: { type: 'string', example: 'Camioneta' },
+      plate: { type: ['string', 'null'], example: 'UAQ-01' },
+      isActive: { type: 'boolean' },
+    },
+  },
+  VehicleRequest: {
+    type: 'object',
+    description: 'On create, name is required. On update, every key is optional.',
+    properties: {
+      name: { type: 'string', maxLength: 100 },
+      plate: { type: ['string', 'null'], maxLength: 20 },
+      isActive: { type: 'boolean' },
+    },
+  },
+  VehicleBooking: {
+    type: 'object',
+    properties: {
+      id: { type: 'integer' },
+      vehicleId: { type: 'integer' },
+      vehicleName: { type: 'string' },
+      eventId: { type: 'integer', description: 'The calendar event the booking keeps.' },
+      kind: { type: 'string', enum: ['delivery', 'pickup'] },
+      destination: { type: 'string', example: 'Rectoría' },
+      projectId: { type: ['integer', 'null'] },
+      projectKey: { type: ['string', 'null'] },
+      projectTitle: { type: ['string', 'null'] },
+      notes: { type: ['string', 'null'] },
+      startsAt: { type: 'string', format: 'date-time' },
+      endsAt: { type: 'string', format: 'date-time' },
+      bookedBy: { type: 'integer' },
+      bookedByName: { type: 'string' },
+    },
+  },
+  VehicleBookingRequest: {
+    type: 'object',
+    description:
+      'On create, vehicleId, kind, destination, startsAt and endsAt are required. On update, every key ' +
+      'is optional, and projectId or notes set to null clear them.',
+    properties: {
+      vehicleId: { type: 'integer' },
+      kind: { type: 'string', enum: ['delivery', 'pickup'] },
+      destination: { type: 'string', maxLength: 300 },
+      projectId: { type: ['integer', 'null'] },
+      notes: { type: ['string', 'null'], maxLength: 2000 },
+      startsAt: { type: 'string', format: 'date-time' },
+      endsAt: { type: 'string', format: 'date-time' },
+    },
+  },
   Pantone: {
     type: 'object',
     properties: {
@@ -7610,6 +7666,107 @@ const EXTRA_PATHS = {
         401: UNAUTHORIZED,
         403: FORBIDDEN,
         404: NO_ORDER,
+      },
+    },
+  },
+  '/api/vehicles': {
+    get: {
+      tags: ['vehicles'],
+      summary: 'List the vehicles',
+      description: 'Needs calendar.read.',
+      responses: {
+        200: wrapped('Every vehicle, active or not.', 'vehicles', 'Vehicle', true),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['vehicles'],
+      summary: 'Add a vehicle',
+      description: 'Needs vehicle.manage. Vehicles are a runtime catalog (RF-CAL-04).',
+      requestBody: jsonBody('VehicleRequest'),
+      responses: {
+        201: wrapped('The new vehicle.', 'vehicle', 'Vehicle'),
+        400: errorResponse('No name.', 'name is required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        409: errorResponse('The name is taken.', 'A vehicle with that name already exists.'),
+      },
+    },
+  },
+  '/api/vehicles/{id}': {
+    patch: {
+      tags: ['vehicles'],
+      summary: 'Rename or retire a vehicle',
+      description: 'Needs vehicle.manage. Its bookings stay; a retired vehicle takes no new ones.',
+      parameters: [pathId('id', 'vehicles.id')],
+      requestBody: jsonBody('VehicleRequest'),
+      responses: {
+        200: wrapped('The vehicle as it is now.', 'vehicle', 'Vehicle'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such vehicle.', 'Vehicle not found.'),
+        409: errorResponse('The name is taken.', 'A vehicle with that name already exists.'),
+      },
+    },
+  },
+  '/api/vehicles/bookings': {
+    get: {
+      tags: ['vehicles'],
+      summary: 'List the bookings in a span',
+      description: 'Needs calendar.read. At most 92 days. The calendar also shows each one as kind vehicle.',
+      parameters: [
+        { name: 'from', in: 'query', required: true, schema: { type: 'string' }, description: 'A date or instant.' },
+        { name: 'to', in: 'query', required: true, schema: { type: 'string' }, description: 'A date or instant.' },
+        { name: 'vehicleId', in: 'query', schema: { type: 'integer' }, description: 'Only this vehicle.' },
+      ],
+      responses: {
+        200: wrapped('The bookings that touch the span, earliest first.', 'bookings', 'VehicleBooking', true),
+        400: errorResponse('A bad span.', 'from and to are required.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+      },
+    },
+    post: {
+      tags: ['vehicles'],
+      summary: 'Book a vehicle',
+      description: 'Needs vehicle.book. Two bookings of one vehicle never overlap (RF-CAL-04).',
+      requestBody: jsonBody('VehicleBookingRequest'),
+      responses: {
+        201: wrapped('The booking.', 'booking', 'VehicleBooking'),
+        400: errorResponse('A bad payload or an inactive vehicle.', 'That vehicle is not active.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        409: errorResponse('The vehicle is taken then.', 'That vehicle is already booked at that time.'),
+      },
+    },
+  },
+  '/api/vehicles/bookings/{id}': {
+    patch: {
+      tags: ['vehicles'],
+      summary: 'Change or move a booking',
+      description: 'Needs vehicle.book, and to be its booker or coordination.',
+      parameters: [pathId('id', 'vehicle_bookings.id')],
+      requestBody: jsonBody('VehicleBookingRequest'),
+      responses: {
+        200: wrapped('The booking as it is now.', 'booking', 'VehicleBooking'),
+        400: errorResponse('A bad payload.', 'endsAt must be after startsAt.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such booking.', 'Booking not found.'),
+        409: errorResponse('The vehicle is taken then.', 'That vehicle is already booked at that time.'),
+      },
+    },
+    delete: {
+      tags: ['vehicles'],
+      summary: 'Cancel a booking',
+      description: 'Needs vehicle.book, and to be its booker or coordination. Its calendar event goes with it.',
+      parameters: [pathId('id', 'vehicle_bookings.id')],
+      responses: {
+        204: { description: 'Cancelled.' },
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('No such booking.', 'Booking not found.'),
       },
     },
   },
