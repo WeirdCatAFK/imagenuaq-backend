@@ -114,6 +114,8 @@ describe('/api/schemas', () => {
       ['an uppercase code', withSection('information', [{ code: 'Dependencia', name: 'X', type: 'text' }]), /snake_case/],
       ['an unknown type', withSection('information', [{ code: 'x', name: 'X', type: 'moneda' }]), /does not exist/],
       ['a non-boolean required', withSection('information', [{ code: 'x', name: 'X', type: 'text', required: 'si' }]), /required must be a boolean/],
+      ['a non-boolean internal', withSection('information', [{ code: 'x', name: 'X', type: 'text', internal: 'si' }]), /internal must be a boolean/],
+      ['an internal field marked required', withSection('information', [{ code: 'x', name: 'X', type: 'text', internal: true, required: true }]), /internal, so it cannot be required/],
       ['a note that is not a string', withSection('information', [{ code: 'x', name: 'X', type: 'text', note: 5 }]), /note must be a string/],
       ['no name', withSection('information', [{ code: 'x', name: ' ', type: 'text' }]), /must have a name/],
       ['a field that is not an object', withSection('information', ['dependencia']), /must be an object/],

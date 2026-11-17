@@ -2400,6 +2400,13 @@ export function buildOpenApiDocument() {
               example: 'Documento PDF con la firma de Alma',
             },
             required: { type: 'boolean', default: false, example: true },
+            internal: {
+              type: 'boolean',
+              default: false,
+              description:
+                "Staff fill it, never the requester: the requester's form never shows it. Sent " +
+                'only when true, and an internal field cannot be required.',
+            },
             baseType: {
               type: ['string', 'null'],
               readOnly: true,

@@ -266,8 +266,9 @@ function publisher() {
 /**
  * Checks a `fields` document and returns it cleaned up (trimmed strings, `note` and `required`
  * filled in). The shape is `{ deliverables: [...], information: [...] }`, each field
- * `{ code, name, type, note, required }`: deliverables are what the area produces, information
- * what the requester states, and `type` is a `data_types.code`. Sections are arrays, not objects
+ * `{ code, name, type, note, required, internal }`: deliverables are what is asked to be produced,
+ * information what the requester states, and `type` is a `data_types.code`. An `internal` field is
+ * staff-only data the requester's form never shows, so it cannot be `required`. Sections are arrays, not objects
  * keyed by code, because jsonb reorders object keys and capture order would be lost.
  *
  * @param {{ deliverables: object[], information: object[] }} fields
@@ -395,12 +396,22 @@ async function validateField(field, section, seen, known) {
     );
   }
 
+  if (field.internal !== undefined && typeof field.internal !== "boolean") {
+    throw ApiError.badRequest(`Field "${code}" internal must be a boolean.`);
+  }
+  if (field.internal === true && field.required === true) {
+    throw ApiError.badRequest(
+      `Field "${code}" is internal, so it cannot be required: the requester never sees it.`,
+    );
+  }
+
   return {
     code,
     name,
     type,
     note: (field.note ?? "").trim(),
     required: field.required ?? false,
+    ...(field.internal ? { internal: true } : {}),
   };
 }
 
