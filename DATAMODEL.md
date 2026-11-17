@@ -932,6 +932,52 @@ cierre del proyecto, o para siempre con `finance_keep_forever`. Es la decisión 
 desarrollo dejaba pendiente para I9: la cotización y la evidencia de aprobación son justo lo que
 finanzas necesita señalar después.
 
+### 2.21 El formulario público reemplaza a Forms y escribe en el mismo Excel
+
+`RF-MIG-01` pide que las respuestas queden en la base sin cerrar el Excel. Las áreas siguen en el
+concentrador, pero ya no lo alimenta Microsoft Forms: lo alimenta el formato mismo, servido por la
+aplicación.
+
+**Un enlace, no una cuenta.** `form_links` busca por el hash de un token, igual que
+`access_tokens` (§7.3). A diferencia de esos, este enlace se publica a propósito: el token también
+se guarda cifrado (`token_enc`), y la lista lo vuelve a copiar.
+
+Quien lo abre no tiene sesión: `GET /api/forms/:token` le da los campos y
+`POST` crea una solicitud con `source = 'form'`. Como un enlace de Forms, no caduca: se revoca.
+La solicitud queda a nombre de quien abrió el enlace (`created_by`). La carpeta y los archivos
+necesitan autor, y el solicitante no tiene usuario (§2.11).
+
+Se aceptan treinta respuestas por
+dirección y hora, y el contador vive en memoria del proceso.
+
+**Lo interno no se pregunta.** Un campo con `internal` lo llena el equipo, como la cotización o
+la facturación. El formulario público no lo muestra, descarta lo que llegue para él y no lo exige.
+La captura del equipo lo sigue mostrando.
+
+**Los archivos llegan después.** La respuesta devuelve el folio y una llave sellada (`seal`, una
+hora) con la que el navegador sube cada archivo a la carpeta de la solicitud. El valor del campo
+`document` es el id del archivo. Por eso un `document` obligatorio no se exige al responder: lo
+exige la conversión, como con lo importado (§2.16).
+
+**Opción de una lista.** El tipo `choice` lleva `choices` y `multiple` en el campo. Se guarda el
+texto tal como lo escribe el formato aunque se responda en otra caja, y varias respuestas son un
+arreglo. Al importar, una celda con varias se separa por `;`, que es como las escribe Forms.
+
+**La fila vuelve al libro.** Un enlace puede nombrar un libro mapeado a una versión del mismo
+formato. Entonces se responde con esa versión, para que las columnas coincidan.
+
+Al terminar, `invertMapping()` corre el mapeo al revés. Solo las reglas `column` se invierten, así que
+`concat`, `split` y `constant` quedan en blanco. La columna de identidad que ninguna regla llena
+(el `Id` de Forms) recibe el folio. Antes de escribir se marca el hash de la fila en
+`sheet_row_marks`, así una sincronización que corra en medio no la importa de regreso.
+
+`requests.sheet_written_at` dice que ya está. Lo que Microsoft rechazó, o lo que el navegador dejó
+sin terminar, lo escribe la tarea `form-write-back` cada cinco minutos. Escribir pide `Files.ReadWrite.All`: una cuenta que
+solo consintió leer se reconecta una vez.
+
+**Lo que queda abierto.** La carpeta de la solicitud no pasa al proyecto al convertir. Los
+archivos siguen en la carpeta con el folio.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -973,6 +1019,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-10                       | `notifications`                                                                                                   | ✗ espera las rutas de AUS |
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
 | RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13) + `sheets.column_map` y `sheet_imports` (§2.16) | ✔ |
+| RF-MIG-01 (formulario)          | `form_links`, `requests.form_link_id`/`sheet_written_at`, `invertMapping()` y `sheet_row_marks` (§2.21)          | ✔ |
 | RF-FIN-01 … RF-FIN-04          | `quotes` con estatus propio desde su emisión; `GET /api/finance/quotes` (§2.20)                               | ✔ |
 | RF-FIN-05, RF-FIN-06, RF-FIN-09 | `invoices` por proyecto; solo el monto es obligatorio; `GET /api/finance/invoices` (§2.20)                     | ✔ |
 | RF-FIN-07, RF-FIN-08            | `projects.expected_invoice_count` + `GET /api/finance/projects` con sus banderas; el cierre avisa, no bloquea (§2.20) | ✔ |
@@ -1927,6 +1974,8 @@ exactamente lo que consulta la bandeja del área.
 | `source` | varchar(20) | no | `form` | `form`, `email`, `sheet`, `manual`. Las que llegan por correo se registran a mano en el mismo formato (`RF-SOL-08`) |
 | `sheet_id` | bigint | sí | | Libro del que se importó → `sheets.id`. Solo puede ir lleno si `source = 'sheet'` |
 | `folder_id` | bigint | sí | | Carpeta con lo que adjuntó el solicitante → `folders.id` |
+| `form_link_id` | bigint | sí | | Enlace público por el que llegó → `form_links.id` (§2.21) |
+| `sheet_written_at` | timestamptz | sí | | Cuándo se agregó su fila al libro del enlace. Nulo con un enlace que tiene libro = pendiente |
 | `created_by` | bigint | sí | | Quién la capturó → `users.id` |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Entrada |
 | `deleted_at` | timestamptz | sí | | Baja lógica |
