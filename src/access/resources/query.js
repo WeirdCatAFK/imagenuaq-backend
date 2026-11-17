@@ -576,13 +576,23 @@ class Query {
     return row ?? null;
   }
 
-  /** The whole catalogue, for a form that has to name one. Ordered for a <select>. */
+  /** The active catalogue, for a form that has to name one. Ordered for a <select>. */
   async getContractTypes() {
-    return this.#rows("select id, name from contract_types order by name");
+    return this.#rows("select id, name from contract_types where is_active order by name");
   }
 
-  /** Inserts a contract scheme. Raises the unique violation on a taken name (uq_contract_types_name). */
+  /**
+   * Inserts a contract scheme, or reactivates a deactivated one of the same name. Raises the
+   * unique violation when an active one already has the name (uq_contract_types_name).
+   */
   async createContractType(name) {
+    const [revived] = await this.#rows(
+      `update contract_types set is_active = true
+        where name = $1 and not is_active
+        returning id, name`,
+      [name],
+    );
+    if (revived) return revived;
     const [row] = await this.#rows(
       "insert into contract_types (name) values ($1) returning id, name",
       [name],
@@ -590,10 +600,21 @@ class Query {
     return row;
   }
 
+  /** Takes a contract scheme out of the pickers. Null when no active one has that id. */
+  async deactivateContractType(id) {
+    const [row] = await this.#rows(
+      `update contract_types set is_active = false
+        where id = $1 and is_active
+        returning id, name`,
+      [id],
+    );
+    return row ?? null;
+  }
+
   /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
   async firstContractType() {
     const [row] = await this.#rows(
-      "select id, name from contract_types order by id limit 1",
+      "select id, name from contract_types where is_active order by id limit 1",
     );
     return row ?? null;
   }
