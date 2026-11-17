@@ -698,6 +698,13 @@ para preferir una columna de identificador sobre el contenido.
 10 000 filas. Para los rastreadores que existen —decenas o cientos de filas— alcanza; miles
 pedirían un trabajo en segundo plano, que no está.
 
+**Lo que llena el equipo es un campo interno.** Un rastreador suele traer columnas que no captura
+el solicitante sino el equipo: folio, costo, número de guía. Un campo del formato con
+`internal: true` las recibe como cualquier otro, y el mapeo las importa. El formulario del
+solicitante nunca muestra un campo interno, y por eso no puede ser obligatorio: el servidor rechaza
+`internal` junto con `required`. Si una etapa produce ese dato, la etapa también lo declara como
+salida (§2.14), y su visto bueno lo exige.
+
 ### 2.17 La definición de la etapa se separa de su ejecución
 
 `flow-templates` partió `project_stages` en dos. Hasta entonces una fila llevaba a la vez **qué es
