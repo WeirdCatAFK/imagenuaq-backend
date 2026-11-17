@@ -942,6 +942,36 @@ DEFAULT created_at: now()
 DEFAULT updated_at: now()'''
 }
 
+Table "vehicles" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(100) [unique, not null]
+  "plate" varchar(20)
+  "is_active" bool [not null, default: true]
+  Note: 'RF-CAL-04: los vehículos que se reservan para entregar y recoger material.'
+}
+
+Table "vehicle_bookings" {
+  "id" int8 [pk, not null, increment]
+  "vehicle_id" int8 [not null]
+  "event_id" int8 [unique]
+  "kind" varchar(20) [not null]
+  "destination" varchar(300) [not null]
+  "project_id" int8
+  "notes" text
+  "starts_at" timestamptz [not null]
+  "ends_at" timestamptz [not null]
+  "booked_by" int8 [not null]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+
+  Indexes {
+    starts_at [type: btree, name: "vehicle_bookings_idx_starts_at"]
+  }
+  Note: '''RF-CAL-04: un vehículo ocupado de starts_at a ends_at; dos reservas del mismo vehículo no se empalman.
+CHECK vehicle_bookings_range: ends_at > starts_at
+CHECK vehicle_bookings_kind_check: (kind)::text = ANY ((ARRAY[\'delivery\'::character varying, \'pickup\'::character varying])::text[])
+INDEX vehicle_bookings_no_overlap USING gist (vehicle_id, tstzrange(starts_at, ends_at))'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -1177,6 +1207,14 @@ Ref "fk_users_primary_area_id_areas_id":"areas"."id" < "users"."primary_area_id"
 Ref "fk_users_role_id_roles_id":"roles"."id" < "users"."role_id"
 
 Ref "fk_users_schedule_id_event_collections_id":"event_collections"."id" < "users"."schedule_id"
+
+Ref "vehicle_bookings_booked_by_fkey":"users"."id" < "vehicle_bookings"."booked_by"
+
+Ref "vehicle_bookings_event_id_fkey":"events"."id" < "vehicle_bookings"."event_id" [delete: cascade]
+
+Ref "vehicle_bookings_project_id_fkey":"projects"."id" < "vehicle_bookings"."project_id" [delete: set null]
+
+Ref "vehicle_bookings_vehicle_id_fkey":"vehicles"."id" < "vehicle_bookings"."vehicle_id"
 
 Ref "workflow_versions_published_by_fkey":"users"."id" < "workflow_versions"."published_by"
 
