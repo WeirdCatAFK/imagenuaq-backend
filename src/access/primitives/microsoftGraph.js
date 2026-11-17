@@ -6,11 +6,12 @@ const AUTHORITY = "https://login.microsoftonline.com";
 const GRAPH = "https://graph.microsoft.com/v1.0";
 
 /**
- * The smallest set that reads a workbook shared with the signed-in person: `openid` for an
- * identity, `offline_access` for a refresh token, `Files.Read.All` for OneDrive and SharePoint.
- * Not `Sites.Read.All`, which personal accounts do not support.
+ * The smallest set that reads a shared workbook and appends a public form's answers (RF-MIG-01).
+ * `openid` gives an identity, `offline_access` a refresh token, and `Files.ReadWrite.All` reaches
+ * OneDrive and SharePoint. Personal accounts do not support `Sites.ReadWrite.All`. An account that
+ * consented to the old read-only scope reconnects once.
  */
-export const SCOPES ="openid profile email offline_access User.Read Files.Read.All";
+export const SCOPES ="openid profile email offline_access User.Read Files.ReadWrite.All";
 
 /** The identity platform's error, or Graph's, with what the caller needs to classify it. */
 export class GraphError extends Error {
@@ -167,4 +168,40 @@ export async function graphGet(accessToken, path) {
 
   delete merged["@odata.nextLink"];
   return merged;
+}
+
+/**
+ * A POST or PATCH against Graph with a JSON body. It waits out one 429 and throws the second.
+ *
+ * @param {string} path Relative to the v1.0 root.
+ * @returns {Promise<object|null>} Graph's answer, or null when it has no body.
+ * @throws {GraphError} with Graph's `error.code` as `code`.
+ */
+export async function graphSend(accessToken, method, path, body) {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(`${GRAPH}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (response.status === 429 && attempt === 0) {
+      const seconds = Number(response.headers.get("retry-after")) || 1;
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+      continue;
+    }
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new GraphError(
+        data?.error?.message || `Microsoft Graph answered ${response.status}.`,
+        {
+          status: response.status,
+          code: data?.error?.code ?? null,
+          retryAfter: Number(response.headers.get("retry-after")) || null,
+        },
+      );
+    }
+    return data;
+  }
 }

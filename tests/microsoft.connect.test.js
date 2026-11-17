@@ -66,7 +66,7 @@ describe('/api/microsoft', () => {
       );
       assert.match(url.searchParams.get('scope'), /(^| )openid( |$)/);
       assert.match(url.searchParams.get('scope'), /offline_access/);
-      assert.match(url.searchParams.get('scope'), /Files\.Read\.All/);
+      assert.match(url.searchParams.get('scope'), /Files\.ReadWrite\.All/);
 
       const userId = await auth.verifyConnectState(url.searchParams.get('state'));
       assert.equal(userId, admin.id);

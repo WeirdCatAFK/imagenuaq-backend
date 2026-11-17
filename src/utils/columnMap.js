@@ -178,7 +178,7 @@ export function applyMapping(map, fields, headers, row, texts = []) {
     if (rule === undefined) continue;
 
     const raw = readRule(rule, cells);
-    const { value, error } = coerce(field.type, raw, rule);
+    const { value, error } = coerce(field.type, raw, { ...rule, choices: field.choices, multiple: field.multiple });
 
     if (error !== null) {
       const message = `"${field.name}" ${error}.`;
@@ -234,6 +234,58 @@ export function rowHash(map, headers, row) {
   });
 
   return createHash("sha256").update(parts.join("\u0000")).digest("hex");
+}
+
+/**
+ * A request back into a sheet row, one cell per header, for the book a public form replaces
+ * (RF-MIG-01). Only `column` rules run backwards, so other columns stay blank. The folio fills a
+ * `hashColumns` column that no rule feeds, which gives each written row its own identity.
+ *
+ * @param {Record<string, string>} [fileNames] File id to file name, for `document` values.
+ */
+export function invertMapping(map, fields, headers, request, fileNames = {}) {
+  const list = headers.map((header) => String(header ?? ""));
+  const row = list.map(() => "");
+  const fed = new Set();
+
+  const put = (rule, value) => {
+    if (rule?.op !== "column") return;
+    const index = list.indexOf(rule.column);
+    if (index === -1) return;
+    fed.add(rule.column);
+    row[index] = value ?? "";
+  };
+
+  put(map.title, request.title);
+  if (map.requester !== undefined) put(map.requester, request.requester);
+
+  for (const field of fields) {
+    const rule = map.fields?.[field.code];
+    if (rule === undefined) continue;
+    put(rule, cellValue(field, request.data?.[field.code], rule, fileNames));
+  }
+
+  for (const column of map.hashColumns ?? []) {
+    const index = list.indexOf(column);
+    if (index !== -1 && !fed.has(column)) row[index] = request.folio;
+  }
+
+  return row;
+}
+
+/** One stored value as the sheet writes it, so applyMapping() reads it back the same. */
+function cellValue(field, value, rule, fileNames) {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return value.join("; ");
+  if (field.type === "boolean") return value ? "Sí" : "No";
+  if (field.type === "document") return fileNames[String(value)] ?? String(value);
+  if (field.type === "date" && typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-");
+    const format = rule.format ?? "DD/MM/YYYY";
+    if (format === "YYYY-MM-DD") return value;
+    return format === "MM/DD/YYYY" ? `${month}/${day}/${year}` : `${day}/${month}/${year}`;
+  }
+  return value;
 }
 
 /** Every column any rule reads, for the fallback identity when no Id column was named. */

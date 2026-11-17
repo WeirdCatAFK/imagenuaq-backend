@@ -4,6 +4,7 @@
 import { Router } from "express";
 
 import schemas from "../access/orchestration/schemas.js";
+import forms from "../access/orchestration/forms.js";
 import { authenticate, requireAnyPermission, requirePermission } from "../middlewares/auth.js";
 import { idParam } from "../utils/params.js";
 
@@ -60,6 +61,19 @@ router.post("/:id/versions", async (req, res) => {
 router.patch("/:id", async (req, res) => {
   const { name, isActive } = req.body ?? {};
   res.json({ schema: await schemas.update(schemaId(req), { name, isActive }) });
+});
+
+router.get("/:id/links", async (req, res) => {
+  res.json({ links: await forms.listLinks(schemaId(req)) });
+});
+
+router.post("/:id/links", async (req, res) => {
+  const { sheetId } = req.body ?? {};
+  res.status(201).json({ link: await forms.createLink(schemaId(req), { sheetId }) });
+});
+
+router.delete("/:id/links/:linkId", async (req, res) => {
+  res.json({ link: await forms.revokeLink(schemaId(req), idParam(req, "linkId", "link id")) });
 });
 
 router.delete("/:id", async (req, res) => {

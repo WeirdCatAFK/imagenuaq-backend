@@ -216,6 +216,12 @@ export function buildOpenApiDocument() {
           'signed-in user; writes require `schema.manage`.',
       },
       {
+        name: 'forms',
+        description:
+          'Public forms (RF-SOL-01, RF-MIG-01): a format answered through a link, with no ' +
+          'session. Each answer is a request with source `form`, appended to the link workbook.',
+      },
+      {
         name: 'workflows',
         description:
           'Flow templates (RF-FLW-02, RF-PRY-06): ordered phases whose stages run in ' +
@@ -2400,12 +2406,23 @@ export function buildOpenApiDocument() {
               example: 'Documento PDF con la firma de Alma',
             },
             required: { type: 'boolean', default: false, example: true },
+            choices: {
+              type: 'array',
+              items: { type: 'string', maxLength: 200 },
+              description: 'Only on a `choice` field, where it is required and non-empty: the answers it offers.',
+              example: ['Hoja membretada', 'Tarjeta'],
+            },
+            multiple: {
+              type: 'boolean',
+              default: false,
+              description: 'Only on a `choice` field: the value is a list of choices instead of one.',
+            },
             internal: {
               type: 'boolean',
               default: false,
               description:
-                "Staff fill it, never the requester: the requester's form never shows it. Sent " +
-                'only when true, and an internal field cannot be required.',
+                'Staff fill it, never the requester: the public form hides it and drops any value ' +
+                'sent for it. Sent only when true, and an internal field cannot be required.',
             },
             baseType: {
               type: ['string', 'null'],
@@ -2417,6 +2434,24 @@ export function buildOpenApiDocument() {
             },
           },
           required: ['code', 'name', 'type'],
+        },
+        FormLink: {
+          type: 'object',
+          description:
+            'A public link to a format (RF-SOL-01, RF-MIG-01). The server looks it up by the hash ' +
+            'of its token and keeps the token encrypted, so the list can copy the link again.',
+          properties: {
+            id: { type: 'integer' },
+            schemaId: { type: 'integer' },
+            sheetId: { type: ['integer', 'null'], description: 'The workbook each answer is appended to.' },
+            sheetName: { type: ['string', 'null'] },
+            createdBy: { type: 'integer' },
+            createdByName: { type: ['string', 'null'] },
+            createdAt: { type: 'string', format: 'date-time' },
+            revokedAt: { type: ['string', 'null'], format: 'date-time' },
+            responses: { type: 'integer', description: 'Requests that came through it.' },
+            token: { type: ['string', 'null'], description: 'Null on a link made before the server kept it.' },
+          },
         },
         FieldKey: {
           type: 'object',
@@ -4144,6 +4179,180 @@ export function buildOpenApiDocument() {
             403: FORBIDDEN,
             404: errorResponse('No such request.', 'Request not found.'),
             409: errorResponse('It belongs to a project.', 'That request belongs to a project; it cannot be deleted.'),
+          },
+        },
+      },
+      '/api/forms/{token}': {
+        get: {
+          tags: ['forms'],
+          summary: 'Open a public form',
+          description: 'No session: the token is the credential. The format name and its fields.',
+          security: [],
+          parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: {
+              description: 'The form.',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      form: {
+                        type: 'object',
+                        properties: { name: { type: 'string' }, fields: { type: 'object' } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            404: errorResponse('The link does not work.', 'This form does not exist or is closed.'),
+          },
+        },
+        post: {
+          tags: ['forms'],
+          summary: 'Answer a public form',
+          description:
+            'No session. Captured as a request with source `form`, written as the link creator. ' +
+            '`document` fields come after, through /files with the returned `uploadKey` (valid one ' +
+            'hour). Thirty answers per address per hour.',
+          security: [],
+          parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { title: { type: 'string' }, requester: { type: 'string' }, data: { type: 'object' } },
+                  required: ['title', 'requester'],
+                },
+              },
+            },
+          },
+          responses: {
+            201: {
+              description: 'The folio and the key for its files.',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { folio: { type: 'string' }, uploadKey: { type: 'string' } } },
+                },
+              },
+            },
+            400: errorResponse('A bad answer.', '"Entrega" has "Fax", which is not one of its choices.'),
+            404: errorResponse('The link does not work.', 'This form does not exist or is closed.'),
+            429: errorResponse('Too many answers from one address.', 'Too many answers from this address; try again in an hour.'),
+          },
+        },
+      },
+      '/api/forms/{token}/files': {
+        post: {
+          tags: ['forms'],
+          summary: 'Attach a file to a just-submitted answer',
+          description: 'No session. The raw body is the file; it becomes the value of `field`, a `document` field.',
+          security: [],
+          parameters: [
+            { name: 'token', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'key', in: 'query', required: true, schema: { type: 'string' } },
+            { name: 'field', in: 'query', required: true, schema: { type: 'string' } },
+            { name: 'name', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          requestBody: { required: true, content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } },
+          responses: {
+            201: { description: 'Attached.' },
+            400: errorResponse('Not a document field of the format.', 'field must name a document field of this request\'s format.'),
+            403: errorResponse('The key is forged, expired or for another link.', 'This upload key is not valid.'),
+            404: errorResponse('The link does not work.', 'This form does not exist or is closed.'),
+          },
+        },
+      },
+      '/api/forms/{token}/finish': {
+        post: {
+          tags: ['forms'],
+          summary: 'Finish an answer and write its row to the workbook',
+          description: 'No session. Appends the row now (RF-MIG-01); a failure is logged and retried by the form-write-back job.',
+          security: [],
+          parameters: [{ name: 'token', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] } } },
+          },
+          responses: {
+            200: { description: 'Done.' },
+            403: errorResponse('The key is forged, expired or for another link.', 'This upload key is not valid.'),
+            404: errorResponse('The link does not work.', 'This form does not exist or is closed.'),
+          },
+        },
+      },
+      '/api/schemas/{id}/links': {
+        get: {
+          tags: ['schemas'],
+          summary: 'The public links of a format',
+          description: 'Needs schema.manage. Only links not revoked.',
+          parameters: [pathId('id', 'schemas.id')],
+          responses: {
+            200: {
+              description: 'The links.',
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { links: { type: 'array', items: { $ref: '#/components/schemas/FormLink' } } } },
+                },
+              },
+            },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+          },
+        },
+        post: {
+          tags: ['schemas'],
+          summary: 'Open a public link to a format',
+          description:
+            'Needs schema.manage. With `sheetId`, answers are captured under the mapped version of ' +
+            'that workbook and appended to it; the workbook must be mapped to this format.',
+          parameters: [pathId('id', 'schemas.id')],
+          requestBody: {
+            content: { 'application/json': { schema: { type: 'object', properties: { sheetId: { type: ['integer', 'null'] } } } } },
+          },
+          responses: {
+            201: wrapped('The link, with its token.', 'link', 'FormLink'),
+            400: errorResponse('A workbook unmapped or mapped to another format.', 'That workbook is mapped to another format.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such format or workbook.', 'Schema not found.'),
+          },
+        },
+      },
+      '/api/schemas/{id}/links/{linkId}': {
+        delete: {
+          tags: ['schemas'],
+          summary: 'Revoke a public link',
+          description: 'Needs schema.manage. The link answers 404 from then on; its requests stay.',
+          parameters: [pathId('id', 'schemas.id'), pathId('linkId', 'form_links.id')],
+          responses: {
+            200: wrapped('The revoked link.', 'link', 'FormLink'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('Not a link of this format, or already revoked.', 'Link not found.'),
+          },
+        },
+      },
+      '/api/requests/{id}/files': {
+        post: {
+          tags: ['requests'],
+          summary: 'Attach a file to a document field of a request',
+          description: 'Needs request.write. The raw body is the file, stored in the folder of the request.',
+          parameters: [
+            pathId('id', 'requests.id'),
+            { name: 'field', in: 'query', required: true, schema: { type: 'string' } },
+            { name: 'name', in: 'query', required: true, schema: { type: 'string' } },
+          ],
+          requestBody: { required: true, content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } },
+          responses: {
+            201: wrapped('The request.', 'request', 'Request'),
+            400: errorResponse('Not a document field of the format.', 'field must name a document field of this request\'s format.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such request.', 'Request not found.'),
           },
         },
       },
