@@ -659,6 +659,7 @@ function shapeSheet(row) {
     columnMap: row.column_map,
     mapped: row.schema_version_id !== null,
     syncIntervalMinutes: row.sync_interval_minutes ?? null,
+    schemaId: row.schema_id ?? null,
     schemaName: row.schema_name ?? null,
     schemaVersion: row.schema_version ?? null,
     lastImportedAt: row.last_imported_at,

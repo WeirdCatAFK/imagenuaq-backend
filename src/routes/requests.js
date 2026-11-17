@@ -23,11 +23,20 @@ router.get("/:id", async (req, res) => {
 router.use(requirePermission("request.write"));
 
 router.post("/", async (req, res) => {
-  res.status(201).json({ request: await requests.create(req.body ?? {}) });
+  res.status(201).json({ request: await requests.create(req.body ?? {}, { documentsLater: true }) });
 });
 
 router.patch("/:id", async (req, res) => {
   res.json({ request: await requests.update(requestId(req), req.body ?? {}) });
+});
+
+router.post("/:id/files", async (req, res) => {
+  const request = await requests.attachFile(requestId(req), req.query.field, {
+    name: req.query.name,
+    mime: req.headers["content-type"] ?? null,
+    body: req,
+  });
+  res.status(201).json({ request });
 });
 
 router.put("/:id/status", async (req, res) => {

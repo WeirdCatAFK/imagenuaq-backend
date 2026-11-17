@@ -1211,25 +1211,25 @@ class Query {
     schemaVersionId, title, data = {}, requester = null, areaId = null, statusId,
     assigneeId = null, priority = 0, source = 'manual', sheetId = null,
     sourceIndex = null, sourceData = null, sourceHash = null, possibleDuplicateOf = null,
-    folderId = null, createdBy = null,
+    folderId = null, createdBy = null, formLinkId = null,
   }) {
     const [row] = await this.#rows(
       `insert into requests (
         schema_version_id, title, data, requester, area_id, status_id, assignee_id,
         priority, source, sheet_id, source_index, source_data, source_hash,
-        possible_duplicate_of, folder_id, created_by
+        possible_duplicate_of, folder_id, created_by, form_link_id
       )
       values (
         $1, $2, $3::jsonb, $4, $5::bigint, $6, $7::bigint,
         $8, $9, $10::bigint, $11::int, $12::jsonb, $13,
-        $14::bigint, $15::bigint, $16::bigint
+        $14::bigint, $15::bigint, $16::bigint, $17::bigint
       )
       returning *`,
       [
         schemaVersionId, title, JSON.stringify(data ?? {}), requester, areaId, statusId,
         assigneeId, priority, source, sheetId, sourceIndex,
         sourceData === null ? null : JSON.stringify(sourceData), sourceHash,
-        possibleDuplicateOf, folderId, createdBy,
+        possibleDuplicateOf, folderId, createdBy, formLinkId,
       ],
     );
     return row;
@@ -2461,7 +2461,10 @@ class Query {
           where rv.schema_id = s.id and r.deleted_at is null)::int as request_count,
         (select count(*) from sheets sh
           join schema_versions shv on shv.id = sh.schema_version_id
-          where shv.schema_id = s.id and sh.deleted_at is null)::int as sheet_count
+          where shv.schema_id = s.id and sh.deleted_at is null)::int as sheet_count,
+        (select count(*) from form_links fl
+          where fl.schema_id = s.id and fl.revoked_at is null
+            and fl.token_enc is not null)::int as link_count
       from schemas s
       left join lateral (
         select
@@ -3238,6 +3241,7 @@ class Query {
            (select count(*)::int from sheet_row_marks m where m.sheet_id = s.id) as marked_rows,
            -- A qué formato está mapeado, por su nombre: la pantalla dice «Papel institucional
            -- v2», no un id, y un libro puede quedarse en una versión vieja.
+           sc.id      as schema_id,
            sc.name    as schema_name,
            sv.version as schema_version,
            -- Cómo salió la última importación, para decirlo en el renglón sin pedir la
@@ -3696,6 +3700,113 @@ class Query {
   async getLink(linkId) {
     const [row] = await this.#rows(`select * from access_tokens where id = $1`, [linkId]);
     return row ?? null;
+  }
+
+  async createFormLink({ tokenHash, tokenEnc, schemaId, sheetId = null, createdBy }) {
+    const [row] = await this.#rows(
+      `insert into form_links (token_hash, token_enc, schema_id, sheet_id, created_by)
+       values ($1, $2, $3, $4::bigint, $5)
+       returning *`,
+      [tokenHash, tokenEnc, schemaId, sheetId, createdBy],
+    );
+    return row;
+  }
+
+  /** A format's links that still work, newest first, each with its book's name. */
+  async listFormLinks(schemaId) {
+    return this.#rows(
+      `select l.*, sh.name as sheet_name, u.full_name as created_by_name,
+              (select count(*)::int from requests r
+                where r.form_link_id = l.id and r.deleted_at is null) as responses
+         from form_links l
+         left join sheets sh on sh.id = l.sheet_id and sh.deleted_at is null
+         left join users u on u.id = l.created_by
+        where l.schema_id = $1 and l.revoked_at is null
+        order by l.created_at desc, l.id desc`,
+      [schemaId],
+    );
+  }
+
+  /** A working link by its token's hash: not revoked, on an active format. */
+  async resolveFormLink(tokenHash) {
+    const [row] = await this.#rows(
+      `select l.*, s.name as schema_name, sh.schema_version_id as sheet_version_id
+         from form_links l
+         join schemas s on s.id = l.schema_id and s.is_active
+         left join sheets sh on sh.id = l.sheet_id and sh.deleted_at is null
+        where l.token_hash = $1 and l.revoked_at is null`,
+      [tokenHash],
+    );
+    return row ?? null;
+  }
+
+  async revokeFormLink(schemaId, linkId) {
+    const [row] = await this.#rows(
+      `update form_links set revoked_at = current_timestamp
+        where id = $2 and schema_id = $1 and revoked_at is null
+        returning *`,
+      [schemaId, linkId],
+    );
+    return row ?? null;
+  }
+
+  /** Gives a request this folder when it has none. Returns the folder the request ends up with. */
+  async setRequestFolder(requestId, folderId) {
+    const [row] = await this.#rows(
+      `update requests set folder_id = coalesce(folder_id, $2)
+        where id = $1 and deleted_at is null
+        returning folder_id`,
+      [requestId, folderId],
+    );
+    return row?.folder_id ?? null;
+  }
+
+  /** Sets one key of a request's capture, leaving the rest alone. */
+  async setRequestDataKey(requestId, key, value) {
+    const [row] = await this.#rows(
+      `update requests set data = data || jsonb_build_object($2::text, $3::jsonb)
+        where id = $1 and deleted_at is null
+        returning *`,
+      [requestId, key, JSON.stringify(value)],
+    );
+    return row ?? null;
+  }
+
+  async markRequestWritten(requestId) {
+    await this.#rows(
+      'update requests set sheet_written_at = current_timestamp where id = $1',
+      [requestId],
+    );
+  }
+
+  /**
+   * Requests created before `before` that came through a link with a book and whose row is not in
+   * it yet.
+   */
+  async listPendingWriteBacks(before) {
+    return this.#rows(
+      `select r.id
+         from requests r
+         join form_links l on l.id = r.form_link_id
+         join sheets sh on sh.id = l.sheet_id and sh.deleted_at is null
+        where r.sheet_written_at is null and r.deleted_at is null and r.created_at < $1::timestamptz
+        order by r.id`,
+      [before],
+    );
+  }
+
+  async getFormLink(linkId) {
+    const [row] = await this.#rows('select * from form_links where id = $1', [linkId]);
+    return row ?? null;
+  }
+
+  /** File id to file name, for writing a `document` value into a sheet. */
+  async getFileNames(fileIds) {
+    if (fileIds.length === 0) return [];
+    return this.#rows(
+      'select id, name from files where id = any($1::bigint[])',
+      [fileIds],
+    );
   }
 
   async revokeLink(linkId) {
