@@ -33,7 +33,9 @@ export const DATE_FORMAT_TOKENS = Object.keys(DATE_FORMATS);
  *
  * @param {string} dataType A `data_types.code`.
  * @param {unknown} raw
- * @param {{ format?: string, truthy?: string[], falsy?: string[] }} [options]
+ * @param {{ format?: string, truthy?: string[], falsy?: string[], choices?: string[],
+ *   multiple?: boolean, separator?: string }} [options] `choices` and `multiple` come from a
+ *   `choice` field. `separator` splits a cell holding several answers (Forms writes `;`).
  * @returns {{ value: unknown, error: string|null }} `value` is null when the input was empty;
  *   an empty input is never an error here -- whether it is allowed is `required`'s business.
  */
@@ -100,6 +102,9 @@ export function coerce(dataType, raw, options = {}) {
     case "boolean":
       return boolean(raw, options);
 
+    case "choice":
+      return choice(raw, options);
+
     default:
       return ok(text(raw));
   }
@@ -127,7 +132,7 @@ export function validateData(fields, data, { strict = true } = {}) {
   }
 
   for (const field of fields ?? []) {
-    const { value, error } = coerce(field.type, source[field.code], field.options ?? {});
+    const { value, error } = coerce(field.type, source[field.code], fieldOptions(field));
 
     if (error !== null) {
       const message = `"${field.name}" ${error}.`;
@@ -157,6 +162,17 @@ export function validateData(fields, data, { strict = true } = {}) {
   return { data: out, errors, warnings };
 }
 
+/**
+ * What coerce() needs from a field: its coerce options plus, on a `choice`, the list and whether
+ * it takes several answers.
+ *
+ * @param {{ options?: object, choices?: string[], multiple?: boolean }} field
+ * @returns {object}
+ */
+export function fieldOptions(field) {
+  return { ...(field.options ?? {}), choices: field.choices, multiple: field.multiple };
+}
+
 function ok(value) {
   return { value, error: null };
 }
@@ -166,6 +182,7 @@ function bad(error) {
 }
 
 function isEmpty(raw) {
+  if (Array.isArray(raw)) return raw.every(isEmpty);
   return raw === null || raw === undefined || (typeof raw === "string" && raw.trim() === "");
 }
 
@@ -267,6 +284,30 @@ function boolean(raw, options) {
   if (truthy.includes(value)) return ok(true);
   if (falsy.includes(value)) return ok(false);
   return bad(`is not a yes or no value (got "${value}")`);
+}
+
+/**
+ * One answer, or with `multiple` a list of them, out of the field's choices. Matching ignores case
+ * and stores the choice as the format writes it, so "si" and "Sí" do not become two answers.
+ */
+function choice(raw, options) {
+  const choices = options.choices ?? [];
+  const parts = Array.isArray(raw)
+    ? raw.map(text)
+    : options.multiple
+      ? text(raw).split(options.separator ?? ";").map((part) => part.trim())
+      : [text(raw)];
+  const answers = parts.filter((part) => part !== "");
+
+  const picked = [];
+  for (const answer of answers) {
+    const match = choices.find((entry) => entry.toLowerCase() === answer.toLowerCase());
+    if (match === undefined) return bad(`has "${answer}", which is not one of its choices`);
+    if (!picked.includes(match)) picked.push(match);
+  }
+
+  if (options.multiple) return ok(picked);
+  return picked.length === 1 ? ok(picked[0]) : bad("takes a single choice");
 }
 
 /**

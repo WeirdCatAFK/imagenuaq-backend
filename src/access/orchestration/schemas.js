@@ -25,6 +25,9 @@ const NAME_MAX = 300;
  */
 const FIELD_CODE = /^[a-z][a-z0-9_]{0,99}$/;
 
+/** The longest answer a `choice` field may offer: a label, not a paragraph. */
+const CHOICE_MAX = 200;
+
 /** The two section keys, in the order a form renders them. */
 export const SECTIONS = ["deliverables", "information"];
 
@@ -395,13 +398,38 @@ async function validateField(field, section, seen, known) {
     );
   }
 
-  return {
+  if (field.internal !== undefined && typeof field.internal !== "boolean") {
+    throw ApiError.badRequest(`Field "${code}" internal must be a boolean.`);
+  }
+
+  const shaped = {
     code,
     name,
     type,
     note: (field.note ?? "").trim(),
     required: field.required ?? false,
+    ...(field.internal ? { internal: true } : {}),
   };
+  if (type !== "choice") {
+    if (field.choices !== undefined && field.choices !== null) {
+      throw ApiError.badRequest(`Field "${code}" has choices, but only a "choice" field takes them.`);
+    }
+    return shaped;
+  }
+
+  const choices = Array.isArray(field.choices)
+    ? [...new Set(field.choices.map((entry) => (typeof entry === "string" ? entry.trim() : "")))]
+    : [];
+  if (choices.length === 0 || choices.includes("")) {
+    throw ApiError.badRequest(`Field "${code}" needs a list of choices, none of them empty.`);
+  }
+  if (choices.some((entry) => entry.length > CHOICE_MAX)) {
+    throw ApiError.badRequest(`Field "${code}" has a choice longer than ${CHOICE_MAX} characters.`);
+  }
+  if (field.multiple !== undefined && typeof field.multiple !== "boolean") {
+    throw ApiError.badRequest(`Field "${code}" multiple must be a boolean.`);
+  }
+  return { ...shaped, choices, multiple: field.multiple ?? false };
 }
 
 /**
@@ -451,6 +479,7 @@ function shapeSchema(row, types) {
     schemaVersionId: row.schema_version_id ?? null,
     requestCount: row.request_count ?? 0,
     sheetCount: row.sheet_count ?? 0,
+    linkCount: row.link_count ?? 0,
   };
 }
 
