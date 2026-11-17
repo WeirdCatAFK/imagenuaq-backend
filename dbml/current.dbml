@@ -461,6 +461,8 @@ Table "requests" {
   "source_hash" varchar(64) [note: 'RF-MIG-02: sha256 de las celdas que el mapeo declara, normalizadas. Único por libro; es lo que impide importar dos veces la misma fila.']
   "possible_duplicate_of" int8 [note: 'La solicitud que esta probablemente corrige: mismo título y solicitante en el mismo libro, con la huella cambiada. Lo resuelve una persona.']
   "workflow_version_id" int8 [note: 'La version de plantilla de la que se copio su flujo; nulo si se diseno desde cero o no tiene flujo.']
+  "form_link_id" int8 [note: 'El enlace público por el que llegó, si llegó por uno.']
+  "sheet_written_at" timestamptz [note: 'Cuándo se agregó su fila al libro del enlace. NULL con un enlace que tiene libro = pendiente.']
 
   Indexes {
     (sheet_id, source_hash) [type: btree, unique, name: "uq_requests_sheet_hash"]
@@ -941,6 +943,23 @@ DEFAULT created_at: now()
 DEFAULT updated_at: now()'''
 }
 
+Table "form_links" {
+  "id" int8 [pk, not null, increment]
+  "token_hash" bpchar(64) [unique, not null]
+  "schema_id" int8 [not null]
+  "sheet_id" int8
+  "created_by" int8 [not null]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "revoked_at" timestamptz
+  "token_enc" bytea [note: 'El token cifrado con MS_TOKEN_KEY, para volver a copiar el enlace. NULL en los enlaces creados antes de guardarlo.']
+
+  Indexes {
+    schema_id [type: btree, name: "idx_form_links_schema_id"]
+  }
+  Note: '''RF-SOL-01, RF-MIG-01: enlace público a un formato. Guarda el hash del token, nunca el token. sheet_id: el libro al que se agrega cada respuesta; NULL = solo base de datos.
+CHECK form_links_hash_is_hex: token_hash ~ \'^[0-9a-f]{64}$\'::text'''
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -1022,6 +1041,12 @@ Ref "folder_areas_folder_id_fkey":"folders"."id" < "folder_areas"."folder_id" [d
 Ref "folders_owner_id_fkey":"users"."id" < "folders"."owner_id"
 
 Ref "folders_parent_id_fkey":"folders"."id" < "folders"."parent_id"
+
+Ref "form_links_created_by_fkey":"users"."id" < "form_links"."created_by"
+
+Ref "form_links_schema_id_fkey":"schemas"."id" < "form_links"."schema_id" [delete: cascade]
+
+Ref "form_links_sheet_id_fkey":"sheets"."id" < "form_links"."sheet_id" [delete: set null]
 
 Ref "invoices_created_by_fkey":"users"."id" < "invoices"."created_by" [delete: set null]
 
@@ -1132,6 +1157,8 @@ Ref "requests_assignee_id_fkey":"users"."id" < "requests"."assignee_id"
 Ref "requests_created_by_fkey":"users"."id" < "requests"."created_by"
 
 Ref "requests_folder_id_fkey":"folders"."id" < "requests"."folder_id"
+
+Ref "requests_form_link_id_fkey":"form_links"."id" < "requests"."form_link_id" [delete: set null]
 
 Ref "requests_possible_duplicate_of_fkey":"requests"."id" < "requests"."possible_duplicate_of"
 
