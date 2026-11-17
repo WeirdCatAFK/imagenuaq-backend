@@ -80,14 +80,6 @@ describe('POST /api/schemas/:id/clone', () => {
     assert.equal(logs[0].after_data.cloned_from, source.id);
   });
 
-  test('a seeded starter format clones', async () => {
-    const [starter] = await sql("select id from schemas where code = 'papel_institucional'");
-    const res = await clone(starter.id, { code: `${TEST_SCHEMA_PREFIX}papel_fcq`, name: 'Papel FCQ' });
-
-    assert.equal(res.status, 201);
-    assert.ok(res.body.schema.fields.deliverables.some((f) => f.code === 'tiraje' && f.required === true));
-  });
-
   test('refuses a taken code with 409 and leaves nothing behind', async () => {
     const source = await createSchema('fuente');
     await createSchema('tomado');

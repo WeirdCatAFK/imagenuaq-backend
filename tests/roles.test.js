@@ -292,13 +292,21 @@ describe('/api/roles', () => {
       assert.equal(held.body.permissions.length, catalogue.body.permissions.length);
     });
 
-    test('finance arrives holding the board and the ask, and no write', async () => {
+    test('finance arrives holding the finance cycle and the ask, and no project write', async () => {
       const held = await server.get(`/api/roles/${await roleId('finance')}/permissions`, {
         token: adminToken,
       });
 
       const codes = held.body.permissions.map((permission) => permission.code).sort();
-      assert.deepEqual(codes, ['finance.read', 'finance.request', 'project.read']);
+      assert.deepEqual(codes, [
+        'calendar.read',
+        'finance.read',
+        'finance.request',
+        'finance.validate',
+        'finance.write',
+        'project.read',
+        'task.read',
+      ]);
       assert.ok(!codes.includes('project.write'), 'finance can ask, not edit');
     });
 

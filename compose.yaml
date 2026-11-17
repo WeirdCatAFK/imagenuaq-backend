@@ -71,8 +71,8 @@ services:
     # The API port is published so `npm run dev` and `npm test` on the host can reach it; the
     # console is the web UI.
     ports:
-      - "${MINIO_API_PORT:?set MINIO_API_PORT in .env (see .env.example)}:9000"
-      - "${MINIO_CONSOLE_PORT:?set MINIO_CONSOLE_PORT in .env (see .env.example)}:9001"
+      - "127.0.0.1:${MINIO_API_PORT:?set MINIO_API_PORT in .env (see .env.example)}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:?set MINIO_CONSOLE_PORT in .env (see .env.example)}:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -120,7 +120,7 @@ services:
     # is not installed in the server image, so `npm run migrate:up` runs from your machine
     # against the DATABASE_URL in .env. Change POSTGRES_PORT if 5432 is already taken.
     ports:
-      - "${POSTGRES_PORT:?set POSTGRES_PORT in .env (see .env.example)}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:?set POSTGRES_PORT in .env (see .env.example)}:5432"
     # psql, not pg_isready: pg_isready only asks whether the postmaster is accepting
     # connections, so it reports healthy even when POSTGRES_USER names a role that does
     # not exist - which is exactly what happens when .env changes after db-data was
@@ -144,7 +144,7 @@ services:
     # and reusing it would publish two services on the same host port. The container
     # side is 80 because that is what pgadmin4 listens on internally.
     ports:
-      - "${PGADMIN_PORT:?set PGADMIN_PORT in .env (see .env.example)}:80"
+      - "127.0.0.1:${PGADMIN_PORT:?set PGADMIN_PORT in .env (see .env.example)}:80"
     volumes:
       - pgadmin-data:/var/lib/pgadmin
     # The service is called `db`, not `postgres`. Waiting on the healthcheck also means

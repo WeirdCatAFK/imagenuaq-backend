@@ -25,6 +25,9 @@ import sharedRouter from './routes/shared.js';
 import tasksRouter from './routes/tasks.js';
 import calendarRouter from './routes/calendar.js';
 import financeRouter from './routes/finance.js';
+import absencesRouter from './routes/absences.js';
+import printRouter from './routes/print.js';
+import vehiclesRouter from './routes/vehicles.js';
 import docsRouter from './routes/docs.js';
 import notificationsRouter from './routes/notifications.js';
 
@@ -65,6 +68,9 @@ export const ROUTERS = {
   tasks: tasksRouter,
   calendar: calendarRouter,
   finance: financeRouter,
+  absences: absencesRouter,
+  print: printRouter,
+  vehicles: vehiclesRouter,
   docs: docsRouter,
 
 };

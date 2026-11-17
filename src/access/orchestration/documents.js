@@ -44,7 +44,8 @@ const BAD_NAME = /[/\\\u0000-\u001f\u007f]/;
 class Documents {
   /** The folders the caller starts browsing from. */
   async listTop() {
-    return (await query.listTopFolders()).map(shapeFolder);
+    const [rows, hidden] = await Promise.all([query.listTopFolders(), this.#hiddenRoot()]);
+    return rows.filter((row) => row.id !== hidden).map(shapeFolder);
   }
 
   /**
@@ -300,6 +301,10 @@ class Documents {
     const id = requireId(folderId, "folderId");
     const expiry = requireFuture(expiresAt);
     await this.#readable(id);
+    const absenceFolder = await query.getAbsenceDocumentFolder();
+    if (absenceFolder && (await query.isWithinFolder(id, absenceFolder.id))) {
+      throw ApiError.forbidden("Absence documents cannot be shared by link.");
+    }
 
     const token = randomBytes(32).toString("base64url");
     const row = await query.createFolderLink({
@@ -425,12 +430,15 @@ class Documents {
     if (within !== null) await this.#readable(within);
 
     const pattern = `%${needle.replace(/[\\%_]/g, "\\$&")}%`;
-    const [rows, projectFolders] = await Promise.all([
+    const [rows, projectFolders, hidden] = await Promise.all([
       query.searchFiles(pattern, { withinId: within, limit: SEARCH_LIMIT }),
       within === null ? query.searchProjectFolders(pattern, SEARCH_LIMIT) : [],
+      this.#hiddenRoot(),
     ]);
     return {
-      files: rows.map((row) => ({ ...shapeFile(row), path: row.path })),
+      files: rows
+        .filter((row) => row.path?.[0]?.id !== hidden)
+        .map((row) => ({ ...shapeFile(row), path: row.path })),
       folders: projectFolders.map((row) => ({ ...shapeFolder(row), path: row.path })),
     };
   }
@@ -683,13 +691,34 @@ class Documents {
    */
   async #access(folderId) {
     const actor = currentActor();
-    const [folder, grant] = await Promise.all([
+    const [folder, grant, hidden] = await Promise.all([
       query.getFolder(folderId),
       query.folderAccess(folderId, actor.id),
+      this.#hiddenRoot(),
     ]);
     if (!folder) throw ApiError.notFound("Folder not found.");
+    if (hidden !== null && (await query.isWithinFolder(folderId, hidden))) {
+      throw ApiError.notFound("Folder not found.");
+    }
     const access = isAdmin(actor) || grant.owns ? "owner" : (grant.level ?? "read");
     return { folder, access };
+  }
+
+  /**
+   * The absence documents folder when the caller may not see it, else null. Only admins and
+   * holders of absence.read_detail see the motive behind an absence (RF-AUS-13).
+   *
+   * @returns {Promise<number|null>}
+   */
+  async #hiddenRoot() {
+    const actor = currentActor();
+    if (isAdmin(actor)) return null;
+    const [folder, codes] = await Promise.all([
+      query.getAbsenceDocumentFolder(),
+      query.getRolePermissionCodes(actor.roleId),
+    ]);
+    if (!folder || codes.includes("absence.read_detail")) return null;
+    return folder.id;
   }
 
   /** @throws {ApiError} 404 when missing. */

@@ -14,7 +14,7 @@ dominio. Cada decisión cita el requerimiento que la obliga: los IDs `RF-*` vien
 | Módulo                           | Tablas                                                                                                                                                                                                                                   | Estado                                                                               |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
 | USR                               | `users`, `roles`, `areas`, `area_hierarchy`, `area_members`, `contract_types`, `permissions`, `role_permissions`                                                                                                         | Implementado                                                                         |
-| CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history`, `period_closures` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
+| CAL / AUS                         | `events`, `event_types`, `event_participants`, `event_exceptions`, `event_collections`, `collection_events`, `absences`, `absence_types`, `contract_type_entitlements`, `leave_balances`, `absence_status_history`, `period_closures`, `vehicles`, `vehicle_bookings` | Implementado;`contract_type_entitlements` aún sin topes (§5.4)                   |
 | ARC                               | `folders`, `files`, `folder_areas`, `access_tokens`                                                                                                                                                                             | Implementado                                                                         |
 | —                                | `logs`, `actions`                                                                                                                                                                                                                    | Implementado                                                                         |
 | SOL / PRY / EST                   | `schemas`, `schema_versions`, `sheets`, `requests`, `projects`, `statuses`                                                                                        | Tablas por`projects-spine`, **todas con API**: `schemas` (§2.2), `statuses` (`RF-EST-02`), `requests` con su conversión (§2.13), `projects` con etapas, vistos buenos y valores (§2.12), y `/api/requesters` (§2.11) |
@@ -932,6 +932,29 @@ cierre del proyecto, o para siempre con `finance_keep_forever`. Es la decisión 
 desarrollo dejaba pendiente para I9: la cotización y la evidencia de aprobación son justo lo que
 finanzas necesita señalar después.
 
+### 2.22 El vehículo se reserva; el calendario solo lo muestra
+
+Coordinación comparte vehículos para entregar y recoger material. Ninguna entrevista los nombra;
+el requisito que los cubre es `RF-CAL-04`: el calendario muestra la disponibilidad de los recursos
+compartidos para evitar empalmes de reserva.
+
+**Los vehículos son un catálogo** (`vehicles`), no una lista en código: coordinación los da de alta
+y de baja con `vehicle.manage`. Uno dado de baja conserva sus reservas y no acepta nuevas.
+
+**El empalme lo impide la base, no la API.** `vehicle_bookings` lleva un `EXCLUDE` sobre
+`(vehicle_id, tstzrange(starts_at, ends_at))`, así que dos reservas del mismo vehículo no se
+traslapan aunque lleguen a la vez; la API traduce el rechazo a un 409. Un rango es `[inicio, fin)`:
+una reserva puede empezar justo cuando termina la anterior.
+
+**Cada reserva tiene su evento**, de tipo `vehiculo` y global (sin participantes): la
+disponibilidad es de todos. Lo crean y mantienen disparadores sobre `vehicle_bookings`, como el de
+las etapas (§2.19), así que ningún camino de escritura lo olvida. El calendario lo muestra como su
+propia capa (`kind: "vehicle"`) y arma el título con el nombre vigente del vehículo. El evento no se
+edita por `/api/calendar/events`; se mueve por `/api/vehicles/bookings/:id`.
+
+**Reserva quien tiene `vehicle.book`; la cambia quien la hizo o coordinación** (`RF-USR-06`). El
+proyecto es opcional: hay entregas que no cuelgan de ninguno.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -986,6 +1009,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-MIG-04                       | `project_field_values` con la clave del folio externo (`folio_sin`)                                             | ✔ |
 | RF-CAL-02                       | `events` + `event_participants`; la etapa escribe el suyo por disparador (§2.19)                              | ✔ |
 | RF-CAL-03                       | `period_closures` + `projects.has_cost`; marca, no bloquea (§2.19)                                            | ✔ |
+| RF-CAL-04                       | `vehicles` + `vehicle_bookings` sin empalmes, con su evento en el calendario (§2.22); falta mobiliario y material (INV) | ◑ |
 | RF-CAL-05                       | `absence_availability` como capa del calendario; falta el conmutador con el módulo de ausencias (I11)         | ◑ |
 | RF-USR-01, RF-USR-02            | `users`, `areas`, `area_members`, `roles`                                                                   | ✔ |
 | RF-USR-03, RF-USR-04            | `area_members` + `area_hierarchy` (§5.5): el área propia y, recorriendo el árbol, todo lo que cuelga de ella | ✔ |
@@ -1627,6 +1651,37 @@ proyectos con costo. Solo marca (§2.19). Dos ventanas no pueden traslaparse (`E
 | `starts_on` | date | no | | Primer día de la ventana |
 | `ends_on` | date | no | | Último día, incluido. No antes de `starts_on` |
 | `created_by` | bigint | sí | | Quién la dio de alta → `users.id` |
+| `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta del registro |
+
+#### `vehicles`
+
+Los vehículos que se reservan para entregar y recoger material (`RF-CAL-04`, §2.22).
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `name` | varchar(100) | no | | Nombre visible. Único |
+| `plate` | varchar(20) | sí | | Placas |
+| `is_active` | boolean | no | `true` | Uno dado de baja no acepta reservas nuevas |
+
+#### `vehicle_bookings`
+
+Un vehículo ocupado de `starts_at` a `ends_at` (§2.22). Dos reservas del mismo vehículo no se
+traslapan (`EXCLUDE` sobre `vehicle_id` y `tstzrange(starts_at, ends_at)`). Los disparadores crean,
+mueven y borran su evento.
+
+| Columna | Tipo | Nulo | Predet. | Descripción |
+| --- | --- | --- | --- | --- |
+| `id` | bigint | no | identidad | Llave primaria |
+| `vehicle_id` | bigint | no | | → `vehicles.id` |
+| `event_id` | bigint | sí | | → `events.id`, único. Lo pone el disparador al insertar |
+| `kind` | varchar(20) | no | | `delivery` (entrega) o `pickup` (recolección) |
+| `destination` | varchar(300) | no | | A dónde va |
+| `project_id` | bigint | sí | | → `projects.id`, opcional |
+| `notes` | text | sí | | |
+| `starts_at` | timestamptz | no | | Sale |
+| `ends_at` | timestamptz | no | | Regresa. Después de `starts_at` |
+| `booked_by` | bigint | no | | Quién reservó → `users.id`. Solo él o coordinación la cambia |
 | `created_at` | timestamptz | no | `CURRENT_TIMESTAMP` | Alta del registro |
 
 #### `absences`

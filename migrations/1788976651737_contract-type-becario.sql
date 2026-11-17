@@ -21,18 +21,8 @@
 --
 -- Named for the scheme, as its four neighbours are, so the catalogue reads as one list.
 
-INSERT INTO contract_types (name) VALUES
-    ('Becario')
-ON CONFLICT (name) DO NOTHING;
+-- The row is no longer seeded: contract types are coordination's data, entered from the app.
+-- The file stays so databases that already ran it keep their migration history.
 
 
 -- Down Migration
-
--- Guarded the same way catalog-bootstrap guards its own seed: a catalogue row that has
--- been referenced cannot be deleted, and a Down that fails on a foreign key is worse than
--- one that leaves a row behind. Rolling back with a becario on the books is a no-op.
-
-DELETE FROM contract_types ct
-WHERE ct.name = 'Becario'
-  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.contract_type_id = ct.id)
-  AND NOT EXISTS (SELECT 1 FROM contract_type_entitlements cte WHERE cte.contract_type_id = ct.id);

@@ -213,6 +213,15 @@ const GLOBAL_EVENT_FROM = `events e join event_types et on et.id = e.event_type_
 const GLOBAL_EVENT_COLUMNS = `e.id, et.code as type, e.title, e.description, e.all_day, e.starts_at,
   e.ends_at, e.rule, e.recurrence_until, e.created_at`;
 
+/** A vehicle booking with the names the calendar and the form show (RF-CAL-04). */
+const VEHICLE_BOOKING_FROM = `vehicle_bookings vb
+  join vehicles v on v.id = vb.vehicle_id
+  join users bu on bu.id = vb.booked_by
+  left join projects bp on bp.id = vb.project_id`;
+const VEHICLE_BOOKING_COLUMNS = `vb.id, vb.vehicle_id, v.name as vehicle_name, vb.event_id, vb.kind,
+  vb.destination, vb.project_id, bp.key as project_key, bp.title as project_title, vb.notes,
+  vb.starts_at, vb.ends_at, vb.booked_by, bu.full_name as booked_by_name, vb.created_at`;
+
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
@@ -576,15 +585,45 @@ class Query {
     return row ?? null;
   }
 
-  /** The whole catalogue, for a form that has to name one. Ordered for a <select>. */
+  /** The active catalogue, for a form that has to name one. Ordered for a <select>. */
   async getContractTypes() {
-    return this.#rows("select id, name from contract_types order by name");
+    return this.#rows("select id, name from contract_types where is_active order by name");
+  }
+
+  /**
+   * Inserts a contract scheme, or reactivates a deactivated one of the same name. Raises the
+   * unique violation when an active one already has the name (uq_contract_types_name).
+   */
+  async createContractType(name) {
+    const [revived] = await this.#rows(
+      `update contract_types set is_active = true
+        where name = $1 and not is_active
+        returning id, name`,
+      [name],
+    );
+    if (revived) return revived;
+    const [row] = await this.#rows(
+      "insert into contract_types (name) values ($1) returning id, name",
+      [name],
+    );
+    return row;
+  }
+
+  /** Takes a contract scheme out of the pickers. Null when no active one has that id. */
+  async deactivateContractType(id) {
+    const [row] = await this.#rows(
+      `update contract_types set is_active = false
+        where id = $1 and is_active
+        returning id, name`,
+      [id],
+    );
+    return row ?? null;
   }
 
   /** The fallback contract type when none was named; `contract_type_id` is NOT NULL. */
   async firstContractType() {
     const [row] = await this.#rows(
-      "select id, name from contract_types order by id limit 1",
+      "select id, name from contract_types where is_active order by id limit 1",
     );
     return row ?? null;
   }
@@ -1883,8 +1922,8 @@ class Query {
       ),
       execution as (
         insert into project_stages (flow_stage_id, attempt, status, assigned_to, started_at)
-        select definition.id, 1, $10, $11::bigint,
-          case when $10 = 'active' then current_timestamp end
+        select definition.id, 1, $10::text, $11::bigint,
+          case when $10::text = 'active' then current_timestamp end
         from definition
         returning *
       )
@@ -4024,7 +4063,10 @@ class Query {
               ps.id as stage_id, ps.status as stage_status, fp.project_id, p.key as project_key,
               p.title as project_title, p.has_cost, coalesce(${IN_CLOSURE}, false) as in_closure,
               coalesce(fs.area_id, na.id) as area_id, coalesce(a.name, na.name) as area_name,
-              ps.assigned_to as user_id, u.full_name as user_name
+              ps.assigned_to as user_id, u.full_name as user_name,
+              vb.id as booking_id, vb.vehicle_id, vv.name as vehicle_name, vb.kind as booking_kind,
+              vb.project_id as booking_project_id, vp.key as booking_project_key, vb.notes as booking_notes,
+              vb.booked_by, vu.full_name as booked_by_name
          from occurrences o
          join events e on e.id = o.event_id
          join event_types et on et.id = e.event_type_id
@@ -4034,6 +4076,10 @@ class Query {
          left join projects p on p.id = fp.project_id
          left join areas a on a.id = fs.area_id
          left join users u on u.id = ps.assigned_to
+         left join vehicle_bookings vb on vb.event_id = e.id
+         left join vehicles vv on vv.id = vb.vehicle_id
+         left join projects vp on vp.id = vb.project_id
+         left join users vu on vu.id = vb.booked_by
          left join lateral (
            select na.id, na.name from event_participants ep join areas na on na.id = ep.area_id
             where et.code = 'nota' and ep.event_id = e.id limit 1
@@ -4437,6 +4483,56 @@ class Query {
         trail,
         dedupKey,
       ],
+    );
+  }
+
+  /** RF-EST-10: tells area leads that someone in their area had an absence approved (dates only, no motive). */
+  async notifyAbsenceApproval(eventId, userId, { exceptUserId = null, startsAt, endsAt }) {
+    return this.#rows(
+      `with absent_user as (
+         select u.id, u.full_name from users u where u.id = $1
+       ),
+       recipients as (
+         select distinct am.user_id
+           from area_members am
+           join area_members absent_am on absent_am.area_id = am.area_id
+          where absent_am.user_id = $1 and am.is_area_leader and am.user_id <> $1
+       )
+       insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select r.user_id, 'alerta', 'ausencia', 'Ausencia aprobada',
+              au.full_name || ' estará ausente del '
+              || to_char($3::timestamptz at time zone 'America/Mexico_City', 'DD/MM/YYYY')
+              || ' al '
+              || to_char($4::timestamptz at time zone 'America/Mexico_City', 'DD/MM/YYYY') || '.',
+              'absences', $2, 'absence_approved:' || $2
+         from recipients r
+         cross join absent_user au
+         join users u on u.id = r.user_id and u.deleted_at is null
+        where r.user_id is distinct from $5::bigint
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [userId, eventId, startsAt, endsAt, exceptUserId],
+    );
+  }
+
+  /** Notifies every live holder of `permission` (through their role). No project context. */
+  async notifyByPermission({ permission, exceptUserId = null, title, lead, trail, dedupKey, sourceType, sourceId }) {
+    return this.#rows(
+      `insert into notifications (
+         user_id, category, type, title, message, source_type, source_id, dedup_key
+       )
+       select u.id, 'alerta', 'ausencia', $3::text,
+              $4::text || $5::text,
+              $6::text, $7::bigint, $8::text
+         from users u
+         join role_permissions rp on rp.role_id = u.role_id
+         join permissions pm on pm.id = rp.permission_id and pm.code = $1::text
+        where u.deleted_at is null and u.id is distinct from $2::bigint
+       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
+       returning *`,
+      [permission, exceptUserId, title, lead, trail, sourceType, sourceId, dedupKey],
     );
   }
 
@@ -5080,6 +5176,627 @@ class Query {
        on conflict (user_id, dedup_key) where dedup_key is not null do nothing
        returning *`,
       [oficioId, userId, step, title, lead, trail],
+    );
+  }
+
+  /** Active absence types, or all when `activeOnly` is false. */
+  async listAbsenceTypes(activeOnly = true) {
+    return this.#rows(
+      `select * from absence_types
+        where $1::boolean is false or is_active = true
+        order by label`,
+      [activeOnly],
+    );
+  }
+
+  async getAbsenceType(id) {
+    const [row] = await this.#rows(
+      `select * from absence_types where id = $1`,
+      [id],
+    );
+    return row ?? null;
+  }
+
+  async createAbsenceType({ code, label, unit, consumes_balance, requires_document }) {
+    const [row] = await this.#rows(
+      `insert into absence_types (code, label, unit, consumes_balance, requires_document)
+       values ($1, $2, $3, $4, $5)
+       returning *`,
+      [code, label, unit, consumes_balance, requires_document],
+    );
+    return row;
+  }
+
+  async updateAbsenceType(id, fields) {
+    const columns = Object.keys(fields);
+    if (columns.length === 0) return this.getAbsenceType(id);
+    const sets = columns.map((col, i) => `${col} = $${i + 2}`);
+    const [row] = await this.#rows(
+      `update absence_types set ${sets.join(", ")} where id = $1 returning *`,
+      [id, ...Object.values(fields)],
+    );
+    return row ?? null;
+  }
+
+  /** Entitlements for one contract type, with the absence type's code and label. */
+  async listEntitlements(contractTypeId) {
+    return this.#rows(
+      `select cte.*, at.code as type_code, at.label as type_label
+         from contract_type_entitlements cte
+         join absence_types at on at.id = cte.absence_type_id
+        where cte.contract_type_id = $1
+        order by at.label, cte.valid_from desc`,
+      [contractTypeId],
+    );
+  }
+
+  /** The entitlement in force on `onDate` for a (contract type, absence type) pair, or null. */
+  async getEffectiveEntitlement(contractTypeId, absenceTypeId, onDate) {
+    const [row] = await this.#rows(
+      `select cte.*, at.code as type_code, at.label as type_label
+         from contract_type_entitlements cte
+         join absence_types at on at.id = cte.absence_type_id
+        where cte.contract_type_id = $1
+          and cte.absence_type_id = $2
+          and cte.valid_from <= $3::date
+          and (cte.valid_to is null or cte.valid_to >= $3::date)`,
+      [contractTypeId, absenceTypeId, onDate],
+    );
+    return row ?? null;
+  }
+
+  /** Removes an entitlement that is being replaced on the same start date. */
+  async deleteEntitlement(id) {
+    await this.#rows(`delete from contract_type_entitlements where id = $1`, [id]);
+  }
+
+  /** Closes an open entitlement by setting its valid_to; null when already closed or missing. */
+  async closeEntitlement(id, validTo) {
+    const [row] = await this.#rows(
+      `update contract_type_entitlements set valid_to = $2::date
+        where id = $1 and valid_to is null
+       returning *`,
+      [id, validTo],
+    );
+    return row ?? null;
+  }
+
+  async createEntitlement({ contract_type_id, absence_type_id, amount, valid_from, valid_to }) {
+    const [row] = await this.#rows(
+      `insert into contract_type_entitlements
+              (contract_type_id, absence_type_id, amount, valid_from, valid_to)
+       values ($1, $2, $3::numeric, $4::date, $5::date)
+       returning *`,
+      [contract_type_id, absence_type_id, amount, valid_from, valid_to],
+    );
+    return row;
+  }
+
+  async updateEntitlement(id, fields) {
+    const columns = Object.keys(fields);
+    if (columns.length === 0) return null;
+    const sets = columns.map((col, i) => `${col} = $${i + 2}`);
+    const [row] = await this.#rows(
+      `update contract_type_entitlements set ${sets.join(", ")} where id = $1 returning *`,
+      [id, ...Object.values(fields)],
+    );
+    return row ?? null;
+  }
+
+  async getBalance(userId, absenceTypeId, cycleStart) {
+    const [row] = await this.#rows(
+      `select lb.*, at.code as type_code, at.label as type_label
+         from leave_balances lb
+         join absence_types at on at.id = lb.absence_type_id
+        where lb.user_id = $1 and lb.absence_type_id = $2 and lb.cycle_start = $3::date`,
+      [userId, absenceTypeId, cycleStart],
+    );
+    return row ?? null;
+  }
+
+  async listBalances(userId) {
+    return this.#rows(
+      `select lb.*, at.code as type_code, at.label as type_label, at.consumes_balance
+         from leave_balances lb
+         join absence_types at on at.id = lb.absence_type_id
+        where lb.user_id = $1
+        order by lb.cycle_start desc, at.label`,
+      [userId],
+    );
+  }
+
+  async upsertBalance(userId, absenceTypeId, cycleStart, cycleEnd, granted) {
+    const [row] = await this.#rows(
+      `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted)
+       values ($1, $2, $3::date, $4::date, $5)
+       on conflict (user_id, absence_type_id, cycle_start)
+       do update set granted = excluded.granted
+       returning *`,
+      [userId, absenceTypeId, cycleStart, cycleEnd, granted],
+    );
+    return row;
+  }
+
+  /** Adds `delta` to `used`; negative to restore on cancellation. */
+  async adjustBalanceUsed(userId, absenceTypeId, cycleStart, delta) {
+    const [row] = await this.#rows(
+      `update leave_balances set used = used + $4
+        where user_id = $1 and absence_type_id = $2 and cycle_start = $3::date
+       returning *`,
+      [userId, absenceTypeId, cycleStart, delta],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Creates the event, the absence row, the participant and the first history entry in one
+   * statement. Returns the joined result, or null when the event type does not exist.
+   */
+  async createAbsence({ title, description, allDay, startsAt, endsAt, rule, recurrenceUntil,
+                         createdBy, reason, absenceTypeId, documentFileId, userId, areaId }) {
+    const [row] = await this.#rows(
+      `with evt as (
+         insert into events (event_type_id, title, description, all_day, starts_at, ends_at,
+                             timezone, rule, recurrence_until, created_by)
+         select id, $1, $2, $3, $4::timestamptz, $5::timestamptz, 'America/Mexico_City',
+                $6, $7::timestamptz, $8::bigint
+           from event_types where code = 'ausencia'
+         returning *
+       ),
+       abs as (
+         insert into absences (event_id, reason, absence_type_id, document_file_id)
+         select evt.id, $9, $10::bigint, $11::bigint from evt
+         returning *
+       ),
+       part as (
+         insert into event_participants (event_id, user_id, area_id)
+         select evt.id, $12::bigint, $13::bigint from evt
+         returning *
+       ),
+       hist as (
+         insert into absence_status_history (event_id, status, changed_by)
+         select evt.id, 'requested', $8::bigint from evt
+       )
+       select abs.event_id, abs.reason, abs.status, abs.absence_type_id, abs.document_file_id,
+              abs.created_at, evt.starts_at, evt.ends_at, evt.all_day, evt.title,
+              evt.rule, evt.recurrence_until, part.user_id, part.area_id
+         from abs
+         join evt on evt.id = abs.event_id
+         join part on part.event_id = evt.id`,
+      [title, description, allDay, startsAt, endsAt, rule, recurrenceUntil,
+       createdBy, reason, absenceTypeId, documentFileId, userId, areaId],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Rewrites the type, reason and dates of an absence, only while it is requested. The status
+   * check is in the statement so an approval that lands first wins. Returns false otherwise.
+   */
+  async updateRequestedAbsence(eventId, { absenceTypeId, startsAt, endsAt, reason, title }) {
+    const [row] = await this.#rows(
+      `with abs as (
+         update absences
+            set absence_type_id = $2::bigint, reason = $3::text
+          where event_id = $1::bigint and status = 'requested'
+         returning event_id
+       )
+       update events e
+          set starts_at = $4::timestamptz, ends_at = $5::timestamptz,
+              title = $6::text, description = $3::text
+         from abs
+        where e.id = abs.event_id
+       returning e.id`,
+      [eventId, absenceTypeId, reason, startsAt, endsAt, title],
+    );
+    return Boolean(row);
+  }
+
+  /** One absence with its event, participant, and type; null when missing. */
+  async getAbsence(eventId) {
+    const [row] = await this.#rows(
+      `select a.event_id, a.reason, a.status, a.absence_type_id, a.document_file_id,
+              a.approved_by, a.approved_at, a.created_at,
+              at.code as type_code, at.label as type_label, at.consumes_balance,
+              e.starts_at, e.ends_at, e.all_day, e.title, e.description,
+              e.rule, e.recurrence_until,
+              ep.user_id, ep.area_id, u.full_name as user_name,
+              ar.name as area_name, approver.full_name as approved_by_name
+         from absences a
+         join events e on e.id = a.event_id
+         join absence_types at on at.id = a.absence_type_id
+         join event_participants ep on ep.event_id = a.event_id
+         left join users u on u.id = ep.user_id
+         left join areas ar on ar.id = ep.area_id
+         left join users approver on approver.id = a.approved_by
+        where a.event_id = $1`,
+      [eventId],
+    );
+    return row ?? null;
+  }
+
+  /** Absences filtered by user, area, status and type. */
+  async listAbsences({ userId = null, areaId = null, status = null, absenceTypeId = null,
+                        limit = 50, offset = 0 } = {}) {
+    return this.#rows(
+      `select a.event_id, a.reason, a.status, a.absence_type_id, a.document_file_id,
+              a.approved_by, a.approved_at, a.created_at,
+              at.code as type_code, at.label as type_label, at.consumes_balance,
+              e.starts_at, e.ends_at, e.all_day, e.title,
+              ep.user_id, ep.area_id, u.full_name as user_name,
+              ar.name as area_name
+         from absences a
+         join events e on e.id = a.event_id
+         join absence_types at on at.id = a.absence_type_id
+         join event_participants ep on ep.event_id = a.event_id
+         left join users u on u.id = ep.user_id
+         left join areas ar on ar.id = ep.area_id
+        where ($1::bigint is null or ep.user_id = $1::bigint)
+          and ($2::bigint is null or ep.area_id = $2::bigint)
+          and ($3::text is null or a.status = $3::text)
+          and ($4::bigint is null or a.absence_type_id = $4::bigint)
+        order by a.created_at desc, a.event_id desc
+        limit $5 offset $6`,
+      [userId, areaId, status, absenceTypeId, limit, offset],
+    );
+  }
+
+  /** Transitions an absence's status and records the change in one statement. */
+  async updateAbsenceStatus(eventId, { status, changedBy, note, approvedBy, approvedAt, documentFileId }) {
+    const [row] = await this.#rows(
+      `with changed as (
+         update absences set status = $2,
+           approved_by = coalesce($4::bigint, approved_by),
+           approved_at = coalesce($5::timestamptz, approved_at),
+           document_file_id = coalesce($7::bigint, document_file_id)
+         where event_id = $1
+         returning *
+       ),
+       hist as (
+         insert into absence_status_history (event_id, status, changed_by, note)
+         values ($1, $2, $3::bigint, $6)
+       )
+       select changed.*, e.starts_at, e.ends_at, e.all_day,
+              ep.user_id, ep.area_id
+         from changed
+         join events e on e.id = changed.event_id
+         join event_participants ep on ep.event_id = changed.event_id`,
+      [eventId, status, changedBy, approvedBy, approvedAt, note, documentFileId ?? null],
+    );
+    return row ?? null;
+  }
+
+  /** Finds the system folder for absence documents by name. */
+  async getAbsenceDocumentFolder() {
+    const [row] = await this.#rows(
+      `select id from folders where name = 'Oficios de ausencia' and parent_id is null and deleted_at is null limit 1`,
+      [],
+    );
+    return row ?? null;
+  }
+
+  /** Links a file to an absence as its backing document. */
+  async setAbsenceDocument(eventId, fileId) {
+    await this.#rows(
+      `update absences set document_file_id = $2 where event_id = $1`,
+      [eventId, fileId],
+    );
+  }
+
+  /** Deletes a requested absence and its event. Null when missing or not in requested status. */
+  async deleteAbsence(eventId) {
+    const [row] = await this.#rows(
+      `with guard as (
+         select event_id from absences where event_id = $1 and status = 'requested'
+       ),
+       del_hist as (
+         delete from absence_status_history where event_id = (select event_id from guard)
+       ),
+       del_abs as (
+         delete from absences where event_id = (select event_id from guard)
+       ),
+       del_part as (
+         delete from event_participants where event_id = (select event_id from guard)
+       )
+       delete from events where id = (select event_id from guard)
+       returning id`,
+      [eventId],
+    );
+    return row ?? null;
+  }
+
+  async absenceStatusHistory(eventId) {
+    return this.#rows(
+      `select h.*, u.full_name as changed_by_name
+         from absence_status_history h
+         left join users u on u.id = h.changed_by
+        where h.event_id = $1
+        order by h.changed_at`,
+      [eventId],
+    );
+  }
+
+  async listPrintMachines() {
+    return this.#rows("select * from print_machines order by name");
+  }
+
+  async createPrintMachine({ name }) {
+    const [row] = await this.#rows(
+      "insert into print_machines (name) values ($1) returning *",
+      [name],
+    );
+    return row;
+  }
+
+  async updatePrintMachine(id, { name, isActive }) {
+    const [row] = await this.#rows(
+      `update print_machines
+          set name = coalesce($2::varchar, name),
+              is_active = coalesce($3::boolean, is_active)
+        where id = $1 returning *`,
+      [id, name ?? null, isActive ?? null],
+    );
+    return row;
+  }
+
+  async listPantones({ entity = null } = {}) {
+    return this.#rows(
+      `select * from pantone_catalog
+        where ($1::text is null or lower(entity_name) like '%' || lower($1) || '%')
+        order by entity_name, pantone_code`,
+      [entity],
+    );
+  }
+
+  async lookupPantones(entityName) {
+    return this.#rows(
+      `select * from pantone_catalog
+        where lower(entity_name) = lower($1) and is_active
+        order by pantone_code`,
+      [entityName],
+    );
+  }
+
+  async createPantone({ entityName, pantoneCode, hexValue }) {
+    const [row] = await this.#rows(
+      `insert into pantone_catalog (entity_name, pantone_code, hex_value)
+       values ($1, $2, $3) returning *`,
+      [entityName, pantoneCode, hexValue ?? null],
+    );
+    return row;
+  }
+
+  async updatePantone(id, { entityName, pantoneCode, hexValue, isActive }) {
+    const [row] = await this.#rows(
+      `update pantone_catalog
+          set entity_name  = coalesce($2::varchar, entity_name),
+              pantone_code = coalesce($3::varchar, pantone_code),
+              hex_value    = coalesce($4::varchar, hex_value),
+              is_active    = coalesce($5::boolean, is_active)
+        where id = $1 returning *`,
+      [id, entityName ?? null, pantoneCode ?? null, hexValue ?? null, isActive ?? null],
+    );
+    return row;
+  }
+
+  async deletePantone(id) {
+    const [row] = await this.#rows(
+      "delete from pantone_catalog where id = $1 returning *",
+      [id],
+    );
+    return row;
+  }
+
+  async nextPrintOrderNumber(year) {
+    const [{ max: last }] = await this.#rows(
+      `select max(order_number) as max from print_orders
+        where order_number like $1`,
+      [`OT-${year}-%`],
+    );
+    if (!last) return `OT-${year}-0001`;
+    const seq = parseInt(last.split("-")[2], 10) + 1;
+    return `OT-${year}-${String(seq).padStart(4, "0")}`;
+  }
+
+  async listPrintOrders({ status = null, projectId = null } = {}) {
+    return this.#rows(
+      `select po.*, p.key as project_key, p.title as project_title,
+              p.requester as project_requester, pm.name as machine_name
+         from print_orders po
+         join projects p on p.id = po.project_id
+         join print_machines pm on pm.id = po.machine_id
+        where ($1::text is null or po.status = $1)
+          and ($2::bigint is null or po.project_id = $2)
+        order by po.created_at desc`,
+      [status, projectId],
+    );
+  }
+
+  async getPrintOrder(id) {
+    const [row] = await this.#rows(
+      `select po.*, p.key as project_key, p.title as project_title,
+              p.requester as project_requester, pm.name as machine_name
+         from print_orders po
+         join projects p on p.id = po.project_id
+         join print_machines pm on pm.id = po.machine_id
+        where po.id = $1`,
+      [id],
+    );
+    return row;
+  }
+
+  async createPrintOrder(fields) {
+    const [row] = await this.#rows(
+      `insert into print_orders
+         (project_id, order_number, machine_id, entity_name, pantone_code,
+          pantalla, trabajo, papel_type, papel_size, cantidad, laminas,
+          frente, vuelta, corte, folio, paquetes_d, pegado, copiante, notes, created_by)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       returning *`,
+      [
+        fields.projectId, fields.orderNumber, fields.machineId,
+        fields.entityName ?? null, fields.pantoneCode ?? null,
+        fields.pantalla ?? null, fields.trabajo,
+        fields.papelType ?? null, fields.papelSize ?? null,
+        fields.cantidad ?? null, fields.laminas ?? null,
+        fields.frente ?? false, fields.vuelta ?? false,
+        fields.corte ?? null, fields.folio ?? null,
+        fields.paquetes_d ?? null, fields.pegado ?? false, fields.copiante ?? false,
+        fields.notes ?? null, fields.createdBy,
+      ],
+    );
+    return row;
+  }
+
+  async updatePrintOrder(id, fields) {
+    const [row] = await this.#rows(
+      `update print_orders set
+         machine_id   = coalesce($2::bigint, machine_id),
+         entity_name  = coalesce($3::varchar, entity_name),
+         pantone_code = coalesce($4::varchar, pantone_code),
+         pantalla     = coalesce($5::varchar, pantalla),
+         trabajo      = coalesce($6::varchar, trabajo),
+         papel_type   = coalesce($7::varchar, papel_type),
+         papel_size   = coalesce($8::varchar, papel_size),
+         cantidad     = coalesce($9::int, cantidad),
+         laminas      = coalesce($10::int, laminas),
+         frente       = coalesce($11::boolean, frente),
+         vuelta       = coalesce($12::boolean, vuelta),
+         corte        = coalesce($13::varchar, corte),
+         folio        = coalesce($14::varchar, folio),
+         paquetes_d   = coalesce($15::int, paquetes_d),
+         pegado       = coalesce($16::boolean, pegado),
+         copiante     = coalesce($17::boolean, copiante),
+         notes        = coalesce($18::text, notes),
+         updated_at   = now()
+       where id = $1 returning *`,
+      [
+        id, fields.machineId ?? null, fields.entityName ?? null,
+        fields.pantoneCode ?? null, fields.pantalla ?? null,
+        fields.trabajo ?? null, fields.papelType ?? null,
+        fields.papelSize ?? null, fields.cantidad ?? null,
+        fields.laminas ?? null, fields.frente ?? null,
+        fields.vuelta ?? null, fields.corte ?? null,
+        fields.folio ?? null, fields.paquetesD ?? null,
+        fields.pegado ?? null, fields.copiante ?? null,
+        fields.notes ?? null,
+      ],
+    );
+    return row;
+  }
+
+  async updatePrintOrderStatus(id, { status, completedAt }) {
+    const [row] = await this.#rows(
+      `update print_orders
+          set status = $2, completed_at = $3::timestamptz, updated_at = now()
+        where id = $1 returning *`,
+      [id, status, completedAt ?? null],
+    );
+    return row;
+  }
+
+  async deletePrintOrder(id) {
+    const [row] = await this.#rows(
+      "delete from print_orders where id = $1 returning *",
+      [id],
+    );
+    return row;
+  }
+
+  async listVehicles() {
+    return this.#rows("select * from vehicles order by name");
+  }
+
+  async getVehicle(id) {
+    const [row] = await this.#rows("select * from vehicles where id = $1", [id]);
+    return row ?? null;
+  }
+
+  async createVehicle({ name, plate }) {
+    const [row] = await this.#rows(
+      "insert into vehicles (name, plate) values ($1, $2) returning *",
+      [name, plate],
+    );
+    return row;
+  }
+
+  /** A null field keeps its value. */
+  async updateVehicle(id, { name, plate, isActive }) {
+    const [row] = await this.#rows(
+      `update vehicles
+          set name = coalesce($2::varchar, name), plate = coalesce($3::varchar, plate),
+              is_active = coalesce($4::boolean, is_active)
+        where id = $1 returning *`,
+      [id, name, plate, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** The bookings that touch [from, to), or every one when both are null, earliest first. */
+  async listVehicleBookings({ from = null, to = null, vehicleId = null } = {}) {
+    return this.#rows(
+      `select ${VEHICLE_BOOKING_COLUMNS} from ${VEHICLE_BOOKING_FROM}
+        where ($1::timestamptz is null or vb.ends_at > $1::timestamptz)
+          and ($2::timestamptz is null or vb.starts_at < $2::timestamptz)
+          and ($3::bigint is null or vb.vehicle_id = $3::bigint)
+        order by vb.starts_at, vb.id`,
+      [from, to, vehicleId],
+    );
+  }
+
+  async getVehicleBooking(id) {
+    const [row] = await this.#rows(
+      `select ${VEHICLE_BOOKING_COLUMNS} from ${VEHICLE_BOOKING_FROM} where vb.id = $1`,
+      [id],
+    );
+    return row ?? null;
+  }
+
+  async insertVehicleBooking({ vehicleId, kind, destination, projectId, notes, startsAt, endsAt, bookedBy }) {
+    const [row] = await this.#rows(
+      `insert into vehicle_bookings (vehicle_id, kind, destination, project_id, notes, starts_at, ends_at, booked_by)
+       values ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8)
+       returning id`,
+      [vehicleId, kind, destination, projectId, notes, startsAt, endsAt, bookedBy],
+    );
+    return this.getVehicleBooking(row.id);
+  }
+
+  /** A null field keeps its value. `clear` names `projectId` or `notes` to set them to null. */
+  async updateVehicleBooking(id, { vehicleId, kind, destination, projectId, notes, startsAt, endsAt, clear = [] }) {
+    const rows = await this.#rows(
+      `update vehicle_bookings
+          set vehicle_id = coalesce($2::bigint, vehicle_id), kind = coalesce($3, kind),
+              destination = coalesce($4, destination),
+              project_id = case when 'projectId' = any($9::text[]) then null else coalesce($5::bigint, project_id) end,
+              notes = case when 'notes' = any($9::text[]) then null else coalesce($6, notes) end,
+              starts_at = coalesce($7::timestamptz, starts_at), ends_at = coalesce($8::timestamptz, ends_at)
+        where id = $1 returning id`,
+      [id, vehicleId, kind, destination, projectId, notes, startsAt, endsAt, clear],
+    );
+    return rows.length > 0 ? this.getVehicleBooking(id) : null;
+  }
+
+  async deleteVehicleBooking(id) {
+    const rows = await this.#rows("delete from vehicle_bookings where id = $1 returning id", [id]);
+    return rows.length > 0;
+  }
+
+  /** Who is away on each day in [from, to], from the availability view only (RF-AUS-10, RF-AUS-12). */
+  async listAvailability({ from, to, areaId = null, userId = null }) {
+    return this.#rows(
+      `select d::date as day, av.user_id, u.full_name as user_name,
+              av.area_id, a.name as area_name
+         from generate_series($1::date, $2::date, interval '1 day') d
+         join absence_availability av
+           on (d::timestamp at time zone 'America/Mexico_City') < av.ends_at
+          and ((d + interval '1 day')::timestamp at time zone 'America/Mexico_City') > av.starts_at
+         left join users u on u.id = av.user_id
+         left join areas a on a.id = av.area_id
+        where ($3::bigint is null or av.area_id = $3::bigint)
+          and ($4::bigint is null or av.user_id = $4::bigint)
+        order by d, a.name, u.full_name`,
+      [from, to, areaId, userId],
     );
   }
 }

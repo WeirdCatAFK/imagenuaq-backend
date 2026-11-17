@@ -10,7 +10,6 @@ import {
   softDelete,
   findUser,
   areaMemberships,
-  areaId,
   roleId,
   contractTypeId,
   tokenFor,
@@ -37,7 +36,9 @@ describe('POST /api/users', () => {
 
     workerRole = await roleId('worker');
     contractType = await contractTypeId();
-    disenoWeb = await areaId('Diseño Web');
+    [{ id: disenoWeb }] = await sql(
+      "insert into areas (name) values ('Diseño Web') on conflict (name) do update set name = excluded.name returning id",
+    );
   });
 
   after(async () => {

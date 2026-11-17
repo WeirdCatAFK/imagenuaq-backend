@@ -7,11 +7,11 @@ import { getStore } from '../../src/access/primitives/database.js';
 import { seal } from '../../src/utils/crypto.js';
 
 /** Matches SALT_ROUNDS in orchestration/auth.js; a mismatch would still verify, silently. */
-const SALT_ROUNDS = 12;
+const SALT_ROUNDS = Number(process.env.BCRYPT_ROUNDS) || 12;
 
 export const PASSWORD = 'correct horse battery staple';
 
-/** Hashed once per process: bcrypt at cost 12 is ~300ms. */
+/** Hashed once per process, at the cost .env.test sets. */
 let cachedHash = null;
 async function passwordHash() {
   cachedHash ??= await bcrypt.hash(PASSWORD, SALT_ROUNDS);
@@ -29,6 +29,18 @@ export async function reset() {
   await resetCases([]);
   await sql('alter table users alter column id restart with 1');
   await sql('alter table area_members alter column id restart with 1');
+  await ensureBaseline();
+}
+
+/**
+ * What scripts/createAdmin.js gives a fresh install, since no migration seeds it: the
+ * DEFAULT_AREA area and one contract type, which users.contract_type_id requires.
+ */
+async function ensureBaseline() {
+  await sql('insert into areas (name) values ($1) on conflict (name) do nothing', [
+    process.env.DEFAULT_AREA,
+  ]);
+  if (!(await query.firstContractType())) await query.createContractType('Honorarios');
 }
 
 /**
@@ -45,12 +57,16 @@ export const TEST_STATUS_PREFIX = 'zztest_';
  * reference; a new table a test writes to belongs here in that order.
  */
 const UNSEEDED_TABLES = [
+  'vehicle_bookings',
+  'vehicles',
   'payments',
   'receipts',
   'invoices',
   'oficios',
   'quotes',
   'providers',
+  'absence_status_history',
+  'leave_balances',
   'absences',
   'event_participants',
   'collection_events',
@@ -63,6 +79,7 @@ const UNSEEDED_TABLES = [
   'notifications',
   'logs',
   'approvals',
+  'print_orders',
   'project_field_values',
   'project_stages',
   'flow_stages',
@@ -114,6 +131,14 @@ export async function resetCases(keepEmails = []) {
     keepEmails.length ? keepEmails : [''],
   ]);
   await sql('delete from areas where name like $1', [`${TEST_PREFIX}%`]);
+  await sql("delete from print_machines where name not in ('SORM', 'GTO')");
+  await sql(
+    `delete from contract_types ct
+      where ct.name like $1
+        and not exists (select 1 from users u where u.contract_type_id = ct.id)
+        and not exists (select 1 from contract_type_entitlements e where e.contract_type_id = ct.id)`,
+    [`${TEST_PREFIX}%`],
+  );
   await sql('delete from permissions where code like $1', [`${TEST_PERMISSION_PREFIX}%`]);
   await sql('delete from roles where name like $1', [`${TEST_PREFIX}%`]);
 }

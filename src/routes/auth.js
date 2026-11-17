@@ -12,10 +12,43 @@ const router = Router();
 /** The same parser routes/users.js mounts on its admin picture route; see the note there. */
 const picture = express.raw({ type: PICTURE_TYPES, limit: '2mb' });
 
+/** Failed logins and activations allowed per client IP within FAILURE_WINDOW_MS. */
+const MAX_FAILURES = 20;
+const FAILURE_WINDOW_MS = 15 * 60 * 1000;
+
+/** Failures per IP as `{count, since}`. In memory: one process and a few dozen users. */
+const failures = new Map();
+
+/**
+ * Runs `attempt` and counts a 401 against `req.ip`; a 429 once the IP has MAX_FAILURES.
+ * @param {import('express').Request} req
+ * @param {() => Promise<object>} attempt
+ * @throws {ApiError} 429 when throttled, else whatever `attempt` throws.
+ */
+async function throttled(req, attempt) {
+  const now = Date.now();
+  const entry = failures.get(req.ip);
+  if (entry && now - entry.since > FAILURE_WINDOW_MS) failures.delete(req.ip);
+  if ((failures.get(req.ip)?.count ?? 0) >= MAX_FAILURES) {
+    throw new ApiError(429, 'Too many failed attempts. Try again in a few minutes.');
+  }
+
+  try {
+    return await attempt();
+  } catch (err) {
+    if (err instanceof ApiError && err.statusCode === 401) {
+      if (failures.size > 10_000) failures.clear();
+      const current = failures.get(req.ip) ?? { count: 0, since: now };
+      failures.set(req.ip, { ...current, count: current.count + 1 });
+    }
+    throw err;
+  }
+}
+
 router.post('/login', async (req, res) => {
   const { email, password } = req.body ?? {};
 
-  const user = await auth.authenticate(email, password);
+  const user = await throttled(req, () => auth.authenticate(email, password));
   const token = await auth.issueToken(user);
 
   res.json({ token, user });
@@ -26,7 +59,7 @@ router.post('/activate', async (req, res) => {
 
   if (!token) throw ApiError.badRequest('An invitation token is required.');
 
-  const result = await auth.completeInvite(token, password);
+  const result = await throttled(req, () => auth.completeInvite(token, password));
   res.json(result);
 });
 
