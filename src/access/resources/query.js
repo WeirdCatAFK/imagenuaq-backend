@@ -213,6 +213,15 @@ const GLOBAL_EVENT_FROM = `events e join event_types et on et.id = e.event_type_
 const GLOBAL_EVENT_COLUMNS = `e.id, et.code as type, e.title, e.description, e.all_day, e.starts_at,
   e.ends_at, e.rule, e.recurrence_until, e.created_at`;
 
+/** A vehicle booking with the names the calendar and the form show (RF-CAL-04). */
+const VEHICLE_BOOKING_FROM = `vehicle_bookings vb
+  join vehicles v on v.id = vb.vehicle_id
+  join users bu on bu.id = vb.booked_by
+  left join projects bp on bp.id = vb.project_id`;
+const VEHICLE_BOOKING_COLUMNS = `vb.id, vb.vehicle_id, v.name as vehicle_name, vb.event_id, vb.kind,
+  vb.destination, vb.project_id, bp.key as project_key, bp.title as project_title, vb.notes,
+  vb.starts_at, vb.ends_at, vb.booked_by, bu.full_name as booked_by_name, vb.created_at`;
+
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
@@ -4054,7 +4063,10 @@ class Query {
               ps.id as stage_id, ps.status as stage_status, fp.project_id, p.key as project_key,
               p.title as project_title, p.has_cost, coalesce(${IN_CLOSURE}, false) as in_closure,
               coalesce(fs.area_id, na.id) as area_id, coalesce(a.name, na.name) as area_name,
-              ps.assigned_to as user_id, u.full_name as user_name
+              ps.assigned_to as user_id, u.full_name as user_name,
+              vb.id as booking_id, vb.vehicle_id, vv.name as vehicle_name, vb.kind as booking_kind,
+              vb.project_id as booking_project_id, vp.key as booking_project_key, vb.notes as booking_notes,
+              vb.booked_by, vu.full_name as booked_by_name
          from occurrences o
          join events e on e.id = o.event_id
          join event_types et on et.id = e.event_type_id
@@ -4064,6 +4076,10 @@ class Query {
          left join projects p on p.id = fp.project_id
          left join areas a on a.id = fs.area_id
          left join users u on u.id = ps.assigned_to
+         left join vehicle_bookings vb on vb.event_id = e.id
+         left join vehicles vv on vv.id = vb.vehicle_id
+         left join projects vp on vp.id = vb.project_id
+         left join users vu on vu.id = vb.booked_by
          left join lateral (
            select na.id, na.name from event_participants ep join areas na on na.id = ep.area_id
             where et.code = 'nota' and ep.event_id = e.id limit 1
@@ -5685,6 +5701,85 @@ class Query {
       [id],
     );
     return row;
+  }
+
+  async listVehicles() {
+    return this.#rows("select * from vehicles order by name");
+  }
+
+  async getVehicle(id) {
+    const [row] = await this.#rows("select * from vehicles where id = $1", [id]);
+    return row ?? null;
+  }
+
+  async createVehicle({ name, plate }) {
+    const [row] = await this.#rows(
+      "insert into vehicles (name, plate) values ($1, $2) returning *",
+      [name, plate],
+    );
+    return row;
+  }
+
+  /** A null field keeps its value. */
+  async updateVehicle(id, { name, plate, isActive }) {
+    const [row] = await this.#rows(
+      `update vehicles
+          set name = coalesce($2::varchar, name), plate = coalesce($3::varchar, plate),
+              is_active = coalesce($4::boolean, is_active)
+        where id = $1 returning *`,
+      [id, name, plate, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** The bookings that touch [from, to), or every one when both are null, earliest first. */
+  async listVehicleBookings({ from = null, to = null, vehicleId = null } = {}) {
+    return this.#rows(
+      `select ${VEHICLE_BOOKING_COLUMNS} from ${VEHICLE_BOOKING_FROM}
+        where ($1::timestamptz is null or vb.ends_at > $1::timestamptz)
+          and ($2::timestamptz is null or vb.starts_at < $2::timestamptz)
+          and ($3::bigint is null or vb.vehicle_id = $3::bigint)
+        order by vb.starts_at, vb.id`,
+      [from, to, vehicleId],
+    );
+  }
+
+  async getVehicleBooking(id) {
+    const [row] = await this.#rows(
+      `select ${VEHICLE_BOOKING_COLUMNS} from ${VEHICLE_BOOKING_FROM} where vb.id = $1`,
+      [id],
+    );
+    return row ?? null;
+  }
+
+  async insertVehicleBooking({ vehicleId, kind, destination, projectId, notes, startsAt, endsAt, bookedBy }) {
+    const [row] = await this.#rows(
+      `insert into vehicle_bookings (vehicle_id, kind, destination, project_id, notes, starts_at, ends_at, booked_by)
+       values ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8)
+       returning id`,
+      [vehicleId, kind, destination, projectId, notes, startsAt, endsAt, bookedBy],
+    );
+    return this.getVehicleBooking(row.id);
+  }
+
+  /** A null field keeps its value. `clear` names `projectId` or `notes` to set them to null. */
+  async updateVehicleBooking(id, { vehicleId, kind, destination, projectId, notes, startsAt, endsAt, clear = [] }) {
+    const rows = await this.#rows(
+      `update vehicle_bookings
+          set vehicle_id = coalesce($2::bigint, vehicle_id), kind = coalesce($3, kind),
+              destination = coalesce($4, destination),
+              project_id = case when 'projectId' = any($9::text[]) then null else coalesce($5::bigint, project_id) end,
+              notes = case when 'notes' = any($9::text[]) then null else coalesce($6, notes) end,
+              starts_at = coalesce($7::timestamptz, starts_at), ends_at = coalesce($8::timestamptz, ends_at)
+        where id = $1 returning id`,
+      [id, vehicleId, kind, destination, projectId, notes, startsAt, endsAt, clear],
+    );
+    return rows.length > 0 ? this.getVehicleBooking(id) : null;
+  }
+
+  async deleteVehicleBooking(id) {
+    const rows = await this.#rows("delete from vehicle_bookings where id = $1 returning id", [id]);
+    return rows.length > 0;
   }
 
   /** Who is away on each day in [from, to], from the availability view only (RF-AUS-10, RF-AUS-12). */
