@@ -24,6 +24,7 @@ const PAGE_MAX = 200;
 const RFC_FORMAT = /^[A-ZÑ&]{3,4}\d{6}[A-Z\d]{3}$/;
 const UUID_FORMAT = /^[\dA-F]{8}-[\dA-F]{4}-[\dA-F]{4}-[\dA-F]{4}-[\dA-F]{12}$/;
 const AMOUNT_FORMAT = /^\d{1,10}(\.\d{1,2})?$/;
+const EMAIL_FORMAT = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** RF-FIN-03: a quote is visible from `issued`; these are the moves finance can make from each status. */
 const QUOTE_MOVES = {
@@ -91,6 +92,13 @@ function optionalRfc(value) {
   return rfc;
 }
 
+/** @throws {ApiError} 400 unless blank or shaped like an address. */
+function optionalEmail(value) {
+  const email = optionalText(value, "email", 320);
+  if (email !== null && !EMAIL_FORMAT.test(email)) throw ApiError.badRequest("email is not a valid address.");
+  return email;
+}
+
 /** @throws {ApiError} 400 unless blank or a CFDI UUID. */
 function optionalFiscalFolio(value) {
   const folio = optionalText(value, "fiscalFolio", 36)?.toUpperCase() ?? null;
@@ -105,7 +113,7 @@ const PROVIDER_FIELDS = {
   name: ["name", (v) => requireText(v, "name", NAME_MAX)],
   rfc: ["rfc", optionalRfc],
   contactName: ["contact_name", (v) => optionalText(v, "contactName", NAME_MAX)],
-  email: ["email", (v) => optionalText(v, "email", 320)],
+  email: ["email", optionalEmail],
   phone: ["phone", (v) => optionalText(v, "phone", 50)],
   notes: ["notes", (v) => optionalText(v, "notes", TEXT_MAX)],
 };
@@ -768,7 +776,7 @@ class Finance {
    * Validates a submitted receipt, or sends it back to draft with the reason (RF-FIN-16). Never by
    * whoever created it. The route requires `finance.validate`.
    *
-   * @throws {ApiError} 400 on a missing decision, 403 on the creator, 404, 409 unless awaiting validation.
+   * @throws {ApiError} 400 on a missing decision, 403 on the creator, 404, 409 when it is not awaiting validation.
    */
   async validateReceipt(receiptId, { decision, comment } = {}) {
     const receipt = await this.getReceipt(receiptId);
