@@ -293,12 +293,8 @@ class Users {
    * Changes a person's role, under `user.role` (RF-USR-02). Nobody changes their own role. Only
    * an admin gives the admin role or takes it away, so the permission cannot grow into admin.
    *
-   * @param {number|string} userId
-   * @param {number|string} roleId
    * @param {{ id: number, role: string }} actor The session's user.
-   * @returns {Promise<object>} The person, shaped for whoever asked.
-   * @throws {ApiError} 400 on a bad id, an unknown role or the actor's own account, 403 on the
-   *   admin role from a non-admin, 404 when there is no live account.
+   * @throws {ApiError} 400 on the actor's own account, 403 on the admin role from a non-admin, 404.
    */
   async setRole(userId, roleId, actor) {
     const id = requireId(userId, "userId");

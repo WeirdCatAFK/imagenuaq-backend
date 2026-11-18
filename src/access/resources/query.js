@@ -483,8 +483,8 @@ class Query {
   }
 
   /**
-   * Gives a live account another role. Permissions are read from the role on every request,
-   * so the change applies from the person's next call without ending the session.
+   * Gives a live account another role. authenticate() reads the permissions from the role on
+   * every request, so the change applies from the next call without ending the session.
    *
    * @returns {Promise<object | null>} The updated row, or null when there is no live account.
    */
