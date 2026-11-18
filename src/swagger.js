@@ -3587,7 +3587,7 @@ export function buildOpenApiDocument() {
           summary: 'The permission catalogue',
           description:
             'Every code that exists, whoever holds it. The seeded rows are the ' +
-            'requirements made data -- `availability.read` and `absence.reason.read` are two ' +
+            'requirements made data -- `availability.read` and `absence.read_detail` are two ' +
             'of them precisely so RF-USR-10 cannot be collapsed into one.',
           responses: {
             200: wrapped('Every permission, by code.', 'permissions', 'Permission', true),

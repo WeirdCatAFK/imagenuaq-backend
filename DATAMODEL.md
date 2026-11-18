@@ -1162,7 +1162,7 @@ permiso distinto de ver la disponibilidad) vivían solo en código.
 migración porque los códigos son el requerimiento hecho dato. `project.read` y
 `project.write` son dos filas y no dos niveles de una: un `level` ordenado no podría
 expresar `finance.read` de `RF-USR-08`, que es lectura transversal sin escritura en ningún
-lado. `availability.read` y `absence.reason.read` separados son literalmente `RF-USR-10`, y
+lado. `availability.read` y `absence.read_detail` separados son literalmente `RF-USR-10`, y
 que existan como dos filas es lo que impide colapsarlos al implementar.
 
 **El rol se queda global — decidido, no pendiente.** Durante un tiempo esta sección dejó
@@ -1175,7 +1175,7 @@ qué registros**, y son dos preguntas separadas:
   los **bloques** de cada router, no sus endpoints: un `recurso.read` para el bloque de
   lecturas y un código de escritura para el de escrituras, montados una vez cada uno; un
   tercer código solo donde un `RF-*` obliga a que una parte del router conteste distinto
-  (`absence.reason.read`, `RF-AUS-13`). `/api/areas` es el primero en aplicarlo
+  (`absence.read_detail`, `RF-AUS-13`). `/api/areas` es el primero en aplicarlo
   (`area.manage` sobre sus escrituras).
 - `RF-USR-03` y `RF-USR-04` —sobre qué registros— las contesta `area_members`, cruzada con
   `area_hierarchy` cuando hay que bajar por el organigrama (§5.5). Ahí sí sigue siendo

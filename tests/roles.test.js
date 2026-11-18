@@ -208,12 +208,13 @@ describe('/api/roles', () => {
       assert.ok(Array.isArray(res.body.permissions));
     });
 
-    test('availability.read and absence.reason.read are separate rows', async () => {
+    test('availability.read and absence.read_detail are separate rows, with no duplicate', async () => {
       const res = await server.get('/api/roles/permissions', { token: workerToken });
 
       const codes = res.body.permissions.map((permission) => permission.code);
       assert.ok(codes.includes('availability.read'));
-      assert.ok(codes.includes('absence.reason.read'));
+      assert.ok(codes.includes('absence.read_detail'));
+      assert.ok(!codes.includes('absence.reason.read'));
     });
 
     test('creates a permission', async () => {
