@@ -30,6 +30,7 @@ import printRouter from './routes/print.js';
 import vehiclesRouter from './routes/vehicles.js';
 import docsRouter from './routes/docs.js';
 import notificationsRouter from './routes/notifications.js';
+import formsRouter from './routes/forms.js';
 
 import { requestContext } from './middlewares/context.js';
 import { notFound } from './middlewares/notFound.js';
@@ -65,6 +66,7 @@ export const ROUTERS = {
   'contract-types': contractTypesRouter,
   documents: documentsRouter,
   shared: sharedRouter,
+  forms: formsRouter,
   tasks: tasksRouter,
   calendar: calendarRouter,
   finance: financeRouter,
@@ -79,7 +81,8 @@ export const ROUTERS = {
  * Routes that stream the request body themselves. express.json() must leave them unread,
  * or uploading a .json file would store an empty one.
  */
-const RAW_BODY_ROUTES = /^\/api\/documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)(\?|$)/;
+const RAW_BODY_ROUTES =
+  /^\/api\/(documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)|requests\/\d+\/files|forms\/[\w-]+\/files)(\?|$)/;
 
 export default class Api {
   /**

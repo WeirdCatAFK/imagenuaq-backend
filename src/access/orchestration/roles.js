@@ -24,7 +24,7 @@ const PERMISSION_CODE_MAX = 100;
 const PERMISSION_LABEL_MAX = 200;
 
 /**
- * The seeded catalogue is `resource.action` -- project.read, absence.reason.read. Dots may
+ * The seeded catalogue is `resource.action` -- project.read, absence.read_detail. Dots may
  * repeat. requirePermission() compares these literally, so `Project Read` and
  * `project.read` are two permissions that look like one to whoever grants them.
  */

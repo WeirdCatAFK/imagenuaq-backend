@@ -191,6 +191,14 @@ describe("/api/finance", () => {
       const found = await server.get("/api/finance/providers?q=papel", { token: workerToken });
       assert.equal(found.body.providers.length, 1);
     });
+
+    test("an address that is not one is 400", async () => {
+      const res = await server.post("/api/finance/providers", {
+        token: workerToken,
+        body: { name: "Imprenta Sin Correo", email: "no-es-correo" },
+      });
+      assert.equal(res.status, 400);
+    });
   });
 
   describe("standing", () => {

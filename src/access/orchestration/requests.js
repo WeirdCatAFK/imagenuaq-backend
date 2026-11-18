@@ -3,6 +3,7 @@
 import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import projects from "./projects.js";
+import documents from "./documents.js";
 import { validatePhases } from "./workflows.js";
 import { fieldList } from "./schemas.js";
 import { storedText, validateData } from "../../utils/fieldValues.js";
@@ -31,6 +32,13 @@ const DEFAULT_STATUS = "recibido";
 /** What a client may claim about how a request arrived. `sheet` belongs to the import. */
 const SOURCES = ["manual", "form", "email"];
 
+/**
+ * The captured keys that carry the delivery date into the project's `due_on`, so it shows in
+ * the calendar and the project list. `fecha_de_entrega` is the key the format builder makes
+ * from the name "Fecha de entrega"; `fecha_entrega` is the one the first formats used.
+ */
+const DUE_DATE_KEYS = ["fecha_entrega", "fecha_de_entrega"];
+
 class Requests {
   /**
    * Captures a request (RF-SOL-08: what arrives by email is registered here so one channel
@@ -41,6 +49,8 @@ class Requests {
    * @param {number} [input.schemaVersionId] Or a version directly, for a client that has one.
    * @param {string} input.title
    * @param {object} [input.data] The capture, coerced against the version's fields.
+   * @param {{ formLinkId?: number|null, documentsLater?: boolean, publicOnly?: boolean }} [intake]
+   *   Set by routes, not a body. `publicOnly` drops and skips the fields staff fill (`internal`).
    * @returns {Promise<object>} The request as `getById()` shapes it.
    * @throws {ApiError} 400 on a bad payload or a value that will not coerce, 404 on an unknown
    *   format.
@@ -49,11 +59,20 @@ class Requests {
     schemaId = null, schemaVersionId = null, title, data = {}, requester = null,
     areaId = null, statusId = null, assigneeId = null, priority = 0, source = "manual",
     folderId = null,
-  }) {
+  }, { formLinkId = null, documentsLater = false, publicOnly = false } = {}) {
     const version = await this.#resolveVersion({ schemaId, schemaVersionId });
     const cleanSource = requireSource(source);
 
-    const capture = validateData(fieldList(version.fields), data, { strict: true });
+    const internal = new Set(
+      fieldList(version.fields).filter((field) => field.internal).map((field) => field.code),
+    );
+    const fields = fieldList(version.fields).map((field) =>
+      (documentsLater && field.type === "document") || (publicOnly && internal.has(field.code))
+        ? { ...field, required: false }
+        : field,
+    );
+    const answers = publicOnly ? withoutKeys(data, internal) : data;
+    const capture = validateData(fields, answers, { strict: true });
     if (capture.errors.length > 0) throw badCapture(capture.errors);
 
     const payload = {
@@ -68,6 +87,7 @@ class Requests {
       folderId: optionalId(folderId, "folderId"),
       statusId: await this.#resolveStatus(statusId),
       createdBy: currentActor()?.id ?? null,
+      formLinkId,
     };
 
     let row;
@@ -85,6 +105,37 @@ class Requests {
 
     const shaped = await this.getById(row.id);
     return capture.warnings.length > 0 ? { ...shaped, warnings: capture.warnings } : shaped;
+  }
+
+  /**
+   * Stores a file in the request's folder as the value of a `document` field (RF-SOL-06). A second
+   * file for the same field replaces the value and keeps the first file.
+   *
+   * @param {{name: string, mime?: string|null, body: import('node:stream').Readable}} file
+   * @throws {ApiError} 400 on a field that is not a `document` field, 404, and upload()'s.
+   */
+  async attachFile(requestId, fieldCode, file, { publicOnly = false } = {}) {
+    const row = await query.getRequest(requireId(requestId, "requestId"));
+    if (!row) throw ApiError.notFound("Request not found.");
+
+    const field = fieldList(row.schema_fields).find((entry) => entry.code === fieldCode);
+    if (!field || field.type !== "document" || (publicOnly && field.internal)) {
+      throw ApiError.badRequest("field must name a document field of this request's format.");
+    }
+
+    const folderId = await documents.ensureRequestFolder({
+      id: row.id, folio: row.folio, folderId: row.folder_id,
+    });
+    const stored = await documents.upload(folderId, file);
+    await query.setRequestDataKey(row.id, field.code, String(stored.id));
+
+    await events.emit({
+      action: "record_updated",
+      target: { table: "requests", id: row.id },
+      before: { data: row.data },
+      after: { data: { ...row.data, [field.code]: String(stored.id) } },
+    });
+    return this.getById(row.id);
   }
 
   /** @throws {ApiError} 404 */
@@ -358,7 +409,8 @@ class Requests {
    *
    * @param {number} requestId
    * @param {object} [input] `key`, `title`, `requester`, `stages`, `requestIds` and the project
-   *   flags; anything omitted is taken from the request.
+   *   flags; anything omitted is taken from the request. Without `dueOn`, the captured
+   *   delivery date becomes the project's (DUE_DATE_KEYS).
    * @returns {Promise<{project: object, conflicts: object[], discardedFlows: string[]}>}
    * @throws {ApiError} 400 on stages for a request with a flow, 404, 409 when it is already
    *   converted or still missing a required value.
@@ -429,7 +481,7 @@ class Requests {
       hasCost: input.hasCost ?? false,
       carriedOver: input.carriedOver ?? false,
       startsOn: input.startsOn ?? null,
-      dueOn: input.dueOn ?? null,
+      dueOn: input.dueOn ?? capturedDueDate(fieldValues),
       stages,
       fieldValues,
       requestIds: all.map((row) => row.id),
@@ -486,6 +538,14 @@ class Requests {
   }
 }
 
+/** The first captured delivery date, as YYYY-MM-DD, or null. */
+function capturedDueDate(fieldValues) {
+  const found = fieldValues.find(
+    (one) => DUE_DATE_KEYS.includes(one.key) && /^\d{4}-\d{2}-\d{2}/.test(one.value),
+  );
+  return found ? found.value.slice(0, 10) : null;
+}
+
 /**
  * Every captured value of every request, as field values for the project. First request wins a
  * repeated key; the losers are reported so a conversion does not quietly pick one.
@@ -517,6 +577,12 @@ function mergeCaptures(requests) {
   }
 
   return { fieldValues, conflicts };
+}
+
+/** `data` without the keys in `keys`, or `data` itself when it is not an object. */
+function withoutKeys(data, keys) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  return Object.fromEntries(Object.entries(data).filter(([key]) => !keys.has(key)));
 }
 
 /**

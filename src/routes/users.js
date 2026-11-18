@@ -4,7 +4,7 @@ import express, { Router } from 'express';
 
 import users, { PICTURE_TYPES } from '../access/orchestration/users.js';
 import auth from '../access/orchestration/auth.js';
-import { authenticate, requireRole } from '../middlewares/auth.js';
+import { authenticate, requirePermission, requireRole } from '../middlewares/auth.js';
 import { idParam } from '../utils/params.js';
 
 const router = Router();
@@ -47,6 +47,10 @@ router.get('/:id', async (req, res) => {
 router.get('/:id/picture', async (req, res) => {
   const { data, mime } = await users.getPicture(userId(req));
   res.type(mime).send(data);
+});
+
+router.put('/:id/role', requirePermission('user.role'), async (req, res) => {
+  res.json({ user: await users.setRole(userId(req), req.body?.roleId, req.user) });
 });
 
 router.use(requireRole('admin'));

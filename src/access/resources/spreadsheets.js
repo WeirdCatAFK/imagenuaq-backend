@@ -1,7 +1,7 @@
 // Reads a workbook's shape from Graph (tables, worksheets, header row) and returns plain
 // objects. The only module that knows Graph's paths; it handles both Excel tables and plain
 // worksheets.
-import { graphGet } from "../primitives/microsoftGraph.js";
+import { graphGet, graphSend } from "../primitives/microsoftGraph.js";
 
 /**
  * How many body rows a preview carries under the header row: enough to recognise the
@@ -182,6 +182,60 @@ export async function readAllRows(accessToken, driveId, itemId, tableName) {
     texts: texts.slice(1, 1 + MAX_ROWS),
     truncated: values.length - 1 > MAX_ROWS,
   };
+}
+
+/**
+ * Adds one row, in header order, at the bottom of a table or under a worksheet's used range
+ * (RF-MIG-01). A null `tableName` means the first worksheet.
+ *
+ * @returns {Promise<boolean>} False when no table or worksheet has that name.
+ * @throws {GraphError} whatever Graph refuses, a 403 when the account only consented to read.
+ */
+export async function appendRow(accessToken, driveId, itemId, tableName, values) {
+  const target = await resolveTarget(accessToken, driveId, itemId, tableName);
+  if (target === null) return false;
+
+  const base = workbook(driveId, itemId);
+
+  if (target.kind === "table") {
+    await graphSend(accessToken, "POST", `${base}/tables/${encodeURIComponent(target.name)}/rows`, {
+      values: [values],
+    });
+    return true;
+  }
+
+  const sheetPath = `${base}/worksheets/${encodeURIComponent(target.name)}`;
+  const used = await graphGet(accessToken, `${sheetPath}/usedRange?$select=address`);
+  const { column, lastRow } = parseAddress(used.address);
+  const first = columnNumber(column);
+  const address = `${column}${lastRow + 1}:${columnLetters(first + values.length - 1)}${lastRow + 1}`;
+
+  await graphSend(accessToken, "PATCH", `${sheetPath}/range(address='${address}')`, {
+    values: [values],
+  });
+  return true;
+}
+
+/** `Hoja1!B1:F20` (or `'Mi hoja'!B1`) to its first column letters and its last row number. */
+function parseAddress(address) {
+  const range = String(address ?? "").split("!").pop();
+  const [start, end = start] = range.split(":");
+  return {
+    column: start.match(/^[A-Z]+/)?.[0] ?? "A",
+    lastRow: Number(end.match(/\d+$/)?.[0] ?? 0),
+  };
+}
+
+function columnNumber(letters) {
+  return [...letters].reduce((n, letter) => n * 26 + letter.charCodeAt(0) - 64, 0);
+}
+
+function columnLetters(n) {
+  let letters = "";
+  for (let rest = n; rest > 0; rest = Math.floor((rest - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((rest - 1) % 26)) + letters;
+  }
+  return letters;
 }
 
 /**

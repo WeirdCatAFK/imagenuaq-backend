@@ -310,7 +310,7 @@ A grant opens whatever `requirePermission()` guards. The rule for where that goe
 one code per router block, not per endpoint. Each router has a read block and a write
 block, each behind one `router.use()`. `resource.read` and `resource.write` are the whole
 vocabulary for a resource. A third code appears only where a requirement forces one slice
-of a router to answer differently (`absence.reason.read`, `RF-AUS-13`), on those routes
+of a router to answer differently (`absence.read_detail`, `RF-AUS-13`), on those routes
 alone.
 
 Which *records* a person may touch is not a permission. That is their area and the

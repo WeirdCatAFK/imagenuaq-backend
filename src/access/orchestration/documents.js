@@ -482,6 +482,31 @@ class Documents {
     return folderId;
   }
 
+  /**
+   * The folder that holds a request's files, named by its folio and owned by the caller, created
+   * the first time a file arrives. When two uploads race, each creates one and the loser deletes
+   * its own, as ensureProjectFolder() does.
+   *
+   * @param {{id: number, folio: string, folderId: number|null}} request
+   * @returns {Promise<number>} The request's folder id.
+   */
+  async ensureRequestFolder(request) {
+    if (request.folderId != null) return request.folderId;
+
+    const folder = await query.createFolder({
+      parentId: null,
+      name: request.folio,
+      ownerId: currentActor().id,
+    });
+    const folderId = await query.setRequestFolder(request.id, folder.id);
+    if (String(folderId) !== String(folder.id)) {
+      await query.deleteFolder(folder.id);
+    } else {
+      await events.emit({ action: "record_created", target: { table: "folders", id: folder.id }, after: folder });
+    }
+    return folderId;
+  }
+
   /** How many months a file lives once its project ends, or since upload outside any project. */
   async getRetention() {
     return shapeRetention(await query.getRetention());

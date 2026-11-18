@@ -290,6 +290,41 @@ class Users {
   }
 
   /**
+   * Changes a person's role, under `user.role` (RF-USR-02). Nobody changes their own role. Only
+   * an admin gives the admin role or takes it away, so the permission cannot grow into admin.
+   *
+   * @param {{ id: number, role: string }} actor The session's user.
+   * @throws {ApiError} 400 on the actor's own account, 403 on the admin role from a non-admin, 404.
+   */
+  async setRole(userId, roleId, actor) {
+    const id = requireId(userId, "userId");
+    const role = await query.getRoleById(requireId(roleId, "roleId"));
+    if (!role) throw ApiError.badRequest("Unknown roleId.");
+    if (id === Number(actor.id)) throw ApiError.badRequest("You cannot change your own role.");
+
+    const current = await query.getUser(id);
+    if (!current) throw ApiError.notFound("User not found.");
+
+    const asAdmin = actor.role === "admin";
+    const currentRole = await query.getRoleById(current.role_id);
+    if (!asAdmin && (role.name === "admin" || currentRole?.name === "admin")) {
+      throw ApiError.forbidden("Only an admin gives or removes the admin role.");
+    }
+
+    const row = await query.setUserRole(id, role.id);
+    if (!row) throw ApiError.notFound("User not found.");
+
+    await events.emit({
+      action: "record_updated",
+      target: { table: "users", id },
+      before: auditable(current),
+      after: auditable(row),
+    });
+
+    return shapeUser({ ...row, role_name: role.name }, asAdmin);
+  }
+
+  /**
    * Soft-deletes an account. query.deleteUser() bumps `token_version` in the same
    * statement, so the person's outstanding tokens stop working at the same instant the
    * row is marked rather than at some point after it.

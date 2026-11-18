@@ -394,7 +394,8 @@ class Projects {
    * none there. The same area twice in one phase is two stages -- a proposal and its internal
    * review, say; a rerun only ever comes from a rejected sign-off.
    *
-   * @throws {ApiError} 400 on a bad payload or unknown area/user, 404.
+   * @throws {ApiError} 400 on a bad payload or unknown area/user, 404. 409 on a closed project.
+   *   A pending stage there would put open work inside finished work.
    */
   async addStage(projectId, {
     areaId, title, seq = 1, status = "pending", assignedTo = null, inputs = [], outputs = [],
@@ -403,6 +404,7 @@ class Projects {
     const id = requireId(projectId, "projectId");
     const project = await query.getProject(id);
     if (!project) throw ApiError.notFound("Project not found.");
+    if (project.closed_at) throw ApiError.conflict("Project is closed.");
 
     const state = requireStageStatus(status);
     if (state === "waiting_external") {

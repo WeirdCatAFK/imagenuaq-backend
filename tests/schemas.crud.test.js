@@ -83,6 +83,22 @@ describe('/api/schemas', () => {
       assert.equal(schema.fields.information[0].code, 'dependencia');
     });
 
+    test('a text block keeps its place, captures nothing and stays out of the vocabulary', async () => {
+      const block = { kind: 'text', title: ' Antes de pedir ', text: ' El tiraje mínimo es 100. ' };
+      const res = await create({
+        code: `${TEST_SCHEMA_PREFIX}texto`, name: 'Texto',
+        fields: withSection('information', [block, ...FIELDS.information]),
+      });
+
+      assert.equal(res.status, 201);
+      const [first, second] = res.body.schema.fields.information;
+      assert.deepEqual(first, { kind: 'text', title: 'Antes de pedir', text: 'El tiraje mínimo es 100.' });
+      assert.equal(second.code, 'dependencia');
+
+      const keys = await server.get('/api/schemas/field-keys', { token: adminToken });
+      assert.ok(keys.body.fieldKeys.every((entry) => entry.key !== null && entry.key !== undefined));
+    });
+
     test('the publisher is the session, whatever the body says', async () => {
       const res = await create({
         code: `${TEST_SCHEMA_PREFIX}quien`, name: 'Quién', fields: FIELDS, publishedBy: 999999,
@@ -114,6 +130,8 @@ describe('/api/schemas', () => {
       ['an uppercase code', withSection('information', [{ code: 'Dependencia', name: 'X', type: 'text' }]), /snake_case/],
       ['an unknown type', withSection('information', [{ code: 'x', name: 'X', type: 'moneda' }]), /does not exist/],
       ['a non-boolean required', withSection('information', [{ code: 'x', name: 'X', type: 'text', required: 'si' }]), /required must be a boolean/],
+      ['a non-boolean internal', withSection('information', [{ code: 'x', name: 'X', type: 'text', internal: 'si' }]), /internal must be a boolean/],
+      ['an internal field marked required', withSection('information', [{ code: 'x', name: 'X', type: 'text', internal: true, required: true }]), /internal, so it cannot be required/],
       ['a note that is not a string', withSection('information', [{ code: 'x', name: 'X', type: 'text', note: 5 }]), /note must be a string/],
       ['no name', withSection('information', [{ code: 'x', name: ' ', type: 'text' }]), /must have a name/],
       ['a field that is not an object', withSection('information', ['dependencia']), /must be an object/],
@@ -122,6 +140,8 @@ describe('/api/schemas', () => {
       ['a section that is not an array', { deliverables: {}, information: [] }, /"deliverables" is required and must be an array/],
       ['an unknown section', { ...FIELDS, extras: [] }, /Unknown section "extras"/],
       ['both sections empty', { deliverables: [], information: [] }, /at least one field/],
+      ['only text blocks', { deliverables: [], information: [{ kind: 'text', title: 'Nota', text: 'Lee esto.' }] }, /at least one field/],
+      ['a text block without text', withSection('information', [{ kind: 'text', title: 'Nota', text: ' ' }, ...FIELDS.information]), /needs its text/],
     ];
 
     for (const [label, fields, message] of BAD_FIELDS) {

@@ -25,6 +25,13 @@ const NAME_MAX = 300;
  */
 const FIELD_CODE = /^[a-z][a-z0-9_]{0,99}$/;
 
+/** The longest answer a `choice` field may offer: a label, not a paragraph. */
+const CHOICE_MAX = 200;
+
+/** The longest heading and text a text block may carry. */
+const TEXT_TITLE_MAX = 200;
+const TEXT_BODY_MAX = 2000;
+
 /** The two section keys, in the order a form renders them. */
 export const SECTIONS = ["deliverables", "information"];
 
@@ -266,9 +273,12 @@ function publisher() {
 /**
  * Checks a `fields` document and returns it cleaned up (trimmed strings, `note` and `required`
  * filled in). The shape is `{ deliverables: [...], information: [...] }`, each field
- * `{ code, name, type, note, required }`: deliverables are what the area produces, information
- * what the requester states, and `type` is a `data_types.code`. Sections are arrays, not objects
- * keyed by code, because jsonb reorders object keys and capture order would be lost.
+ * `{ code, name, type, note, required, internal }`: deliverables are what is asked to be produced,
+ * information what the requester states, and `type` is a `data_types.code`. An `internal` field is
+ * staff-only data the requester's form never shows, so it cannot be `required`. A section may also
+ * hold text blocks, `{ kind: "text", title, text }`, which explain and capture nothing. Sections
+ * are arrays, not objects keyed by code, because jsonb reorders object keys and capture order
+ * would be lost.
  *
  * @param {{ deliverables: object[], information: object[] }} fields
  * @returns {Promise<{ deliverables: object[], information: object[] }>}
@@ -301,7 +311,7 @@ export async function validateFields(fields, vocabulary = null) {
     }
   }
 
-  if (SECTIONS.every((section) => fields[section].length === 0)) {
+  if (SECTIONS.every((section) => fields[section].every(isTextBlock))) {
     throw ApiError.badRequest("A format must define at least one field.");
   }
 
@@ -310,7 +320,11 @@ export async function validateFields(fields, vocabulary = null) {
 
   for (const section of SECTIONS) {
     for (const field of fields[section]) {
-      out[section].push(await validateField(field, section, seen, known));
+      out[section].push(
+        isTextBlock(field)
+          ? validateTextBlock(field, section)
+          : await validateField(field, section, seen, known),
+      );
     }
   }
 
@@ -346,6 +360,31 @@ function keyFromName(name) {
 async function fieldVocabulary() {
   const rows = await query.listFieldKeys();
   return new Map(rows.map((row) => [row.key, row]));
+}
+
+/** Whether a section entry is a text block rather than a field. */
+function isTextBlock(entry) {
+  return entry !== null && typeof entry === "object" && entry.kind === "text";
+}
+
+/**
+ * A text block: an optional heading and the text it explains with. It has no code and no value.
+ *
+ * @throws {ApiError} 400 on a missing text, or a heading or text over its length.
+ */
+function validateTextBlock(block, section) {
+  const title = typeof block.title === "string" ? block.title.trim() : "";
+  const text = typeof block.text === "string" ? block.text.trim() : "";
+  if (text === "") {
+    throw ApiError.badRequest(`A text block in "${section}" needs its text.`);
+  }
+  if (title.length > TEXT_TITLE_MAX || text.length > TEXT_BODY_MAX) {
+    throw ApiError.badRequest(
+      `A text block in "${section}" is too long: ${TEXT_TITLE_MAX} characters for the heading, ` +
+        `${TEXT_BODY_MAX} for the text.`,
+    );
+  }
+  return { kind: "text", title, text };
 }
 
 /** One field of one section. @throws {ApiError} 400. */
@@ -395,26 +434,58 @@ async function validateField(field, section, seen, known) {
     );
   }
 
-  return {
+  if (field.internal !== undefined && typeof field.internal !== "boolean") {
+    throw ApiError.badRequest(`Field "${code}" internal must be a boolean.`);
+  }
+  if (field.internal === true && field.required === true) {
+    throw ApiError.badRequest(
+      `Field "${code}" is internal, so it cannot be required: the requester never sees it.`,
+    );
+  }
+
+  const shaped = {
     code,
     name,
     type,
     note: (field.note ?? "").trim(),
     required: field.required ?? false,
+    ...(field.internal ? { internal: true } : {}),
   };
+  if (type !== "choice") {
+    if (field.choices !== undefined && field.choices !== null) {
+      throw ApiError.badRequest(`Field "${code}" has choices, but only a "choice" field takes them.`);
+    }
+    return shaped;
+  }
+
+  const choices = Array.isArray(field.choices)
+    ? [...new Set(field.choices.map((entry) => (typeof entry === "string" ? entry.trim() : "")))]
+    : [];
+  if (choices.length === 0 || choices.includes("")) {
+    throw ApiError.badRequest(`Field "${code}" needs a list of choices, none of them empty.`);
+  }
+  if (choices.some((entry) => entry.length > CHOICE_MAX)) {
+    throw ApiError.badRequest(`Field "${code}" has a choice longer than ${CHOICE_MAX} characters.`);
+  }
+  if (field.multiple !== undefined && typeof field.multiple !== "boolean") {
+    throw ApiError.badRequest(`Field "${code}" multiple must be a boolean.`);
+  }
+  return { ...shaped, choices, multiple: field.multiple ?? false };
 }
 
 /**
- * Both sections as one list, each field carrying the `section` it came from. What the
- * validators, the column map and the convert step want: they care about the codes, not
- * about how a form groups them.
+ * Both sections as one list, each field carrying the `section` it came from, without the text
+ * blocks. What the validators, the column map and the convert step want: they care about the
+ * codes, not about how a form groups them.
  *
  * @param {{ deliverables: object[], information: object[] }} fields
  * @returns {object[]}
  */
 export function fieldList(fields) {
   return SECTIONS.flatMap((section) =>
-    (fields?.[section] ?? []).map((field) => ({ ...field, section })),
+    (fields?.[section] ?? [])
+      .filter((field) => !isTextBlock(field))
+      .map((field) => ({ ...field, section })),
   );
 }
 
@@ -431,7 +502,9 @@ async function baseTypes() {
 function withBaseTypes(fields, types) {
   if (!fields) return fields ?? null;
   const decorate = (list) =>
-    (list ?? []).map((field) => ({ ...field, baseType: types.get(field.type) ?? null }));
+    (list ?? []).map((field) =>
+      isTextBlock(field) ? field : { ...field, baseType: types.get(field.type) ?? null },
+    );
   return { deliverables: decorate(fields.deliverables), information: decorate(fields.information) };
 }
 
@@ -451,6 +524,7 @@ function shapeSchema(row, types) {
     schemaVersionId: row.schema_version_id ?? null,
     requestCount: row.request_count ?? 0,
     sheetCount: row.sheet_count ?? 0,
+    linkCount: row.link_count ?? 0,
   };
 }
 
