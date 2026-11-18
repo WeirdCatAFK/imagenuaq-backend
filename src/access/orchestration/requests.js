@@ -32,6 +32,13 @@ const DEFAULT_STATUS = "recibido";
 /** What a client may claim about how a request arrived. `sheet` belongs to the import. */
 const SOURCES = ["manual", "form", "email"];
 
+/**
+ * The captured keys that carry the delivery date into the project's `due_on`, so it shows in
+ * the calendar and the project list. `fecha_de_entrega` is the key the format builder makes
+ * from the name "Fecha de entrega"; `fecha_entrega` is the one the first formats used.
+ */
+const DUE_DATE_KEYS = ["fecha_entrega", "fecha_de_entrega"];
+
 class Requests {
   /**
    * Captures a request (RF-SOL-08: what arrives by email is registered here so one channel
@@ -402,7 +409,8 @@ class Requests {
    *
    * @param {number} requestId
    * @param {object} [input] `key`, `title`, `requester`, `stages`, `requestIds` and the project
-   *   flags; anything omitted is taken from the request.
+   *   flags; anything omitted is taken from the request. Without `dueOn`, the captured
+   *   delivery date becomes the project's (DUE_DATE_KEYS).
    * @returns {Promise<{project: object, conflicts: object[], discardedFlows: string[]}>}
    * @throws {ApiError} 400 on stages for a request with a flow, 404, 409 when it is already
    *   converted or still missing a required value.
@@ -473,7 +481,7 @@ class Requests {
       hasCost: input.hasCost ?? false,
       carriedOver: input.carriedOver ?? false,
       startsOn: input.startsOn ?? null,
-      dueOn: input.dueOn ?? null,
+      dueOn: input.dueOn ?? capturedDueDate(fieldValues),
       stages,
       fieldValues,
       requestIds: all.map((row) => row.id),
@@ -528,6 +536,14 @@ class Requests {
     }
     return fallback.id;
   }
+}
+
+/** The first captured delivery date, as YYYY-MM-DD, or null. */
+function capturedDueDate(fieldValues) {
+  const found = fieldValues.find(
+    (one) => DUE_DATE_KEYS.includes(one.key) && /^\d{4}-\d{2}-\d{2}/.test(one.value),
+  );
+  return found ? found.value.slice(0, 10) : null;
 }
 
 /**

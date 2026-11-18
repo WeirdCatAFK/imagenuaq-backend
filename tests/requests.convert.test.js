@@ -124,6 +124,7 @@ describe("POST /api/requests/:id/convert", () => {
       [["descripcion", "Hojas"], ["fecha_entrega", "2026-03-15"], ["tiraje", "1000"], ["urgente", "true"]],
     );
     assert.ok(project.fieldValues.every((v) => v.producedByStageId === null));
+    assert.equal(project.dueOn, "2026-03-15", "the captured delivery date becomes the due date");
 
     assert.deepEqual(project.requests.map((r) => r.folio), [made.folio]);
     const read = await server.get(`/api/requests/${made.id}`, { token: adminToken });
@@ -145,6 +146,7 @@ describe("POST /api/requests/:id/convert", () => {
       ["descripcion", "tiraje"],
       "fecha_entrega and urgente were never captured, so they are absent",
     );
+    assert.equal(res.body.project.dueOn, null);
   });
 
   test("the conversion may override the key, title and requester", async () => {
