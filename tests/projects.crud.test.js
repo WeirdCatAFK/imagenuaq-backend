@@ -409,6 +409,12 @@ describe("/api/projects", () => {
       assert.equal(closed.status, 200);
       assert.ok(closed.body.project.closedAt);
       assert.equal((await server.post(`/api/projects/${made.id}/close`, { token: adminToken })).status, 409);
+
+      const late = await server.post(`/api/projects/${made.id}/stages`, {
+        token: adminToken,
+        body: { areaId: area.id, title: "Tardía" },
+      });
+      assert.equal(late.status, 409);
     });
 
     test("a blocked stage also blocks closing", async () => {
