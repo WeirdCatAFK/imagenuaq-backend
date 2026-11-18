@@ -83,6 +83,22 @@ describe('/api/schemas', () => {
       assert.equal(schema.fields.information[0].code, 'dependencia');
     });
 
+    test('a text block keeps its place, captures nothing and stays out of the vocabulary', async () => {
+      const block = { kind: 'text', title: ' Antes de pedir ', text: ' El tiraje mínimo es 100. ' };
+      const res = await create({
+        code: `${TEST_SCHEMA_PREFIX}texto`, name: 'Texto',
+        fields: withSection('information', [block, ...FIELDS.information]),
+      });
+
+      assert.equal(res.status, 201);
+      const [first, second] = res.body.schema.fields.information;
+      assert.deepEqual(first, { kind: 'text', title: 'Antes de pedir', text: 'El tiraje mínimo es 100.' });
+      assert.equal(second.code, 'dependencia');
+
+      const keys = await server.get('/api/schemas/field-keys', { token: adminToken });
+      assert.ok(keys.body.fieldKeys.every((entry) => entry.key !== null && entry.key !== undefined));
+    });
+
     test('the publisher is the session, whatever the body says', async () => {
       const res = await create({
         code: `${TEST_SCHEMA_PREFIX}quien`, name: 'Quién', fields: FIELDS, publishedBy: 999999,
@@ -124,6 +140,8 @@ describe('/api/schemas', () => {
       ['a section that is not an array', { deliverables: {}, information: [] }, /"deliverables" is required and must be an array/],
       ['an unknown section', { ...FIELDS, extras: [] }, /Unknown section "extras"/],
       ['both sections empty', { deliverables: [], information: [] }, /at least one field/],
+      ['only text blocks', { deliverables: [], information: [{ kind: 'text', title: 'Nota', text: 'Lee esto.' }] }, /at least one field/],
+      ['a text block without text', withSection('information', [{ kind: 'text', title: 'Nota', text: ' ' }, ...FIELDS.information]), /needs its text/],
     ];
 
     for (const [label, fields, message] of BAD_FIELDS) {

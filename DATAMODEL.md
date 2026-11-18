@@ -983,6 +983,12 @@ Al terminar, `invertMapping()` corre el mapeo al revés. Solo las reglas `column
 sin terminar, lo escribe la tarea `form-write-back` cada cinco minutos. Escribir pide `Files.ReadWrite.All`: una cuenta que
 solo consintió leer se reconecta una vez.
 
+**Un texto aclara, no pregunta.** Una sección puede llevar bloques `{ kind: "text", title, text }`
+entre sus campos: un encabezado opcional y una aclaración que el formulario, la captura y la vista
+previa muestran en su lugar. No tienen clave ni valor, así que `fieldList()` los deja fuera y no
+llegan al mapeo, al Excel ni al proyecto. Un formato con solo textos se rechaza: necesita al menos un
+campo.
+
 **Lo que queda abierto.** La carpeta de la solicitud no pasa al proyecto al convertir. Los
 archivos siguen en la carpeta con el folio.
 
