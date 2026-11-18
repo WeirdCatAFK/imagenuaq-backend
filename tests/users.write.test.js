@@ -13,6 +13,9 @@ import {
   logsFor,
   tokenFor,
   contractTypeId,
+  grantPermissions,
+  roleId,
+  sql,
   PASSWORD,
 } from './helpers/fixtures.js';
 
@@ -206,6 +209,49 @@ describe('/api/users writes', () => {
       assert.equal(entry.before_data.full_name, 'Rodrigo Salas');
       assert.equal(entry.after_data.full_name, 'Rodrigo Salas Ruiz');
       assert.equal(entry.before_data.password_hash, '[redacted]');
+    });
+  });
+
+  describe('PUT /api/users/:id/role', () => {
+    const setRole = async (id, role, token) =>
+      server.put(`/api/users/${id}/role`, { token, body: { roleId: await roleId(role) } });
+
+    test('an admin promotes someone and the audit log keeps the old role', async () => {
+      const user = await someone();
+      const before = (await findUser(user.id)).role_id;
+
+      const res = await setRole(user.id, 'area_lead', adminToken);
+
+      assert.equal(res.status, 200);
+      assert.equal(res.body.user.role, 'area_lead');
+      const [entry] = (await logsFor('users', user.id)).filter(
+        (row) => row.action === 'record_updated',
+      );
+      assert.equal(Number(entry.before_data.role_id), Number(before));
+    });
+
+    test('without user.role it is 403', async () => {
+      const user = await someone();
+      assert.equal((await setRole(user.id, 'area_lead', workerToken)).status, 403);
+    });
+
+    test('nobody changes their own role', async () => {
+      const me = (await sql('select id from users where email = $1', [ACCOUNTS[0]]))[0];
+      assert.equal((await setRole(me.id, 'worker', adminToken)).status, 400);
+    });
+
+    test('a non-admin holder promotes, but never to or from admin', async () => {
+      await grantPermissions(server, adminToken, 'worker', ['user.role']);
+      try {
+        const user = await someone();
+        assert.equal((await setRole(user.id, 'area_lead', workerToken)).status, 200);
+        assert.equal((await setRole(user.id, 'admin', workerToken)).status, 403);
+
+        const me = (await sql('select id from users where email = $1', [ACCOUNTS[0]]))[0];
+        assert.equal((await setRole(me.id, 'worker', workerToken)).status, 403);
+      } finally {
+        await grantPermissions(server, adminToken, 'worker', []);
+      }
     });
   });
 

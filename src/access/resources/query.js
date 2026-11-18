@@ -481,6 +481,23 @@ class Query {
     );
     return row ?? null;
   }
+
+  /**
+   * Gives a live account another role. Permissions are read from the role on every request,
+   * so the change applies from the person's next call without ending the session.
+   *
+   * @returns {Promise<object | null>} The updated row, or null when there is no live account.
+   */
+  async setUserRole(userId, roleId) {
+    const [row] = await this.#rows(
+      `update users set role_id = $2
+        where id = $1 and deleted_at is null
+        returning *`,
+      [userId, roleId],
+    );
+    return row ?? null;
+  }
+
   /**
    * Soft-deletes an account and revokes its outstanding sessions in the same statement.
    *

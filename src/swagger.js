@@ -581,8 +581,8 @@ export function buildOpenApiDocument() {
           type: 'object',
           description:
             'Partial: only the keys present are changed, merged against the current row. ' +
-            'The role is deliberately absent -- changing what somebody may do belongs with ' +
-            'the role catalogue (RF-USR-02), not the profile form.',
+            'The role is deliberately absent: it changes through PUT /api/users/{id}/role, ' +
+            'under its own permission (RF-USR-02).',
           properties: {
             fullName: { type: 'string', maxLength: 200 },
             email: { type: 'string', format: 'email', maxLength: 320 },
@@ -3117,6 +3117,41 @@ export function buildOpenApiDocument() {
               'The account already has a password, so there is nothing to invite it to.',
               'This account is already active.',
             ),
+          },
+        },
+      },
+      '/api/users/{id}/role': {
+        put: {
+          tags: ['users'],
+          summary: "Change a person's role",
+          description:
+            'Needs `user.role` (RF-USR-02). Nobody changes their own role, and only an admin ' +
+            'gives or removes the admin role. The new permissions apply from the next request.',
+          parameters: [pathId('id', 'users.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['roleId'],
+                  properties: { roleId: { type: 'integer', minimum: 1 } },
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The person with the new role.', 'user', 'UserAdmin'),
+            400: errorResponse(
+              'A bad id, an unknown role, or the caller\'s own account.',
+              'You cannot change your own role.',
+            ),
+            401: UNAUTHORIZED,
+            403: errorResponse(
+              'Missing `user.role`, or a non-admin touching the admin role.',
+              'Only an admin gives or removes the admin role.',
+            ),
+            404: errorResponse('No such user.', 'User not found.'),
           },
         },
       },
