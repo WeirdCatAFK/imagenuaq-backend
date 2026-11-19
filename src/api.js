@@ -31,6 +31,8 @@ import vehiclesRouter from './routes/vehicles.js';
 import docsRouter from './routes/docs.js';
 import notificationsRouter from './routes/notifications.js';
 import formsRouter from './routes/forms.js';
+import photosRouter from './routes/photos.js';
+import photoAccessRouter from './routes/photoAccess.js';
 
 import { requestContext } from './middlewares/context.js';
 import { notFound } from './middlewares/notFound.js';
@@ -73,6 +75,8 @@ export const ROUTERS = {
   absences: absencesRouter,
   print: printRouter,
   vehicles: vehiclesRouter,
+  photos: photosRouter,
+  photo: photoAccessRouter,
   docs: docsRouter,
 
 };
@@ -82,7 +86,7 @@ export const ROUTERS = {
  * or uploading a .json file would store an empty one.
  */
 const RAW_BODY_ROUTES =
-  /^\/api\/(documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)|requests\/\d+\/files|forms\/[\w-]+\/files)(\?|$)/;
+  /^\/api\/(documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)|requests\/\d+\/files|forms\/[\w-]+\/files|photos\/folios\/\d+\/files|photos\/uploads\/[\w-]+\/\d+)(\?|$)/;
 
 export default class Api {
   /**

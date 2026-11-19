@@ -5927,6 +5927,295 @@ class Query {
       [from, to, areaId, userId],
     );
   }
+
+  async getPhotoRetention() {
+    const [row] = await this.#rows("select * from photo_retention");
+    return row;
+  }
+
+  async setPhotoRetention(days, userId) {
+    const [row] = await this.#rows(
+      `update photo_retention set days = $1, updated_by = $2, updated_at = now() returning *`,
+      [days, userId],
+    );
+    return row;
+  }
+
+  async listPhotoPackages() {
+    return this.#rows("select * from photo_packages order by is_active desc, price, name");
+  }
+
+  async getPhotoPackage(id) {
+    const [row] = await this.#rows("select * from photo_packages where id = $1", [id]);
+    return row ?? null;
+  }
+
+  async createPhotoPackage({ name, description, digitalCount, printCount, price, presalePrice }) {
+    const [row] = await this.#rows(
+      `insert into photo_packages (name, description, digital_count, print_count, price, presale_price)
+       values ($1, $2, $3, $4, $5, $6) returning *`,
+      [name, description, digitalCount, printCount, price, presalePrice],
+    );
+    return row;
+  }
+
+  /** A null field keeps its value. `clear` names `description` or `presalePrice` to set them to null. */
+  async updatePhotoPackage(id, { name, description, digitalCount, printCount, price, presalePrice, isActive, clear = [] }) {
+    const [row] = await this.#rows(
+      `update photo_packages
+          set name = coalesce($2::varchar, name),
+              description = case when 'description' = any($9::text[]) then null else coalesce($3::text, description) end,
+              digital_count = coalesce($4::integer, digital_count),
+              print_count = coalesce($5::integer, print_count),
+              price = coalesce($6::numeric, price),
+              presale_price = case when 'presalePrice' = any($9::text[]) then null else coalesce($7::numeric, presale_price) end,
+              is_active = coalesce($8::boolean, is_active)
+        where id = $1 returning *`,
+      [id, name, description, digitalCount, printCount, price, presalePrice, isActive, clear],
+    );
+    return row ?? null;
+  }
+
+  /** Every group, newest event first, with its folio count per status and its active packages. */
+  async listPhotoGroups() {
+    return this.#rows(
+      `select g.*,
+              (select count(*) from photo_folios f where f.group_id = g.id)::int as size,
+              (select coalesce(json_object_agg(s.status, s.n), '{}'::json)
+                 from (select status, count(*)::int as n from photo_folios f
+                        where f.group_id = g.id group by status) s) as by_status,
+              (select count(*) from photo_group_packages gp join photo_packages pk on pk.id = gp.package_id
+                where gp.group_id = g.id and pk.is_active)::int as active_packages
+         from photo_groups g
+        order by g.event_starts_at desc, g.id desc`,
+    );
+  }
+
+  /** The group with its size and the ids of the packages it offers. */
+  async getPhotoGroup(id) {
+    const [row] = await this.#rows(
+      `select g.*,
+              (select count(*) from photo_folios f where f.group_id = g.id)::int as size,
+              coalesce((select array_agg(gp.package_id order by gp.package_id)
+                          from photo_group_packages gp where gp.group_id = g.id), '{}') as package_ids
+         from photo_groups g where g.id = $1`,
+      [id],
+    );
+    return row ?? null;
+  }
+
+  /**
+   * Creates the group, its offered packages (every active one when `packageIds` is null) and one
+   * folio per hash, numbered 1..n in the order given. `downloadDays` null takes photo_retention's.
+   */
+  async createPhotoGroup({ name, code, startsAt, endsAt, presaleUntil, downloadDays, notes, createdBy, packageIds, hashes, sealed }) {
+    const [row] = await this.#rows(
+      `with g as (
+         insert into photo_groups (name, code, event_starts_at, event_ends_at, presale_until,
+                                   download_days, notes, created_by)
+         values ($1, $2, $3, $4, $5::timestamptz,
+                 coalesce($6::integer, (select days from photo_retention)), $7, $8)
+         returning id
+       ), p as (
+         insert into photo_group_packages (group_id, package_id)
+         select g.id, pk.id from g, photo_packages pk
+          where case when $9::bigint[] is null then pk.is_active else pk.id = any($9::bigint[]) end
+       ), f as (
+         insert into photo_folios (group_id, number, code_hash, code_enc)
+         select g.id, c.n, c.hash, c.enc
+           from g, unnest($10::text[], $11::bytea[]) with ordinality as c(hash, enc, n)
+       )
+       select id from g`,
+      [name, code, startsAt, endsAt, presaleUntil, downloadDays, notes, createdBy, packageIds, hashes, sealed],
+    );
+    return this.getPhotoGroup(row.id);
+  }
+
+  /**
+   * A null field keeps its value. `clear` names `presaleUntil` or `notes`. A new `downloadDays`
+   * moves `expires_at` of every folio whose photos are ready and not yet deleted.
+   * `packageIds` non-null replaces what the group offers.
+   */
+  async updatePhotoGroup(id, { name, startsAt, endsAt, presaleUntil, downloadDays, notes, closed, packageIds, clear = [] }) {
+    const rows = await this.#rows(
+      `with g as (
+         update photo_groups
+            set name = coalesce($2::varchar, name),
+                event_starts_at = coalesce($3::timestamptz, event_starts_at),
+                event_ends_at = coalesce($4::timestamptz, event_ends_at),
+                presale_until = case when 'presaleUntil' = any($10::text[]) then null
+                                     else coalesce($5::timestamptz, presale_until) end,
+                download_days = coalesce($6::integer, download_days),
+                notes = case when 'notes' = any($10::text[]) then null else coalesce($7::text, notes) end,
+                closed_at = case when $8::boolean is null then closed_at
+                                 when $8::boolean then coalesce(closed_at, now()) else null end
+          where id = $1
+          returning id, download_days
+       ), e as (
+         update photo_folios f
+            set expires_at = f.ready_at + make_interval(days => g.download_days)
+           from g
+          where $6::integer is not null and f.group_id = g.id
+            and f.ready_at is not null and f.files_expired_at is null
+       ), d as (
+         delete from photo_group_packages
+          where $9::bigint[] is not null and group_id in (select id from g)
+            and package_id <> all($9::bigint[])
+       ), p as (
+         insert into photo_group_packages (group_id, package_id)
+         select g.id, unnest($9::bigint[]) from g where $9::bigint[] is not null
+         on conflict do nothing
+       )
+       select id from g`,
+      [id, name, startsAt, endsAt, presaleUntil, downloadDays, notes, closed, packageIds, clear],
+    );
+    return rows.length > 0 ? this.getPhotoGroup(id) : null;
+  }
+
+  /** Appends one folio per hash after the group's highest number. */
+  async addPhotoFolios(groupId, hashes, sealed) {
+    return this.#rows(
+      `insert into photo_folios (group_id, number, code_hash, code_enc)
+       select $1, (select coalesce(max(number), 0) from photo_folios where group_id = $1) + c.n, c.hash, c.enc
+         from unnest($2::text[], $3::bytea[]) with ordinality as c(hash, enc, n)
+       returning id`,
+      [groupId, hashes, sealed],
+    );
+  }
+
+  /** The group's folios in number order, with the group code and how many live photos each has. */
+  async listPhotoFolios(groupId) {
+    return this.#rows(
+      `select f.*, g.code as group_code, g.name as group_name,
+              (select count(*) from photo_files pf where pf.folio_id = f.id and pf.kind = 'proof' and pf.deleted_at is null)::int as proof_count,
+              (select count(*) from photo_files pf where pf.folio_id = f.id and pf.kind = 'final' and pf.deleted_at is null)::int as final_count
+         from photo_folios f join photo_groups g on g.id = f.group_id
+        where f.group_id = $1
+        order by f.number`,
+      [groupId],
+    );
+  }
+
+  /** A folio with what the portal and the desk need of its group. Looked up by id or by code hash. */
+  async getPhotoFolio({ id = null, hash = null }) {
+    const [row] = await this.#rows(
+      `select f.*, g.code as group_code, g.name as group_name, g.event_starts_at, g.event_ends_at,
+              g.presale_until, g.download_days, g.closed_at as group_closed_at
+         from photo_folios f join photo_groups g on g.id = f.group_id
+        where ($1::bigint is not null and f.id = $1::bigint) or ($2::text is not null and f.code_hash = $2::text)`,
+      [id, hash],
+    );
+    return row ?? null;
+  }
+
+  /** The packages group `groupId` offers, active or not, cheapest first. */
+  async listGroupPhotoPackages(groupId) {
+    return this.#rows(
+      `select pk.* from photo_packages pk
+         join photo_group_packages gp on gp.package_id = pk.id
+        where gp.group_id = $1
+        order by pk.price, pk.name`,
+      [groupId],
+    );
+  }
+
+  /** Sets the given folio columns. It throws on a key outside PHOTO_FOLIO_COLUMNS. */
+  async updatePhotoFolio(id, fields) {
+    const keys = Object.keys(fields);
+    for (const key of keys) {
+      if (!PHOTO_FOLIO_COLUMNS.includes(key)) throw new Error(`Not a writable folio column: ${key}`);
+    }
+    if (keys.length === 0) return this.getPhotoFolio({ id });
+    const sets = keys.map((key, i) => `${key} = $${i + 2}`).join(", ");
+    const rows = await this.#rows(
+      `update photo_folios set ${sets} where id = $1 returning id`,
+      [id, ...keys.map((key) => fields[key])],
+    );
+    return rows.length > 0 ? this.getPhotoFolio({ id }) : null;
+  }
+
+  async insertPhotoFile({ folioId, kind, hash, previewHash, name, size, mime, uploadedBy }) {
+    const [row] = await this.#rows(
+      `insert into photo_files (folio_id, kind, hash, preview_hash, name, size, mime, uploaded_by)
+       values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
+      [folioId, kind, hash, previewHash, name, size, mime, uploadedBy],
+    );
+    return row;
+  }
+
+  /** The folio's live photos, oldest first, each with its download count. */
+  async listPhotoFiles(folioId) {
+    return this.#rows(
+      `select pf.*, (select count(*) from photo_downloads d where d.file_id = pf.id)::int as downloads
+         from photo_files pf
+        where pf.folio_id = $1 and pf.deleted_at is null
+        order by pf.kind, pf.created_at, pf.id`,
+      [folioId],
+    );
+  }
+
+  async getPhotoFile(id) {
+    const [row] = await this.#rows("select * from photo_files where id = $1 and deleted_at is null", [id]);
+    return row ?? null;
+  }
+
+  /** Marks exactly `fileIds` among the folio's live proofs as selected. */
+  async setPhotoSelection(folioId, fileIds) {
+    await this.#rows(
+      `update photo_files set selected = (id = any($2::bigint[]))
+        where folio_id = $1 and kind = 'proof' and deleted_at is null`,
+      [folioId, fileIds],
+    );
+  }
+
+  /** Soft-deletes one photo. @returns {Promise<object|null>} the row as it was. */
+  async deletePhotoFile(id) {
+    const [row] = await this.#rows(
+      `update photo_files set deleted_at = now() where id = $1 and deleted_at is null returning *`,
+      [id],
+    );
+    return row ?? null;
+  }
+
+  /** Whether a live photo still points at `hash`, as original or as preview. */
+  async photoHashInUse(hash) {
+    const [row] = await this.#rows(
+      `select exists (select 1 from photo_files
+                       where (hash = $1 or preview_hash = $1) and deleted_at is null) as used`,
+      [hash],
+    );
+    return row.used;
+  }
+
+  async insertPhotoDownload(fileId, ip) {
+    await this.#rows("insert into photo_downloads (file_id, ip) values ($1, $2::inet)", [fileId, ip]);
+  }
+
+  /**
+   * Marks every folio past `expires_at` as expired and soft-deletes its photos.
+   *
+   * @returns {Promise<Array<{folio_id: number, hash: string, preview_hash: string|null}>>} the photos.
+   */
+  async expirePhotoFolios(now) {
+    return this.#rows(
+      `with f as (
+         update photo_folios set files_expired_at = $1::timestamptz
+          where expires_at <= $1::timestamptz and files_expired_at is null
+          returning id
+       )
+       update photo_files pf set deleted_at = $1::timestamptz
+         from f where pf.folio_id = f.id and pf.deleted_at is null
+       returning pf.folio_id, pf.hash, pf.preview_hash`,
+      [now],
+    );
+  }
 }
+
+/** The photo_folios columns updatePhotoFolio() may set. */
+const PHOTO_FOLIO_COLUMNS = [
+  "status", "full_name", "email", "phone", "school_id", "registered_via", "registered_at",
+  "package_id", "package_name", "digital_count", "print_count", "amount", "caja_folio",
+  "paid_at", "paid_by", "selection_locked_at", "ready_at", "expires_at", "printed_at", "delivered_at",
+];
 
 export default new Query();
