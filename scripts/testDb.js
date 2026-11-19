@@ -73,10 +73,11 @@ if (result.status !== 0) {
 }
 
 /**
- * The test bucket, on the MinIO in .env, created if missing. The file cases store real bytes
- * there; nothing empties it, since content is keyed by hash and a rerun reuses it.
+ * The test buckets (documents and photos), on the MinIO in .env, created if missing. The file
+ * cases store real bytes there. Nothing empties them: the store keys content by hash, and a
+ * rerun reuses it.
  */
-const bucket = useTestBucket();
+const buckets = useTestBucket();
 const s3 = new S3Client({
   endpoint: process.env.MINIO_ENDPOINT,
   region: 'us-east-1',
@@ -88,15 +89,19 @@ const s3 = new S3Client({
 });
 
 try {
-  await s3.send(new CreateBucketCommand({ Bucket: bucket }));
-  console.log(`  Created bucket ${bucket}.`);
-} catch (err) {
-  if (err.name !== 'BucketAlreadyOwnedByYou' && err.name !== 'BucketAlreadyExists') {
-    console.error(
-      `\n  Cannot create bucket ${bucket} at ${process.env.MINIO_ENDPOINT}: ${err.message}\n` +
-        '  Is MinIO up? `docker compose up -d minio`\n',
-    );
-    process.exit(1);
+  for (const bucket of buckets) {
+    try {
+      await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+      console.log(`  Created bucket ${bucket}.`);
+    } catch (err) {
+      if (err.name !== 'BucketAlreadyOwnedByYou' && err.name !== 'BucketAlreadyExists') {
+        console.error(
+          `\n  Cannot create bucket ${bucket} at ${process.env.MINIO_ENDPOINT}: ${err.message}\n` +
+            '  Is MinIO up? `docker compose up -d minio`\n',
+        );
+        process.exit(1);
+      }
+    }
   }
 } finally {
   s3.destroy();

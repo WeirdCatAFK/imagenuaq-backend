@@ -40,6 +40,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (see .env.example)}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
       MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:?set MINIO_DOCUMENTS_BUCKET in .env (see .env.example)}
+      MINIO_PHOTOS_BUCKET: ${MINIO_PHOTOS_BUCKET:?set MINIO_PHOTOS_BUCKET in .env (see .env.example)}
     ports:
       - "${PORT:?set PORT in .env (see .env.example)}:${PORT:?set PORT in .env (see .env.example)}"
     # Wait for the healthchecks, not just for the containers to exist: main.js opens the pool
@@ -80,7 +81,7 @@ services:
       retries: 10
       start_period: 30s
 
-  # Runs once and exits: creates the documents bucket if it is missing (minio/init/setup.sh).
+  # Runs once and exits: creates the documents and photo buckets if missing and caps the photo one (minio/init/setup.sh).
   minio-init:
     image: quay.io/minio/aistor/mc:RELEASE.2026-09-06T02-44-40Z
     restart: "no"
@@ -91,6 +92,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env (see .env.example)}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
       MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:?set MINIO_DOCUMENTS_BUCKET in .env (see .env.example)}
+      MINIO_PHOTOS_BUCKET: ${MINIO_PHOTOS_BUCKET:?set MINIO_PHOTOS_BUCKET in .env (see .env.example)}
+      MINIO_PHOTOS_QUOTA: ${MINIO_PHOTOS_QUOTA:?set MINIO_PHOTOS_QUOTA in .env (see .env.example)}
     volumes:
       - ./minio/init/setup.sh:/setup.sh:ro
     entrypoint: ["/bin/sh", "/setup.sh"]

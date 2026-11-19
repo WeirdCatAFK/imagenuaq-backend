@@ -1,6 +1,6 @@
-// Stores file bytes in one MinIO bucket under `content/ab/cd/<sha256>`; it knows nothing about
-// names or folders. Stored bytes are never changed (new bytes, new key), and it never touches
-// the database: callers store the bytes first, then insert their `files` row.
+// Stores file bytes in MinIO under `content/ab/cd/<sha256>`, and never names, folders or rows: callers
+// store the bytes first, then insert their row. New bytes get a new key. The documents and photos
+// buckets stay apart, so a photo season can never fill the space the documents need.
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable, Transform, pipeline } from 'node:stream';
 import {
@@ -31,6 +31,7 @@ const REQUIRED_ENV = [
   'MINIO_ROOT_USER',
   'MINIO_ROOT_PASSWORD',
   'MINIO_DOCUMENTS_BUCKET',
+  'MINIO_PHOTOS_BUCKET',
 ];
 
 export class StorageError extends Error {
@@ -43,6 +44,18 @@ export class StorageError extends Error {
 
 let client = null;
 let bucket = null;
+let photosBucket = null;
+
+/**
+ * The bucket of `store`: `documents` (the default) or `photos`.
+ *
+ * @throws {StorageError} EBADSTORE on any other name.
+ */
+function bucketFor(store = 'documents') {
+  if (store === 'documents') return bucket;
+  if (store === 'photos') return photosBucket;
+  throw new StorageError(`Unknown store: ${store}`, 'EBADSTORE');
+}
 
 /** Whether an SDK error means "no such object or bucket" rather than a failure. */
 function isNotFound(error) {
@@ -75,10 +88,11 @@ export async function openStorage() {
     },
     forcePathStyle: true,
   });
-  const name = process.env.MINIO_DOCUMENTS_BUCKET;
+  const names = [process.env.MINIO_DOCUMENTS_BUCKET, process.env.MINIO_PHOTOS_BUCKET];
+  let name = names[0];
 
   try {
-    await candidate.send(new HeadBucketCommand({ Bucket: name }));
+    for (name of names) await candidate.send(new HeadBucketCommand({ Bucket: name }));
   } catch (cause) {
     candidate.destroy();
     throw isNotFound(cause)
@@ -96,7 +110,7 @@ export async function openStorage() {
   }
 
   client = candidate;
-  bucket = name;
+  [bucket, photosBucket] = names;
   return client;
 }
 
@@ -105,6 +119,7 @@ export function closeStorage() {
   client?.destroy();
   client = null;
   bucket = null;
+  photosBucket = null;
 }
 
 export const isOpen = () => client !== null;
@@ -117,9 +132,11 @@ function getClient() {
   return client;
 }
 
-/** Asks MinIO whether the bucket is still there, for the health check. */
+/** Asks MinIO whether both buckets are still there, for the health check. */
 export async function ping() {
-  await getClient().send(new HeadBucketCommand({ Bucket: bucket }));
+  for (const name of [bucket, photosBucket]) {
+    await getClient().send(new HeadBucketCommand({ Bucket: name }));
+  }
 }
 
 /**
@@ -172,13 +189,14 @@ function asStorageError(error) {
  * caller inserts its files row once this resolves.
  *
  * @param {Buffer|string|import('node:stream').Readable} source
- * @param {{maxBytes?: number|null}} [options]
+ * @param {{maxBytes?: number|null, store?: 'documents'|'photos'}} [options]
  * @returns {Promise<{hash: string, size: number, existed: boolean}>} `existed: true` means
- *   the content was already stored — the dedup path. The caller still inserts its row.
+ *   the content was already stored, the dedup path. The caller still inserts its row.
  * @throws {StorageError} ETOOLARGE past maxBytes; EIO when MinIO fails.
  */
-export async function putContent(source, { maxBytes = null } = {}) {
+export async function putContent(source, { maxBytes = null, store = 'documents' } = {}) {
   const s3 = getClient();
+  const bucket = bucketFor(store);
   const tmpKey = `${TMP_PREFIX}${randomUUID()}`;
   const readable =
     Buffer.isBuffer(source) || typeof source === 'string'
@@ -192,7 +210,7 @@ export async function putContent(source, { maxBytes = null } = {}) {
 
     const { hash, size } = gauge.result();
     const key = contentKey(hash);
-    const existed = (await statContent(hash)) !== null;
+    const existed = (await statContent(hash, store)) !== null;
 
     if (!existed) {
       await s3.send(
@@ -209,15 +227,21 @@ export async function putContent(source, { maxBytes = null } = {}) {
 }
 
 /**
- * Opens the content for reading, streamed rather than buffered.
+ * Opens the content for reading, streamed rather than buffered. With `range`, only bytes
+ * `start` to `end` (inclusive) come back, for downloads in pieces.
  *
+ * @param {{start: number, end: number}|null} [range]
  * @returns {Promise<{stream: import('node:stream').Readable, size: number}|null>} null when
  *   nothing is stored under the hash.
  */
-export async function readContent(hash) {
+export async function readContent(hash, store = 'documents', range = null) {
   try {
     const response = await getClient().send(
-      new GetObjectCommand({ Bucket: bucket, Key: contentKey(hash) }),
+      new GetObjectCommand({
+        Bucket: bucketFor(store),
+        Key: contentKey(hash),
+        ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
+      }),
     );
     return { stream: response.Body, size: response.ContentLength };
   } catch (error) {
@@ -227,10 +251,10 @@ export async function readContent(hash) {
 }
 
 /** @returns {Promise<{size: number}|null>} null when nothing is stored under the hash. */
-export async function statContent(hash) {
+export async function statContent(hash, store = 'documents') {
   try {
     const response = await getClient().send(
-      new HeadObjectCommand({ Bucket: bucket, Key: contentKey(hash) }),
+      new HeadObjectCommand({ Bucket: bucketFor(store), Key: contentKey(hash) }),
     );
     return { size: response.ContentLength };
   } catch (error) {
@@ -245,8 +269,9 @@ export async function statContent(hash) {
  *
  * @returns {Promise<{key: string, s3UploadId: string}>}
  */
-export async function beginMultipart() {
+export async function beginMultipart(store = 'documents') {
   const s3 = getClient();
+  const bucket = bucketFor(store);
   const key = `${TMP_PREFIX}${randomUUID()}`;
   try {
     const res = await s3.send(new CreateMultipartUploadCommand({ Bucket: bucket, Key: key }));
@@ -264,8 +289,9 @@ export async function beginMultipart() {
  * @param {number} partNumber 1-based. @param {import('node:stream').Readable} body
  * @returns {Promise<{etag: string, size: number}>}
  */
-export async function uploadPart(key, s3UploadId, partNumber, body) {
+export async function uploadPart(key, s3UploadId, partNumber, body, store = 'documents') {
   const s3 = getClient();
+  const bucket = bucketFor(store);
   const chunks = [];
   let size = 0;
   for await (const chunk of body) {
@@ -298,8 +324,9 @@ export async function uploadPart(key, s3UploadId, partNumber, body) {
  * @param {Array<{partNumber: number, etag: string}>} parts Ordered by partNumber.
  * @returns {Promise<{hash: string, size: number, existed: boolean}>}
  */
-export async function completeMultipart(key, s3UploadId, parts) {
+export async function completeMultipart(key, s3UploadId, parts, store = 'documents') {
   const s3 = getClient();
+  const bucket = bucketFor(store);
   try {
     await s3.send(
       new CompleteMultipartUploadCommand({
@@ -321,7 +348,7 @@ export async function completeMultipart(key, s3UploadId, parts) {
     }
     const hash = digest.digest('hex');
     const contentK = contentKey(hash);
-    const existed = (await statContent(hash)) !== null;
+    const existed = (await statContent(hash, store)) !== null;
 
     if (!existed) {
       await s3.send(
@@ -342,10 +369,10 @@ export async function completeMultipart(key, s3UploadId, parts) {
  * @param {string} key
  * @param {string} s3UploadId
  */
-export async function abortMultipart(key, s3UploadId) {
+export async function abortMultipart(key, s3UploadId, store = 'documents') {
   try {
     await getClient().send(
-      new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: s3UploadId }),
+      new AbortMultipartUploadCommand({ Bucket: bucketFor(store), Key: key, UploadId: s3UploadId }),
     );
   } catch {}
 }
@@ -356,10 +383,10 @@ export async function abortMultipart(key, s3UploadId) {
  * @returns {Promise<boolean>} Whether anything was removed, so a sweeper can tell
  *   "reclaimed" from "already gone" — S3 deletes report success either way.
  */
-export async function deleteContent(hash) {
-  if (!(await statContent(hash))) return false;
+export async function deleteContent(hash, store = 'documents') {
+  if (!(await statContent(hash, store))) return false;
   try {
-    await getClient().send(new DeleteObjectCommand({ Bucket: bucket, Key: contentKey(hash) }));
+    await getClient().send(new DeleteObjectCommand({ Bucket: bucketFor(store), Key: contentKey(hash) }));
     return true;
   } catch (error) {
     throw asStorageError(error);

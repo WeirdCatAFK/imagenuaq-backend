@@ -68,17 +68,25 @@ export function useTestDatabase() {
  */
 export const TEST_BUCKET = 'imagenuaq-test';
 
+/** The photo service's test bucket, apart from the documents one as in production. */
+export const TEST_PHOTOS_BUCKET = 'imagenuaq-photos-test';
+
 /**
- * Point the process at the test bucket before storage is opened. `localhost` becomes
+ * Point the process at the test buckets before anything opens storage. `localhost` becomes
  * 127.0.0.1 for the same IPv6-loopback reason as the database.
+ *
+ * @returns {string[]} The documents bucket, then the photos one.
  */
 export function useTestBucket() {
-  if (!TEST_BUCKET.endsWith('-test')) throw new Error(`Refusing to use bucket ${TEST_BUCKET}.`);
+  for (const name of [TEST_BUCKET, TEST_PHOTOS_BUCKET]) {
+    if (!name.endsWith('-test')) throw new Error(`Refusing to use bucket ${name}.`);
+  }
   process.env.MINIO_DOCUMENTS_BUCKET = TEST_BUCKET;
+  process.env.MINIO_PHOTOS_BUCKET = TEST_PHOTOS_BUCKET;
   if (process.env.MINIO_ENDPOINT) {
     const url = new URL(process.env.MINIO_ENDPOINT);
     if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
     process.env.MINIO_ENDPOINT = url.origin;
   }
-  return TEST_BUCKET;
+  return [TEST_BUCKET, TEST_PHOTOS_BUCKET];
 }
