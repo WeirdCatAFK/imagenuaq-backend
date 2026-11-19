@@ -991,6 +991,134 @@ Table "form_links" {
 CHECK form_links_hash_is_hex: token_hash ~ \'^[0-9a-f]{64}$\'::text'''
 }
 
+Table "photo_retention" {
+  "id" bool [pk, not null, default: true]
+  "days" int4 [not null, default: 30]
+  "updated_by" int8
+  "updated_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  Note: '''Una fila: cuántos días puede descargar sus fotos un folio desde que quedan listas. Lo copia cada grupo nuevo.
+CHECK photo_retention_days_positive: days > 0'''
+}
+
+Table "photo_packages" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(100) [unique, not null]
+  "description" text
+  "digital_count" int4 [not null]
+  "print_count" int4 [not null, default: 0]
+  "price" numeric(12,2) [not null]
+  "presale_price" numeric(12,2) [note: 'Precio antes del presale_until del grupo. NULL = sin precio de preventa.']
+  "is_active" bool [not null, default: true]
+  Note: '''Catálogo de precios del servicio de fotografía. Se retira con is_active = false, nunca se borra.
+CHECK photo_packages_counts: (digital_count > 0) AND (print_count >= 0)
+CHECK photo_packages_prices: (price >= (0)::numeric) AND ((presale_price IS NULL) OR (presale_price >= (0)::numeric))'''
+}
+
+Table "photo_groups" {
+  "id" int8 [pk, not null, increment]
+  "name" varchar(200) [not null]
+  "code" varchar(12) [unique, not null]
+  "event_id" int8 [unique]
+  "event_starts_at" timestamptz [not null]
+  "event_ends_at" timestamptz [not null]
+  "presale_until" timestamptz
+  "download_days" int4 [not null]
+  "notes" text
+  "created_by" int8 [not null]
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "closed_at" timestamptz
+  Note: '''Un grupo de la sesión de fotos. code es el prefijo con que se leen sus folios (B7-001).
+CHECK photo_groups_range: event_ends_at > event_starts_at
+CHECK photo_groups_code_shape: (code)::text ~ \'^[A-Z0-9]{1,12}$\'::text
+CHECK photo_groups_days_positive: download_days > 0'''
+}
+
+Table "photo_group_packages" {
+  "group_id" int8 [not null]
+  "package_id" int8 [not null]
+
+  Indexes {
+    (group_id, package_id) [pk, type: btree, name: "photo_group_packages_pkey"]
+  }
+  Note: 'Los paquetes del catálogo que ofrece un grupo.'
+}
+
+Table "photo_folios" {
+  "id" int8 [pk, not null, increment]
+  "group_id" int8 [not null]
+  "number" int4 [not null]
+  "code_hash" bpchar(64) [unique, not null]
+  "code_enc" bytea [not null]
+  "status" varchar(20) [not null, default: 'generated']
+  "full_name" varchar(200)
+  "email" varchar(254)
+  "phone" varchar(30)
+  "school_id" varchar(50)
+  "registered_via" varchar(10)
+  "registered_at" timestamptz
+  "package_id" int8
+  "package_name" varchar(100) [note: 'Copia del paquete al cobrar, con digital_count, print_count y amount: un cambio de precio no reescribe lo pagado.']
+  "digital_count" int4
+  "print_count" int4
+  "amount" numeric(12,2)
+  "caja_folio" varchar(100) [note: 'Folio del recibo de cajas, capturado a mano (RF-MIG-04).']
+  "paid_at" timestamptz
+  "paid_by" int8
+  "selection_locked_at" timestamptz
+  "ready_at" timestamptz
+  "expires_at" timestamptz [note: 'ready_at + download_days del grupo. Al pasar, las fotos se borran y files_expired_at queda puesto.']
+  "files_expired_at" timestamptz
+  "printed_at" timestamptz
+  "delivered_at" timestamptz
+
+  Indexes {
+    (group_id, number) [type: btree, unique, name: "photo_folios_number_unique"]
+    expires_at [type: btree, name: "idx_photo_folios_expires_at"]
+  }
+  Note: '''Un lugar de un grupo, con su hoja. El código es la credencial del cliente: se guarda su hash para buscar y cifrado para reimprimir.
+CHECK photo_folios_hash_is_hex: code_hash ~ \'^[0-9a-f]{64}$\'::text
+CHECK photo_folios_number_positive: number > 0
+CHECK photo_folios_status: (status)::text = ANY ((ARRAY[\'generated\'::character varying, \'registered\'::character varying, \'paid\'::character varying, \'proofs\'::character varying, \'selected\'::character varying, \'ready\'::character varying, \'printed\'::character varying, \'delivered\'::character varying])::text[])
+CHECK photo_folios_via: (registered_via IS NULL) OR ((registered_via)::text = ANY ((ARRAY[\'qr\'::character varying, \'manual\'::character varying])::text[]))
+CHECK photo_folios_amount: (amount IS NULL) OR (amount >= (0)::numeric)'''
+}
+
+Table "photo_files" {
+  "id" int8 [pk, not null, increment]
+  "folio_id" int8 [not null]
+  "kind" varchar(10) [not null]
+  "hash" bpchar(64) [not null]
+  "preview_hash" bpchar(64)
+  "name" varchar(255) [not null]
+  "size" int8 [not null]
+  "mime" varchar(255)
+  "selected" bool [not null, default: false]
+  "uploaded_by" int8
+  "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "deleted_at" timestamptz
+
+  Indexes {
+    folio_id [type: btree, name: "idx_photo_files_folio"]
+    hash [type: btree, name: "idx_photo_files_hash"]
+    preview_hash [type: btree, name: "idx_photo_files_preview_hash"]
+  }
+  Note: '''Fotos de un folio en el bucket de fotografía. proof: muestra que el cliente elige, solo se sirve su preview con marca de agua. final: editada, descargable hasta expires_at.
+CHECK photo_files_preview: ((kind)::text = \'proof\'::text) = (preview_hash IS NOT NULL)
+CHECK photo_files_kind: (kind)::text = ANY ((ARRAY[\'proof\'::character varying, \'final\'::character varying])::text[])'''
+}
+
+Table "photo_downloads" {
+  "id" int8 [pk, not null, increment]
+  "file_id" int8 [not null]
+  "downloaded_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
+  "ip" inet
+
+  Indexes {
+    file_id [type: btree, name: "idx_photo_downloads_file"]
+  }
+  Note: 'Cada descarga de una foto final: quién ya descargó.'
+}
+
 Ref "absence_status_history_changed_by_fkey":"users"."id" < "absence_status_history"."changed_by"
 
 Ref "absence_status_history_event_id_fkey":"absences"."event_id" < "absence_status_history"."event_id" [delete: cascade]
@@ -1126,6 +1254,28 @@ Ref "payments_proof_file_id_fkey":"files"."id" < "payments"."proof_file_id"
 Ref "payments_provider_id_fkey":"providers"."id" < "payments"."provider_id"
 
 Ref "period_closures_created_by_fkey":"users"."id" < "period_closures"."created_by" [delete: set null]
+
+Ref "photo_downloads_file_id_fkey":"photo_files"."id" < "photo_downloads"."file_id" [delete: cascade]
+
+Ref "photo_files_folio_id_fkey":"photo_folios"."id" < "photo_files"."folio_id" [delete: cascade]
+
+Ref "photo_files_uploaded_by_fkey":"users"."id" < "photo_files"."uploaded_by" [delete: set null]
+
+Ref "photo_folios_group_id_fkey":"photo_groups"."id" < "photo_folios"."group_id" [delete: cascade]
+
+Ref "photo_folios_package_id_fkey":"photo_packages"."id" < "photo_folios"."package_id"
+
+Ref "photo_folios_paid_by_fkey":"users"."id" < "photo_folios"."paid_by" [delete: set null]
+
+Ref "photo_group_packages_group_id_fkey":"photo_groups"."id" < "photo_group_packages"."group_id" [delete: cascade]
+
+Ref "photo_group_packages_package_id_fkey":"photo_packages"."id" < "photo_group_packages"."package_id"
+
+Ref "photo_groups_created_by_fkey":"users"."id" < "photo_groups"."created_by"
+
+Ref "photo_groups_event_id_fkey":"events"."id" < "photo_groups"."event_id" [delete: set null]
+
+Ref "photo_retention_updated_by_fkey":"users"."id" < "photo_retention"."updated_by" [delete: set null]
 
 Ref "print_orders_created_by_fkey":"users"."id" < "print_orders"."created_by"
 

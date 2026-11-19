@@ -57,6 +57,12 @@ export const TEST_STATUS_PREFIX = 'zztest_';
  * reference; a new table a test writes to belongs here in that order.
  */
 const UNSEEDED_TABLES = [
+  'photo_downloads',
+  'photo_files',
+  'photo_folios',
+  'photo_group_packages',
+  'photo_groups',
+  'photo_packages',
   'vehicle_bookings',
   'vehicles',
   'payments',
@@ -113,6 +119,7 @@ export async function resetCases(keepEmails = []) {
   );
   for (const table of UNSEEDED_TABLES) await sql(`delete from ${table}`);
   await sql('update file_retention set months = 6, updated_by = null');
+  await sql('update photo_retention set days = 30, updated_by = null');
   await sql('delete from statuses where area_id is not null or code like $1', [
     `${TEST_STATUS_PREFIX}%`,
   ]);

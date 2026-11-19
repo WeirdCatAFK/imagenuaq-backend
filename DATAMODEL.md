@@ -1015,6 +1015,72 @@ edita por `/api/calendar/events`; se mueve por `/api/vehicles/bookings/:id`.
 **Reserva quien tiene `vehicle.book`; la cambia quien la hizo o coordinación** (`RF-USR-06`). El
 proyecto es opcional: hay entregas que no cuelgan de ninguno.
 
+### 2.23 Fotografía: el folio existe antes que el cliente
+
+El servicio de fotos de graduación (`RF-PRY-06`, primera sesión) vende fotos a estudiantes. La
+prueba piloto falló en la captura en papel, que dejó correos mal escritos. También falló en
+emparejar a cada quien con sus fotos ("Daniel" y "Juan"), en saber quién ya descargó y en el
+espacio. El sistema es el mismo, con un modo Fotografía y un rol propio (`photo_manager`, con los
+permisos `photo.read` y `photo.manage`).
+
+#### El grupo nace con sus folios
+
+Crear "Bachiller grupo 7 2026-1" con tamaño 30 genera 30 `photo_folios`, numerados `B7-001` en
+adelante. Cada folio tiene un código de 8 caracteres. Las hojas se imprimen antes de que nadie se
+registre. Llevan el folio, el código y un QR con la liga al portal. Crecer el grupo agrega folios al
+final.
+
+El grupo no es un proyecto. Su sesión aparece en el calendario como evento global de tipo
+`fotografia`, y la mantienen disparadores como los de los vehículos (§2.22).
+
+#### El código es la credencial
+
+No hay cuenta de cliente: quien tiene la hoja ve su folio. El código usa base32 de Crockford, sin
+I, L, O ni U, para teclearlo sin ambigüedad. La entrada se normaliza: mayúsculas, sin espacios ni
+guiones, la O se lee como 0, y la I y la L como 1.
+
+Son 40 bits. Bastan contra adivinar porque el
+portal corta a una dirección que manda 20 códigos inválidos en una hora. De cada código se guarda el
+hash para buscar y el texto cifrado (`MS_TOKEN_KEY`) para reimprimir la hoja, como en `form_links`
+(§2.21). Solo `photo.manage` lee los códigos.
+
+#### El catálogo de precios es dato
+
+`photo_packages` guarda las fotos digitales, las impresas, el precio y el precio de preventa. Se
+edita sin desplegar y se retira con `is_active`, nunca se borra. Cada grupo ofrece un subconjunto.
+
+Antes del `presale_until` del grupo aplica el precio de preventa. El cobro copia el nombre, las
+cantidades y el monto al folio, así que un cambio de precio no reescribe una venta. El pago ocurre en
+cajas, y la mesa captura a mano el folio de cajas (`RF-MIG-04`). El sistema no cobra.
+
+#### Los bytes van a otro bucket
+
+Las fotos viven en `MINIO_PHOTOS_BUCKET`, con una cuota dura (`MINIO_PHOTOS_QUOTA`), aparte del
+bucket de documentos. Así una temporada de sesiones no llena el espacio de los archivos de
+coordinación, y el barrido de `RF-ARC-01` nunca toca una foto. Una muestra (`proof`) se guarda con
+una vista previa pequeña con marca de agua, la única versión de ella que el cliente recibe. La foto
+editada (`final`) se descarga completa, y cada descarga queda en `photo_downloads`.
+
+#### Cuánto viven las fotos es configurable
+
+`photo_retention` es una fila con 30 días por omisión. Cada grupo nuevo la copia en `download_days`,
+y ese valor se cambia por grupo. Al marcar un folio como listo, `expires_at` es la hora actual más
+`download_days`. Cambiar los días del grupo mueve ese plazo en los folios listos. El trabajo
+`photo-expiry` borra las fotos vencidas, y sus bytes cuando ninguna otra foto los comparte.
+
+#### El recorrido del folio
+
+1. `generated`: el folio existe con su hoja.
+2. `registered`: el cliente o la mesa capturan sus datos.
+3. `paid`: la mesa registra el pago de cajas.
+4. `proofs`: hay muestras para elegir.
+5. `selected`: el cliente elige hasta las fotos de su paquete y envía su elección.
+6. `ready`: se abre la descarga.
+7. `printed` y `delivered`: las fotos impresas, si el paquete las trae.
+
+El portal deja de editar datos una vez pagado el folio. Desde ahí corrige la mesa. En la mesa,
+escanear la hoja abre su folio. Así se elige a quién van las fotos sin leer nombres.
+
 ## 3. Trazabilidad
 
 La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ parcial,
@@ -1034,7 +1100,7 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-PRY-03                       | `project_stages` + `approvals` + `logs`                                                                       | ✔ |
 | RF-PRY-04                       | `project_stages.started_at`/`ended_at`: el tiempo por etapa, sin registro por persona (§2.18)                    | ✔ |
 | RF-PRY-05                       | `notes.kind`                                                                                                      | ✗ |
-| RF-PRY-06                       | `workflows` + `workflow_versions`, copiadas a la solicitud y movidas al proyecto (§2.1, §2.5, §2.17) | ✔ |
+| RF-PRY-06                       | `workflows` + `workflow_versions`, copiadas a la solicitud y movidas al proyecto (§2.1, §2.5, §2.17). El servicio de fotografía, en `photo_*` (§2.23) | ✔ |
 | RF-PRY-07                       | `projects.has_cost`                                                                                               | ✔ |
 | RF-PRY-08                       | `projects.carried_over`; `period_id` espera a`periods` (CAL/FIN)                                            | ◑ |
 | RF-PRY-09                       | `project_materials.origin`                                                                                        | ✗ |

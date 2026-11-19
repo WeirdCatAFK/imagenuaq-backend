@@ -6,6 +6,7 @@ import documents from './access/orchestration/documents.js';
 import notifications from './access/orchestration/notifications.js';
 import spreadsheets from './access/orchestration/spreadsheets.js';
 import forms from './access/orchestration/forms.js';
+import photos from './access/orchestration/photos.js';
 
 const TIME_ZONE = 'America/Mexico_City';
 
@@ -54,6 +55,12 @@ export const JOBS = [
     schedule: '*/5 * * * *',
     description: 'Appends to their workbook the public form answers whose row is not in it yet (RF-MIG-01).',
     run: (now) => forms.writePending(now),
+  },
+  {
+    name: 'photo-expiry',
+    schedule: '15 3 * * *',
+    description: "Deletes the photos of folios whose download window closed (RF-PRY-06).",
+    run: (now) => photos.expire(now),
   },
 ];
 

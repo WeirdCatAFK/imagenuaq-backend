@@ -323,6 +323,19 @@ export function buildOpenApiDocument() {
         name: 'vehicles',
         description: 'Vehicles and their bookings for delivering and picking up material (RF-CAL-04).',
       },
+      {
+        name: 'photos',
+        description:
+          'The photo service desk (RF-PRY-06; DATAMODEL §2.23): groups with pre-generated folios, the ' +
+          'price catalog, cajas payments, proofs and finals in their own bucket, and how long photos ' +
+          'live. Reading needs `photo.read`; writing and the sheets, which carry codes, `photo.manage`.',
+      },
+      {
+        name: 'photo portal',
+        description:
+          "The client's page, without a session: the folio's 8-character code is the credential. " +
+          'An address that sends 20 codes that open nothing in an hour gets 429.',
+      },
     ],
     components: {
       securitySchemes: {
@@ -7067,6 +7080,7 @@ export function buildOpenApiDocument() {
         },
       },
       ...EXTRA_PATHS,
+      ...PHOTO_PATHS,
     },
     security: [{ bearerAuth: [] }],
   };
@@ -8109,5 +8123,248 @@ const EXTRA_PATHS = {
         404: NO_UPLOAD,
       },
     },
+  },
+};
+
+/** An operation of the photo desk: tagged, authenticated, with the refusals every one shares. */
+const photoOp = (summary, description, extra = {}) => ({
+  tags: ['photos'],
+  summary,
+  description,
+  ...extra,
+  responses: { ...extra.responses, 401: UNAUTHORIZED, 403: FORBIDDEN },
+});
+
+const PHOTO_CODE = {
+  name: 'code',
+  in: 'path',
+  required: true,
+  schema: { type: 'string' },
+  description: 'The 8 characters on the sheet, with or without the dash; O reads as 0 and I or L as 1.',
+};
+
+/** An operation of the photo portal: no session, the code in the path. */
+const portalOp = (summary, description, extra = {}) => ({
+  tags: ['photo portal'],
+  summary,
+  description,
+  security: [],
+  ...extra,
+  parameters: [PHOTO_CODE, ...(extra.parameters ?? [])],
+  responses: {
+    ...extra.responses,
+    404: errorResponse('No folio has that code.', 'Folio not found.'),
+    429: errorResponse('Too many wrong codes from this address.', 'Too many wrong codes from this address; try again in an hour.'),
+  },
+});
+
+const ANY_OBJECT = { type: 'object' };
+const ANY_BODY = { required: true, content: { 'application/json': { schema: ANY_OBJECT } } };
+const PHOTO_BINARY = { description: 'The image bytes.', content: { 'image/*': { schema: { type: 'string', format: 'binary' } } } };
+const PHOTO_FILE_ID = pathId('fileId', 'photo_files.id');
+const GROUP_ID = pathId('id', 'photo_groups.id');
+const FOLIO_ID = pathId('id', 'photo_folios.id');
+const NO_GROUP = errorResponse('No such group.', 'Group not found.');
+const NO_FOLIO = errorResponse('No such folio.', 'Folio not found.');
+const one = (description, key) => wrappedInline(description, key, ANY_OBJECT);
+const many = (description, key) => wrappedInline(description, key, { type: 'array', items: ANY_OBJECT });
+
+const PHOTO_PATHS = {
+  '/api/photos/retention': {
+    get: photoOp('How long photos stay downloadable', 'The default copied by each new group.', {
+      responses: { 200: one('The setting.', 'retention') },
+    }),
+    put: photoOp('Change how long photos stay downloadable', 'Needs photo.manage. Groups already created keep theirs.', {
+      requestBody: ANY_BODY,
+      responses: { 200: one('The setting.', 'retention'), 400: errorResponse('Out of range.', 'days must be between 1 and 3650.') },
+    }),
+  },
+  '/api/photos/packages': {
+    get: photoOp('List the price catalog', 'Active and retired packages.', {
+      responses: { 200: many('The packages.', 'packages') },
+    }),
+    post: photoOp('Add a package to the catalog', 'Needs photo.manage. Amounts travel as strings with two decimals.', {
+      requestBody: ANY_BODY,
+      responses: { 201: one('The package.', 'package'), 400: errorResponse('A bad payload.', 'digitalCount and price are required.') },
+    }),
+  },
+  '/api/photos/packages/{id}': {
+    patch: photoOp('Edit or retire a package', 'Needs photo.manage. Paid folios keep what they were sold.', {
+      parameters: [pathId('id', 'photo_packages.id')],
+      requestBody: ANY_BODY,
+      responses: { 200: one('The package.', 'package'), 404: errorResponse('No such package.', 'Package not found.') },
+    }),
+  },
+  '/api/photos/groups': {
+    get: photoOp('List the groups', 'Newest event first, with folio counts per status.', {
+      responses: { 200: many('The groups.', 'groups') },
+    }),
+    post: photoOp('Create a group and its folios', 'Needs photo.manage. Generates `size` folios with their codes, and a calendar event.', {
+      requestBody: ANY_BODY,
+      responses: { 201: one('The group.', 'group'), 409: errorResponse('The code is taken.', 'That name or code is already taken.') },
+    }),
+  },
+  '/api/photos/groups/{id}': {
+    get: photoOp('Read a group', 'With the packages it offers and their price today.', {
+      parameters: [GROUP_ID],
+      responses: { 200: one('The group.', 'group'), 404: NO_GROUP },
+    }),
+    patch: photoOp('Edit a group', 'Needs photo.manage. A new downloadDays moves the deadline of folios already ready.', {
+      parameters: [GROUP_ID],
+      requestBody: ANY_BODY,
+      responses: { 200: one('The group.', 'group'), 404: NO_GROUP },
+    }),
+  },
+  '/api/photos/groups/{id}/folios': {
+    get: photoOp("List a group's folios", 'Without their codes.', {
+      parameters: [GROUP_ID],
+      responses: { 200: many('The folios.', 'folios'), 404: NO_GROUP },
+    }),
+    post: photoOp('Add folios to a group', 'Needs photo.manage. Numbered after the last one.', {
+      parameters: [GROUP_ID],
+      requestBody: ANY_BODY,
+      responses: { 201: many('Every folio of the group.', 'folios'), 404: NO_GROUP },
+    }),
+  },
+  '/api/photos/groups/{id}/sheets': {
+    get: photoOp("A group's folios with their codes", "Needs photo.manage: the codes are the clients' credentials. For printing the sheets.", {
+      parameters: [GROUP_ID],
+      responses: { 200: many('The folios.', 'folios'), 404: NO_GROUP },
+    }),
+  },
+  '/api/photos/folios/lookup': {
+    get: photoOp('Find the folio of a code', 'What the desk scanner calls. Takes the code or the whole portal link.', {
+      parameters: [{ name: 'code', in: 'query', required: true, schema: { type: 'string' } }],
+      responses: { 200: one('The folio.', 'folio'), 404: NO_FOLIO },
+    }),
+  },
+  '/api/photos/folios/{id}': {
+    get: photoOp('Read a folio', 'With its photos and the packages its group offers.', {
+      parameters: [FOLIO_ID],
+      responses: { 200: one('The folio.', 'folio'), 404: NO_FOLIO },
+    }),
+    patch: photoOp("Capture or correct a client's data", 'Needs photo.manage. For sheets filled on paper.', {
+      parameters: [FOLIO_ID],
+      requestBody: ANY_BODY,
+      responses: { 200: one('The folio.', 'folio'), 404: NO_FOLIO },
+    }),
+  },
+  '/api/photos/folios/{id}/payment': {
+    post: photoOp('Record the cajas payment', 'Needs photo.manage. Copies the package and its price onto the folio (RF-MIG-04).', {
+      parameters: [FOLIO_ID],
+      requestBody: ANY_BODY,
+      responses: { 200: one('The folio.', 'folio'), 409: errorResponse('Already paid.', 'This folio is already paid.') },
+    }),
+  },
+  '/api/photos/folios/{id}/files': {
+    post: photoOp('Upload a photo', 'Needs photo.manage. Raw body; `kind` (proof or final) and `name` in the query. A proof gets a watermarked preview.', {
+      parameters: [
+        FOLIO_ID,
+        { name: 'kind', in: 'query', required: true, schema: { type: 'string', enum: ['proof', 'final'] } },
+        { name: 'name', in: 'query', required: true, schema: { type: 'string' } },
+      ],
+      requestBody: { required: true, content: { 'image/*': { schema: { type: 'string', format: 'binary' } } } },
+      responses: { 201: one('The photo.', 'file'), 409: errorResponse('Not paid yet.', 'Photos go to a folio once it is paid.'), 413: errorResponse('Too large.', 'A photo is at most 60 MB.') },
+    }),
+  },
+  '/api/photos/folios/{id}/uploads': {
+    post: photoOp('Start a photo upload in parts', 'Needs photo.manage. For a Cloudflare tunnel: send the parts in order with PUT, then complete.', {
+      parameters: [FOLIO_ID],
+      requestBody: ANY_BODY,
+      responses: { 201: wrappedInline('The id for the calls that follow.', 'uploadId', { type: 'string' }), 409: errorResponse('Not paid yet.', 'Photos go to a folio once it is paid.') },
+    }),
+  },
+  '/api/photos/uploads/{uploadId}/{partNumber}': {
+    put: photoOp('Send one part of a photo', 'Needs photo.manage. Raw bytes, in order from 1. Every part but the last is at least 5 MB.', {
+      parameters: [
+        { name: 'uploadId', in: 'path', required: true, schema: { type: 'string' } },
+        { name: 'partNumber', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } },
+      ],
+      requestBody: { required: true, content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } },
+      responses: { 200: one('The part received.', 'partNumber'), 400: errorResponse('Out of order.', 'Send part 2 next.'), 404: errorResponse('No such upload.', 'Upload not found.'), 413: errorResponse('Too large.', 'A photo is at most 60 MB.') },
+    }),
+  },
+  '/api/photos/uploads/{uploadId}/complete': {
+    post: photoOp('Finish a photo upload in parts', 'Needs photo.manage. Joins the parts, checks the image and makes the preview of a proof.', {
+      parameters: [{ name: 'uploadId', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: { 201: one('The photo.', 'file'), 400: errorResponse('Not an image.', 'That file is not an image.'), 404: errorResponse('No such upload.', 'Upload not found.') },
+    }),
+  },
+  '/api/photos/uploads/{uploadId}': {
+    delete: photoOp('Abandon a photo upload in parts', 'Needs photo.manage. It drops the parts sent so far.', {
+      parameters: [{ name: 'uploadId', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: { 204: { description: 'Dropped.' }, 404: errorResponse('No such upload.', 'Upload not found.') },
+    }),
+  },
+  '/api/photos/folios/{id}/ready': {
+    post: photoOp('Open the download window', "Needs photo.manage. Downloadable for the group's downloadDays from now.", {
+      parameters: [FOLIO_ID],
+      responses: { 200: one('The folio.', 'folio'), 409: errorResponse('No finals.', 'Upload the edited photos first.') },
+    }),
+  },
+  '/api/photos/folios/{id}/printed': {
+    post: photoOp('Mark the prints done', 'Needs photo.manage.', {
+      parameters: [FOLIO_ID],
+      responses: { 200: one('The folio.', 'folio'), 409: errorResponse('No prints in the package.', "This folio's package has no prints.") },
+    }),
+  },
+  '/api/photos/folios/{id}/delivered': {
+    post: photoOp('Mark the prints handed over', 'Needs photo.manage.', {
+      parameters: [FOLIO_ID],
+      responses: { 200: one('The folio.', 'folio'), 409: errorResponse('Not printed.', 'Mark the prints as printed first.') },
+    }),
+  },
+  '/api/photos/files/{id}/content': {
+    get: photoOp('Download a photo as uploaded', 'For staff.', {
+      parameters: [pathId('id', 'photo_files.id')],
+      responses: { 200: PHOTO_BINARY, 404: errorResponse('No such photo.', 'Photo not found.') },
+    }),
+  },
+  '/api/photos/files/{id}/preview': {
+    get: photoOp("A proof's watermarked preview", 'For staff.', {
+      parameters: [pathId('id', 'photo_files.id')],
+      responses: { 200: PHOTO_BINARY, 404: errorResponse('No preview.', 'Preview not found.') },
+    }),
+  },
+  '/api/photos/files/{id}': {
+    delete: photoOp('Delete a photo', 'Needs photo.manage. Its bytes go once nothing else uses them.', {
+      parameters: [pathId('id', 'photo_files.id')],
+      responses: { 204: { description: 'Deleted.' }, 404: errorResponse('No such photo.', 'Photo not found.') },
+    }),
+  },
+  '/api/photo/{code}': {
+    get: portalOp("The client's folio", "Status, own data, packages with today's price, proofs, and finals while downloadable.", {
+      responses: { 200: one('The folio.', 'folio') },
+    }),
+  },
+  '/api/photo/{code}/registration': {
+    put: portalOp('Fill in own data and pick a package', 'Only before payment; after it, the desk corrects data.', {
+      requestBody: ANY_BODY,
+      responses: { 200: one('The folio.', 'folio'), 409: errorResponse('Already paid.', 'This folio is already paid; ask the photo desk to change its data.') },
+    }),
+  },
+  '/api/photo/{code}/selection': {
+    put: portalOp('Choose photos among the proofs', "At most the package's digital count; `lock: true` sends the choice to editing.", {
+      requestBody: ANY_BODY,
+      responses: { 200: one('The folio.', 'folio'), 409: errorResponse('Locked or too early.', 'Your selection is already sent.') },
+    }),
+  },
+  '/api/photo/{code}/previews/{fileId}': {
+    get: portalOp('A proof preview', 'Watermarked, small: the only version of a proof the client gets.', {
+      parameters: [PHOTO_FILE_ID],
+      responses: { 200: PHOTO_BINARY },
+    }),
+  },
+  '/api/photo/{code}/thumbnails/{fileId}': {
+    get: portalOp('A thumbnail of an edited photo', 'A small JPEG for the list of downloads, while the window is open. It is not a download and is not logged.', {
+      parameters: [PHOTO_FILE_ID],
+      responses: { 200: PHOTO_BINARY, 409: errorResponse('Window closed.', 'The download period for these photos has ended.') },
+    }),
+  },
+  '/api/photo/{code}/files/{fileId}': {
+    get: portalOp('Download an edited photo', 'Only while the download window is open. Each download is logged.', {
+      parameters: [PHOTO_FILE_ID],
+      responses: { 200: PHOTO_BINARY, 409: errorResponse('Window closed.', 'The download period for these photos has ended.') },
+    }),
   },
 };
