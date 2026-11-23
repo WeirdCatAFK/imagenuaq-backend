@@ -862,12 +862,29 @@ cuántas facturas faltan. Cada proyecto trae sus banderas:
 | Bandera | Cuándo |
 | --- | --- |
 | `missing_invoices` | Se declararon más facturas (`expected_invoice_count`) de las que hay |
-| `costed_no_quote` | Con costo y sin cotización vigente (ninguna, o todas rechazadas) |
+| `costed_no_quote` | Con costo y sin ninguna cotización |
 | `delivered_no_invoice` | Con costo, con alguna etapa entregada o el proyecto cerrado, y sin facturas |
-| `invoice_not_in_oficio` | Una factura viva `uploaded` que no va en ningún oficio |
-| `oficio_unanswered` | Un oficio `sent` o `signed` cuyo `sent_at` pasó hace más de 15 días (`RF-FIN-13`) |
+| `invoice_not_in_oficio` | Una factura viva que no va en ningún oficio |
 | `payment_no_folio` | Un pago sin folio de rastreo del sistema financiero (`RF-FIN-14`) |
+| `correction_requested` | Algún registro con una solicitud de corrección sin atender |
 | `no_finance_records` | Sin cotizaciones, facturas, oficios, pagos ni recibos |
+
+**Los registros no tienen etapas** (migración `finance-without-stages`, 2026-11-23). Al principio
+cotizaciones, facturas, oficios y recibos llevaban cada uno su estatus con fecha por paso
+(emitida → en revisión → aprobada, subida → enviada → en pago → pagada, y así). Finanzas no lleva
+esos trámites en el sistema: los lleva el sistema financiero de la universidad (`RF-MIG-04`). Lo
+que sí necesita es decir «esto está mal, súbelo otra vez». Así que un registro se sube y ya. Si
+está mal, quien tiene `finance.write` pide la corrección
+(`POST /api/finance/{quotes|invoices|oficios|payments|receipts}/:id/correction {note}`). La nota
+queda en el registro (`correction_note`, `correction_requested_at`, `correction_requested_by`), y
+quien lo subió recibe un aviso con ella. Cualquier edición la borra. Las cotizaciones que estaban
+rechazadas se borraron (lógico) al migrar, y los recibos cancelados quedaron borrados
+(`receipts.deleted_at`). Las acciones de estatus siguen en el catálogo porque la bitácora las cita.
+
+**Finanzas marca un proyecto como completo** (`PUT /api/finance/projects/:id/complete {complete}`,
+`projects.finance_completed_at`). Completo sale de la lista de trabajo, del resumen periódico y no
+levanta banderas; se ve con `GET /api/finance/projects?completed=true`. Sigue editable y se reabre
+con `complete: false`. Es distinto de `no_finance`, que dice que el proyecto nunca tuvo finanzas.
 
 **Un proyecto puede quedar fuera de finanzas** (`projects.no_finance`, migración
 `project-no-finance`). Hay trabajo que no compra ni cobra nada —acomodar el mobiliario de un evento
@@ -877,38 +894,26 @@ marca con `PATCH /api/projects/:id {noFinance}` (`project.write`); un proyecto c
 marcarse (CHECK), ni uno que ya tenga cotizaciones, facturas o un número de facturas declarado
 (409), porque marcarlo escondería justo lo que finanzas debe ver.
 
-**El oficio cobra a la entidad** (`RF-FIN-11` a `RF-FIN-13`, migración
-`finance-oficios-payments-receipts`). Pertenece a un proyecto y agrupa algunas de sus facturas
-`uploaded`; una factura va en un solo oficio (`invoices.oficio_id`). El monto se captura a mano,
+**El oficio cobra a la entidad** (`RF-FIN-11`, migración `finance-oficios-payments-receipts`).
+Pertenece a un proyecto y agrupa algunas de sus facturas; una factura va en un solo oficio
+(`invoices.oficio_id`), y sus facturas cambian en cualquier momento. El monto se captura a mano,
 porque lo que se cobra no siempre es lo facturado, y la API lo marca con `amountMismatch` cuando no
-coincide con la suma de sus facturas. Los pasos —`issued`, `sent`, `signed`, `answered`, `paid`—
-solo avanzan y pueden saltarse; cada paso alcanzado guarda su fecha y los saltados quedan nulos.
-Salir de `issued` marca sus facturas `sent` en la misma sentencia, y sus facturas solo cambian
-mientras sigue `issued`. «Sin respuesta» se cuenta desde `sent_at`: firmarlo no reinicia la espera.
-
-**Avisar al solicitante es un correo de finanzas**, no un aviso del sistema. Al salir de `issued` y
-al llegar a `paid`, quien movió el oficio recibe un recordatorio con los correos de quienes subieron
-sus facturas, para escribirlo.
+coincide con la suma de sus facturas. Borrarlo suelta sus facturas.
 
 **El pago va en los dos sentidos** (`RF-FIN-14`, `RF-FIN-15`). `incoming` es la entidad pagando un
 oficio; `outgoing`, la universidad pagando la factura de un proveedor. Los dos llevan el folio de
-rastreo del sistema financiero y su comprobante, que suele llegar después (`PATCH`). Un pago nunca
-mueve un estatus: el oficio y la factura muestran `paidAmount` y `balance`, y marcarlos pagados es
-decisión de finanzas, porque los pagos parciales y tardíos son lo normal. La factura pasa a
-`in_payment` con el folio que lo prueba (`RF-FIN-10`) y de ahí a `paid`.
+rastreo del sistema financiero y su comprobante, que suele llegar después (`PATCH`). El oficio y
+la factura muestran `paidAmount` y `balance`; los pagos parciales y tardíos son lo normal.
 
-**El recibo referenciado** (`RF-FIN-15`, `RF-FIN-16`) es el otro esquema de cobro: la coordinación
-cobra a la entidad. Se redacta, se envía a validar, y lo valida quien tenga `finance.validate`
-(administración y finanzas), nunca quien lo creó —la API lo rechaza con 403 y un CHECK lo
-respalda—. Un rechazo lo devuelve a borrador con el motivo en `validation_comment`, así que no hay
-estatus `rejected`. Solo uno validado se emite, solo uno emitido se paga, y cualquiera no pagado se
-cancela; no se borra.
+**El recibo referenciado** (`RF-FIN-15`) es el otro esquema de cobro: la coordinación cobra a la
+entidad. Se registra, se corrige y se borra como los demás; ya no pasa por validación, y el permiso
+`finance.validate` se retiró.
 
 **Cerrar nunca espera a finanzas** (`RF-FIN-08`). El cierre devuelve `financeGaps` y emite
 `project_closed`; si hay algo más que `no_finance_records` —que solo, en un proyecto sin costo, es
 lo normal— avisa a quien tenga `finance.read`. El proyecto sigue saliendo en la lista hasta que
-se resuelva. Bloquear el cierre habría dejado proyectos que nunca se pueden cerrar, justo porque
-la carga no llega.
+se resuelva o finanzas lo marque completo. Bloquear el cierre habría dejado proyectos que nunca se
+pueden cerrar, justo porque la carga no llega.
 
 **Cada tres días, un resumen** (el trabajo `finance-gaps` de `src/scheduler.js`). El ciclo de
 finanzas es de quince días a un mes, y resolver un pendiente toma tiempo: un aviso diario sería
@@ -921,13 +926,10 @@ aviso por persona y ventana de tres días: el trabajo corre a diario para poners
 servidor estuvo abajo, y la llave —el primer día de la ventana— impide repetirlo. Las banderas son las
 mismas de la lista: las dos leen `financeStanding` en `query.js`.
 
-**Quién escribe qué.** Las áreas suben cotizaciones y facturas con `project.write`; finanzas, con
-`finance.write`, decide las cotizaciones (`issued` → `in_review` → `approved`/`rejected`) y
-corrige el directorio de proveedores. Un área puede registrar un proveedor para no detener una
-carga. Una cotización decidida y una factura ya enviada no se editan ni se borran.
-
-**El estatus es una lista fija con fecha por paso**, no el catálogo de `statuses`: las banderas y
-los avisos dependen de sus códigos, y `RF-FIN-12` pide la fecha de cada cambio.
+**Quién escribe qué.** Las áreas suben y corrigen cotizaciones y facturas con `project.write`;
+finanzas, con `finance.write`, lleva oficios, pagos y recibos, pide correcciones, marca proyectos
+completos y corrige el directorio de proveedores. Un área puede registrar un proveedor para no
+detener una carga. Una cotización a la que apunta una factura no se borra.
 
 **La bitácora va en la misma sentencia** (§5.6). Cada escritura de finanzas es un CTE que inserta
 su renglón de `logs` junto con el cambio (`loggedChange` en `query.js`), sin pasar por el
@@ -1123,13 +1125,15 @@ La columna **Estado** dice si la tabla citada existe hoy: ✔ implementado, ◑ 
 | RF-EST-07, RF-EST-08            | Consulta sobre`projects` + `status_since` + `idx_projects_open`                                              | ✔ |
 | RF-MIG-01, RF-MIG-02            | `microsoft_accounts` + `sheets` (§2.9, §2.10) + `requests.data`/`source_hash` (§2.13) + `sheets.column_map` y `sheet_imports` (§2.16) | ✔ |
 | RF-MIG-01 (formulario)          | `form_links`, `requests.form_link_id`/`sheet_written_at`, `invertMapping()` y `sheet_row_marks` (§2.21)          | ✔ |
-| RF-FIN-01 … RF-FIN-04          | `quotes` con estatus propio desde su emisión; `GET /api/finance/quotes` (§2.20)                               | ✔ |
+| RF-FIN-01 … RF-FIN-04          | `quotes`, sin decisión: finanzas pide corrección; `GET /api/finance/quotes` (§2.20)                          | ✔ |
 | RF-FIN-05, RF-FIN-06, RF-FIN-09 | `invoices` por proyecto; solo el monto es obligatorio; `GET /api/finance/invoices` (§2.20)                     | ✔ |
-| RF-FIN-07, RF-FIN-08            | `projects.expected_invoice_count` + `GET /api/finance/projects` con sus banderas; el cierre avisa, no bloquea (§2.20) | ✔ |
-| RF-FIN-10                       | `invoices.status` con fecha por paso: `sent` lo pone su oficio, `in_payment` exige el folio de pago (§2.20)       | ✔ |
-| RF-FIN-11 … RF-FIN-13           | `oficios` con fecha por paso y `GET /api/finance/oficios?unansweredDays=` (§2.20)                               | ✔ |
+| RF-FIN-07, RF-FIN-08            | `projects.expected_invoice_count` + `GET /api/finance/projects` con sus banderas; `projects.finance_completed_at` aparta los completos; el cierre avisa, no bloquea (§2.20) | ✔ |
+| RF-FIN-10                       | Sin estatus por decisión: las facturas se suben y se corrigen (§2.20)                                           | ✗ por decisión |
+| RF-FIN-11                       | `oficios` agrupando facturas del proyecto (§2.20)                                                              | ✔ |
+| RF-FIN-12, RF-FIN-13            | Sin pasos ni «sin respuesta» por decisión (§2.20)                                                              | ✗ por decisión |
 | RF-FIN-14                       | `payments.tracking_folio` y `GET /api/finance/payments?missingFolio=true`                                       | ✔ |
-| RF-FIN-15, RF-FIN-16            | `payments.direction` y `receipts`, validado por alguien distinto de su autor (§2.20)                           | ✔ |
+| RF-FIN-15                       | `payments.direction` y `receipts` (§2.20)                                                                      | ✔ |
+| RF-FIN-16                       | Sin validación del recibo por decisión (§2.20)                                                                 | ✗ por decisión |
 | RF-FIN-17                       | `invoices.quote_id`, `receipts.quote_id` y las facturas de cada oficio                                          | ✔ |
 | RF-FIN-18                       | `providers`; el historial es consulta sobre cotizaciones, facturas y pagos                                      | ◑ falta la consulta de historial |
 | RF-USR-08                       | `finance.read` (cruzado, solo lectura) + `finance.write` para el trámite (§2.15, §2.20)                       | ✔ |
