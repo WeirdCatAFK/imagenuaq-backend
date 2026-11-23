@@ -303,7 +303,6 @@ describe('/api/roles', () => {
         'calendar.read',
         'finance.read',
         'finance.request',
-        'finance.validate',
         'finance.write',
         'project.read',
         'task.read',

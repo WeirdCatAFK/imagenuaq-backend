@@ -1,5 +1,5 @@
-// The finance cycle and each project's standing (RF-FIN-01 to RF-FIN-18). Areas upload quotes and
-// invoices with `project.write`; the rest is `finance.write`, validating a receipt `finance.validate`.
+// Finance records and each project's standing (RF-FIN-01 to RF-FIN-18). Areas upload quotes and
+// invoices with `project.write`; the rest, asking for corrections and completing a project, is `finance.write`.
 import { Router } from "express";
 
 import finance from "../access/orchestration/finance.js";
@@ -28,6 +28,22 @@ router.get("/projects", requirePermission("finance.read"), async (req, res) => {
 router.get("/projects/:id", canRead, async (req, res) => {
   res.json({ finance: await finance.projectSummary(projectId(req)) });
 });
+
+router.put("/projects/:id/complete", requirePermission("finance.write"), async (req, res) => {
+  res.json({ finance: await finance.setFinanceComplete(projectId(req), { complete: req.body?.complete }) });
+});
+
+for (const [kind, key] of Object.entries({
+  quotes: "quote",
+  invoices: "invoice",
+  oficios: "oficio",
+  payments: "payment",
+  receipts: "receipt",
+})) {
+  router.post(`/${kind}/:id/correction`, requirePermission("finance.write"), async (req, res) => {
+    res.json({ [key]: await finance.requestCorrection(kind, idParam(req, "id", `${key} id`), { note: req.body?.note }) });
+  });
+}
 
 router.get("/providers", canRead, async (req, res) => {
   res.json({ providers: await finance.listProviders(req.query) });
@@ -65,11 +81,6 @@ router.patch("/quotes/:id", canUpload, async (req, res) => {
   res.json({ quote: await finance.updateQuote(quoteId(req), req.body ?? {}) });
 });
 
-router.post("/quotes/:id/decision", requirePermission("finance.write"), async (req, res) => {
-  const { decision, comment } = req.body ?? {};
-  res.json({ quote: await finance.decideQuote(quoteId(req), { decision, comment }) });
-});
-
 router.delete("/quotes/:id", canUpload, async (req, res) => {
   res.json({ quote: await finance.deleteQuote(quoteId(req)) });
 });
@@ -94,11 +105,6 @@ router.delete("/invoices/:id", canUpload, async (req, res) => {
   res.json({ invoice: await finance.deleteInvoice(invoiceId(req)) });
 });
 
-router.post("/invoices/:id/status", requirePermission("finance.write"), async (req, res) => {
-  const { status, paymentFolio } = req.body ?? {};
-  res.json({ invoice: await finance.setInvoiceStatus(invoiceId(req), { status, paymentFolio }) });
-});
-
 router.get("/oficios", requirePermission("finance.read"), async (req, res) => {
   res.json({ oficios: await finance.listOficios(req.query) });
 });
@@ -113,10 +119,6 @@ router.post("/projects/:id/oficios", requirePermission("finance.write"), async (
 
 router.patch("/oficios/:id", requirePermission("finance.write"), async (req, res) => {
   res.json({ oficio: await finance.updateOficio(oficioId(req), req.body ?? {}) });
-});
-
-router.post("/oficios/:id/status", requirePermission("finance.write"), async (req, res) => {
-  res.json({ oficio: await finance.advanceOficio(oficioId(req), { status: req.body?.status }) });
 });
 
 router.delete("/oficios/:id", requirePermission("finance.write"), async (req, res) => {
@@ -159,17 +161,8 @@ router.patch("/receipts/:id", requirePermission("finance.write"), async (req, re
   res.json({ receipt: await finance.updateReceipt(receiptId(req), req.body ?? {}) });
 });
 
-router.post("/receipts/:id/submit", requirePermission("finance.write"), async (req, res) => {
-  res.json({ receipt: await finance.submitReceipt(receiptId(req)) });
-});
-
-router.post("/receipts/:id/validation", requirePermission("finance.validate"), async (req, res) => {
-  const { decision, comment } = req.body ?? {};
-  res.json({ receipt: await finance.validateReceipt(receiptId(req), { decision, comment }) });
-});
-
-router.post("/receipts/:id/status", requirePermission("finance.write"), async (req, res) => {
-  res.json({ receipt: await finance.setReceiptStatus(receiptId(req), { status: req.body?.status }) });
+router.delete("/receipts/:id", requirePermission("finance.write"), async (req, res) => {
+  res.json({ receipt: await finance.deleteReceipt(receiptId(req)) });
 });
 
 export default router;

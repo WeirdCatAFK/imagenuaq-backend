@@ -69,12 +69,6 @@ const loggedChange = (action, table, actor, before = "null", { source = "changed
 /** `before_data` for rows of `table` updated in the same statement: the snapshot the statement started from. */
 const beforeRow = (table) => `(select to_jsonb(b) from ${table} b where b.id = c.id)`;
 
-/** Finance tables that are cancelled rather than deleted, so they have no `deleted_at`. */
-const UNDELETABLE = new Set(["receipts"]);
-
-/** RF-FIN-13: days a sent oficio may wait for its answer before finance is told. */
-const UNANSWERED_DAYS = 15;
-
 /** The finance columns of a quote or invoice list: its project and its provider. Expects alias `x`. */
 const FINANCE_JOINS = `
   join projects p on p.id = x.project_id and p.deleted_at is null
@@ -88,20 +82,15 @@ const INVOICE_COLUMNS = `${FINANCE_COLUMNS}, o.folio as oficio_folio,
 const INVOICE_JOINS = `${FINANCE_JOINS}
   left join oficios o on o.id = x.oficio_id`;
 
-/**
- * An oficio with its project, its invoices, their total, what incoming payments have covered, and
- * how many days a sent or signed one has waited for its answer. Expects alias `o`.
- */
+/** An oficio with its project, its invoices, their total and what incoming payments have covered. Expects alias `o`. */
 const OFICIO_SELECT = `select o.*, p.key as project_key, p.title as project_title,
     coalesce((select json_agg(json_build_object('id', i.id, 'invoiceFolio', i.invoice_folio,
-                                                'amount', i.amount, 'status', i.status) order by i.id)
+                                                'amount', i.amount) order by i.id)
                 from invoices i where i.oficio_id = o.id and i.deleted_at is null), '[]'::json) as invoices,
     (select coalesce(sum(i.amount), 0) from invoices i
       where i.oficio_id = o.id and i.deleted_at is null) as invoices_total,
     (select coalesce(sum(pm.amount), 0) from payments pm
-      where pm.oficio_id = o.id and pm.deleted_at is null) as paid_amount,
-    case when o.status in ('sent', 'signed')
-         then current_date - (o.sent_at at time zone 'America/Mexico_City')::date end as days_unanswered
+      where pm.oficio_id = o.id and pm.deleted_at is null) as paid_amount
   from oficios o
   join projects p on p.id = o.project_id and p.deleted_at is null`;
 
@@ -121,32 +110,38 @@ const RECEIPT_SELECT = `select x.*, p.key as project_key, p.title as project_tit
 /**
  * The CTEs `stats` and `flagged`: each project matching `where` (SQL over alias `p`, live ones
  * only) with its invoice and quote counts and its finance `flags` (DATAMODEL §2.20). A project
- * marked `no_finance` never has a flag: it cannot hold finance records. The finance list and the
+ * marked `no_finance`, or that finance marked complete, never has a flag. The finance list and the
  * digest read the same flags from here. Each count is a correlated subquery
  * on an indexed `project_id`.
  */
 const financeStanding = (where) => `stats as (
          select p.id, p.key, p.title, p.requester, p.has_cost, p.no_finance, p.closed_at, p.archived_at,
-                p.expected_invoice_count as expected,
+                p.finance_completed_at, p.expected_invoice_count as expected,
                 (select count(*)::int from invoices i
                   where i.project_id = p.id and i.deleted_at is null) as uploaded,
                 (select coalesce(sum(i.amount), 0) from invoices i
                   where i.project_id = p.id and i.deleted_at is null) as invoiced,
                 (select count(*)::int from quotes q
                   where q.project_id = p.id and q.deleted_at is null) as quotes,
-                (select count(*)::int from quotes q
-                  where q.project_id = p.id and q.deleted_at is null and q.status <> 'rejected') as standing_quotes,
                 (select count(*)::int from oficios o
                   where o.project_id = p.id and o.deleted_at is null) as oficios,
                 (select count(*)::int from payments pm
                   where pm.project_id = p.id and pm.deleted_at is null) as payments,
-                (select count(*)::int from receipts r where r.project_id = p.id) as receipts,
+                (select count(*)::int from receipts r
+                  where r.project_id = p.id and r.deleted_at is null) as receipts,
+                (select count(*)::int from (
+                   select 1 from quotes x where x.project_id = p.id and x.deleted_at is null and x.correction_requested_at is not null
+                   union all
+                   select 1 from invoices x where x.project_id = p.id and x.deleted_at is null and x.correction_requested_at is not null
+                   union all
+                   select 1 from oficios x where x.project_id = p.id and x.deleted_at is null and x.correction_requested_at is not null
+                   union all
+                   select 1 from payments x where x.project_id = p.id and x.deleted_at is null and x.correction_requested_at is not null
+                   union all
+                   select 1 from receipts x where x.project_id = p.id and x.deleted_at is null and x.correction_requested_at is not null
+                 ) c) as corrections,
                 exists (select 1 from invoices i
-                         where i.project_id = p.id and i.deleted_at is null
-                           and i.status = 'uploaded' and i.oficio_id is null) as unsent,
-                exists (select 1 from oficios o
-                         where o.project_id = p.id and o.deleted_at is null and o.status in ('sent', 'signed')
-                           and o.sent_at < current_timestamp - make_interval(days => ${UNANSWERED_DAYS})) as unanswered,
+                         where i.project_id = p.id and i.deleted_at is null and i.oficio_id is null) as unsent,
                 exists (select 1 from payments pm
                          where pm.project_id = p.id and pm.deleted_at is null
                            and pm.tracking_folio is null) as no_folio,
@@ -162,17 +157,17 @@ const financeStanding = (where) => `stats as (
        flagged as (
          select s.*,
                 greatest(coalesce(s.expected, 0) - s.uploaded, 0) as missing,
-                array_remove(array[
-                  case when s.no_finance then null
-                       when s.expected > s.uploaded then 'missing_invoices' end,
-                  case when s.has_cost and s.standing_quotes = 0 then 'costed_no_quote' end,
+                case when s.no_finance or s.finance_completed_at is not null then '{}'::text[]
+                else array_remove(array[
+                  case when s.expected > s.uploaded then 'missing_invoices' end,
+                  case when s.has_cost and s.quotes = 0 then 'costed_no_quote' end,
                   case when s.has_cost and s.delivered and s.uploaded = 0 then 'delivered_no_invoice' end,
                   case when s.unsent then 'invoice_not_in_oficio' end,
-                  case when s.unanswered then 'oficio_unanswered' end,
                   case when s.no_folio then 'payment_no_folio' end,
-                  case when not s.no_finance and s.quotes + s.uploaded + s.oficios + s.payments + s.receipts = 0
+                  case when s.corrections > 0 then 'correction_requested' end,
+                  case when s.quotes + s.uploaded + s.oficios + s.payments + s.receipts = 0
                        then 'no_finance_records' end
-                ], null) as flags
+                ], null) end as flags
            from stats s
        )`;
 
@@ -4837,7 +4832,7 @@ class Query {
     const [row] = await this.#rows(
       `with prior as (
          select * from ${table} x
-          where x.id = $2 and ${UNDELETABLE.has(table) ? "true" : "x.deleted_at is null"} and ${guard}
+          where x.id = $2 and x.deleted_at is null and ${guard}
        ),
        changed as (
          update ${table} x
@@ -4904,16 +4899,16 @@ class Query {
     return row ?? null;
   }
 
-  /** Live quotes, newest first, optionally of one project or in one status. */
-  async listQuotes({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
+  /** Live quotes, newest first, optionally of one project or by whether a correction is pending. */
+  async listQuotes({ projectId = null, correction = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
       `select ${FINANCE_COLUMNS} from quotes x ${FINANCE_JOINS}
         where x.deleted_at is null
           and ($1::bigint is null or x.project_id = $1::bigint)
-          and ($2::text is null or x.status = $2::text)
+          and ($2::boolean is null or (x.correction_requested_at is not null) = $2::boolean)
         order by x.created_at desc, x.id desc
         limit $3 offset $4`,
-      [projectId, status, limit, offset],
+      [projectId, correction, limit, offset],
     );
   }
 
@@ -4933,16 +4928,16 @@ class Query {
     return row ?? null;
   }
 
-  /** Live invoices, newest first, optionally of one project or in one status. */
-  async listInvoices({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
+  /** Live invoices, newest first, optionally of one project or by whether a correction is pending. */
+  async listInvoices({ projectId = null, correction = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
       `select ${INVOICE_COLUMNS} from invoices x ${INVOICE_JOINS}
         where x.deleted_at is null
           and ($1::bigint is null or x.project_id = $1::bigint)
-          and ($2::text is null or x.status = $2::text)
+          and ($2::boolean is null or (x.correction_requested_at is not null) = $2::boolean)
         order by x.created_at desc, x.id desc
         limit $3 offset $4`,
-      [projectId, status, limit, offset],
+      [projectId, correction, limit, offset],
     );
   }
 
@@ -4966,6 +4961,11 @@ class Query {
     return row.within;
   }
 
+  /** Stamps or clears a project's `finance_completed_*` columns, logged as `action`. */
+  async setFinanceComplete(projectId, fields, { action, actorId }) {
+    return this.#financeUpdate("projects", projectId, fields, { action, actorId });
+  }
+
   async setExpectedInvoices(projectId, count) {
     const [row] = await this.#rows(
       `update projects set expected_invoice_count = $2::int
@@ -4981,17 +4981,19 @@ class Query {
    * are what finance should look at (DATAMODEL §2.20): fewer invoices than expected, costed with
    * no standing quote, delivered or closed costed work with no invoice, and nothing recorded at
    * all. One statement. A `no_finance` project is left out of the list, and alone shows no flags.
+   * Without `projectId`, `completed` picks the projects finance marked complete or the open ones.
    *
-   * @param {{projectId?: number|null, flag?: string|null, limit?: number, offset?: number}} filter
+   * @param {{projectId?: number|null, flag?: string|null, completed?: boolean, limit?: number, offset?: number}} filter
    */
-  async financeProjects({ projectId = null, flag = null, limit = 50, offset = 0 } = {}) {
+  async financeProjects({ projectId = null, flag = null, completed = false, limit = 50, offset = 0 } = {}) {
     return this.#rows(
-      `with ${financeStanding("p.id = $1::bigint or ($1::bigint is null and not p.no_finance)")}
+      `with ${financeStanding(`p.id = $1::bigint or ($1::bigint is null and not p.no_finance
+                                and (p.finance_completed_at is not null) = $5::boolean)`)}
        select * from flagged
         where $2::text is null or $2::text = any(flags)
         order by missing desc, cardinality(flags) desc, id desc
         limit $3 offset $4`,
-      [projectId, flag, limit, offset],
+      [projectId, flag, limit, offset, completed],
     );
   }
 
@@ -5027,8 +5029,8 @@ class Query {
                 count(*) filter (where 'costed_no_quote' = any(flags))::int as no_quote,
                 count(*) filter (where 'delivered_no_invoice' = any(flags))::int as no_invoice,
                 count(*) filter (where 'invoice_not_in_oficio' = any(flags))::int as unsent,
-                count(*) filter (where 'oficio_unanswered' = any(flags))::int as unanswered,
-                count(*) filter (where 'payment_no_folio' = any(flags))::int as no_folio
+                count(*) filter (where 'payment_no_folio' = any(flags))::int as no_folio,
+                count(*) filter (where 'correction_requested' = any(flags))::int as corrections
            from gaps
        ),
        finance_people as (
@@ -5060,8 +5062,8 @@ class Query {
                   || t.no_quote || ' con costo y sin cotización, '
                   || t.no_invoice || ' entregados sin facturas, '
                   || t.unsent || ' con facturas sin oficio, '
-                  || t.unanswered || ' con oficios sin respuesta y '
-                  || t.no_folio || ' con pagos sin folio de rastreo.' as message
+                  || t.no_folio || ' con pagos sin folio de rastreo y '
+                  || t.corrections || ' con correcciones pendientes.' as message
            from finance_people f, totals t
           where t.projects > 0
          union all
@@ -5088,28 +5090,22 @@ class Query {
     return row ?? null;
   }
 
-  /**
-   * Live oficios, newest first. With `unansweredDays`, only those sent or signed longer ago than
-   * that, oldest first (RF-FIN-13).
-   */
-  async listOficios({ projectId = null, status = null, unansweredDays = null, limit = 50, offset = 0 } = {}) {
+  /** Live oficios, newest first, optionally of one project or by whether a correction is pending. */
+  async listOficios({ projectId = null, correction = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
       `${OFICIO_SELECT}
         where o.deleted_at is null
           and ($1::bigint is null or o.project_id = $1::bigint)
-          and ($2::text is null or o.status = $2::text)
-          and ($3::int is null or (o.status in ('sent', 'signed')
-                                   and o.sent_at < current_timestamp - make_interval(days => $3::int)))
-        order by case when $3::int is not null then o.sent_at end asc nulls last, o.created_at desc, o.id desc
-        limit $4 offset $5`,
-      [projectId, status, unansweredDays, limit, offset],
+          and ($2::boolean is null or (o.correction_requested_at is not null) = $2::boolean)
+        order by o.created_at desc, o.id desc
+        limit $3 offset $4`,
+      [projectId, correction, limit, offset],
     );
   }
 
   /**
-   * Creates an oficio and puts `invoiceIds` in it, logging both, in one statement. Only live,
-   * `uploaded` invoices of the same project that are in no oficio are taken; the caller checks
-   * them first.
+   * Creates an oficio and puts `invoiceIds` in it, logging both, in one statement. Only live
+   * invoices of the same project that are in no oficio are taken; the caller checks them first.
    *
    * @returns {Promise<object>} the new oficio row
    */
@@ -5124,7 +5120,7 @@ class Query {
        attached as (
          update invoices i set oficio_id = (select id from changed)
           where i.id = any(coalesce($3::bigint[], '{}')) and i.deleted_at is null and i.oficio_id is null
-            and i.status = 'uploaded' and i.project_id = (select project_id from changed)
+            and i.project_id = (select project_id from changed)
          returning i.*
        ),
        ${loggedChange("oficio_created", "oficios", "$1")},
@@ -5140,15 +5136,14 @@ class Query {
   }
 
   /**
-   * Replaces the invoices of an oficio still `issued`, logging each invoice that leaves or joins,
-   * in one statement.
+   * Replaces the invoices of an oficio, logging each invoice that leaves or joins, in one statement.
    *
-   * @returns {Promise<boolean>} false when the oficio is missing or no longer `issued`
+   * @returns {Promise<boolean>} false when the oficio is missing
    */
   async setOficioInvoices(oficioId, invoiceIds, actorId) {
     const [row] = await this.#rows(
       `with prior as (
-         select * from oficios x where x.id = $2 and x.deleted_at is null and x.status = 'issued'
+         select * from oficios x where x.id = $2 and x.deleted_at is null
        ),
        detached as (
          update invoices i set oficio_id = null
@@ -5160,7 +5155,7 @@ class Query {
          update invoices i set oficio_id = prior.id
            from prior
           where i.id = any(coalesce($3::bigint[], '{}')) and i.oficio_id is null and i.deleted_at is null
-            and i.status = 'uploaded' and i.project_id = prior.project_id
+            and i.project_id = prior.project_id
          returning i.*
        ),
        ${loggedChange("invoice_updated", "invoices", "$1", beforeRow("invoices"), { source: "detached", name: "logged_detached" })},
@@ -5172,46 +5167,14 @@ class Query {
   }
 
   /**
-   * Moves an oficio to `status`, stamping `stampColumn` with `at`, when its status is one of `from`.
-   * Leaving `issued` also marks its `uploaded` invoices `sent` (RF-FIN-10). One statement, logged.
+   * Deletes an oficio and releases its invoices, logged, in one statement.
    *
-   * @returns {Promise<object | null>} the oficio row, or null when missing or not movable
-   */
-  async advanceOficio(oficioId, { status, stampColumn, from, at }, actorId) {
-    const [row] = await this.#rows(
-      `with prior as (
-         select * from oficios x where x.id = $2 and x.deleted_at is null and x.status = any($4::text[])
-       ),
-       changed as (
-         update oficios x set status = $3, ${stampColumn} = $5::timestamptz
-           from prior
-          where x.id = prior.id
-         returning x.*
-       ),
-       sent_invoices as (
-         update invoices i set status = 'sent', sent_at = $5::timestamptz
-           from prior
-          where i.oficio_id = prior.id and prior.status = 'issued'
-            and i.status = 'uploaded' and i.deleted_at is null
-         returning i.*
-       ),
-       ${loggedChange("oficio_status_changed", "oficios", "$1", "(select to_jsonb(prior) from prior)")},
-       ${loggedChange("invoice_status_changed", "invoices", "$1", beforeRow("invoices"), { source: "sent_invoices", name: "logged_invoices" })}
-       select * from changed`,
-      [actorId, oficioId, status, from, at],
-    );
-    return row ?? null;
-  }
-
-  /**
-   * Deletes an oficio still `issued` and releases its invoices, logged, in one statement.
-   *
-   * @returns {Promise<object | null>} the deleted row, or null when missing or no longer `issued`
+   * @returns {Promise<object | null>} the deleted row, or null when missing
    */
   async deleteOficio(oficioId, actorId, at) {
     const [row] = await this.#rows(
       `with prior as (
-         select * from oficios x where x.id = $2 and x.deleted_at is null and x.status = 'issued'
+         select * from oficios x where x.id = $2 and x.deleted_at is null
        ),
        changed as (
          update oficios x set deleted_at = $3::timestamptz from prior where x.id = prior.id returning x.*
@@ -5263,47 +5226,20 @@ class Query {
   }
 
   async getReceipt(receiptId) {
-    const [row] = await this.#rows(`${RECEIPT_SELECT} where x.id = $1`, [receiptId]);
+    const [row] = await this.#rows(`${RECEIPT_SELECT} where x.id = $1 and x.deleted_at is null`, [receiptId]);
     return row ?? null;
   }
 
-  /** Referenced receipts, newest first. */
-  async listReceipts({ projectId = null, status = null, limit = 50, offset = 0 } = {}) {
+  /** Live referenced receipts, newest first, optionally of one project or by whether a correction is pending. */
+  async listReceipts({ projectId = null, correction = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
       `${RECEIPT_SELECT}
-        where ($1::bigint is null or x.project_id = $1::bigint)
-          and ($2::text is null or x.status = $2::text)
+        where x.deleted_at is null
+          and ($1::bigint is null or x.project_id = $1::bigint)
+          and ($2::boolean is null or (x.correction_requested_at is not null) = $2::boolean)
         order by x.created_at desc, x.id desc
         limit $3 offset $4`,
-      [projectId, status, limit, offset],
-    );
-  }
-
-  /**
-   * Reminds `userId` to email the people who uploaded an oficio's invoices: the message is
-   * `lead` + their addresses + `trail`. Nothing when the invoices have no live uploader; a used
-   * `oficio-email:<id>:<step>` key writes nothing.
-   *
-   * @returns {Promise<object[]>} the notifications written
-   */
-  async notifyOficioEmail(oficioId, userId, { step, title, lead, trail }) {
-    return this.#rows(
-      `with emails as (
-         select string_agg(distinct u.email, ', ' order by u.email) as list
-           from invoices i
-           join users u on u.id = i.created_by and u.deleted_at is null
-          where i.oficio_id = $1 and i.deleted_at is null
-       )
-       insert into notifications (
-         user_id, category, type, title, message, source_type, source_id, dedup_key
-       )
-       select $2, 'recordatorio', 'proyecto', $4::text, $5::text || e.list || $6::text,
-              'oficios', $1, 'oficio-email:' || $1 || ':' || $3::text
-         from emails e
-        where e.list is not null
-       on conflict (user_id, dedup_key) where dedup_key is not null do nothing
-       returning *`,
-      [oficioId, userId, step, title, lead, trail],
+      [projectId, correction, limit, offset],
     );
   }
 

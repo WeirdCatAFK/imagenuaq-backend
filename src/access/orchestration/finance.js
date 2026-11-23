@@ -1,7 +1,6 @@
-// The finance cycle: quotes, invoices, oficios, payments, referenced receipts and providers, and
-// what each project is still missing (RF-FIN-01 to RF-FIN-18). Areas rarely upload everything, so
-// little is required and finance reads the gaps instead (DATAMODEL §2.20). Every write logs itself
-// in the same statement, not via events.
+// Finance records: quotes, invoices, oficios, payments, referenced receipts and providers, and what
+// each project is still missing (RF-FIN-01 to RF-FIN-18). No record has stages: it is uploaded, and
+// finance asks for a correction when it is wrong (DATAMODEL §2.20). Every write logs itself in the same statement.
 import query from "../resources/query.js";
 import notifications from "./notifications.js";
 import { currentActor } from "../../utils/context.js";
@@ -26,40 +25,8 @@ const UUID_FORMAT = /^[\dA-F]{8}-[\dA-F]{4}-[\dA-F]{4}-[\dA-F]{4}-[\dA-F]{12}$/;
 const AMOUNT_FORMAT = /^\d{1,10}(\.\d{1,2})?$/;
 const EMAIL_FORMAT = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** RF-FIN-03: a quote is visible from `issued`; these are the moves finance can make from each status. */
-const QUOTE_MOVES = {
-  issued: ["in_review", "approved", "rejected"],
-  in_review: ["approved", "rejected"],
-  approved: [],
-  rejected: [],
-};
-
-/** RF-FIN-10. `sent` is set by the oficio that carries the invoice; the rest by INVOICE_MOVES. */
-const INVOICE_STATUSES = ["uploaded", "sent", "in_payment", "paid"];
-
-/** RF-FIN-10: where an invoice may move by hand, from which statuses, and the date it stamps. */
-const INVOICE_MOVES = {
-  in_payment: { from: ["uploaded", "sent"], stamp: "in_payment_at" },
-  paid: { from: ["in_payment"], stamp: "paid_at" },
-};
-
-/** RF-FIN-12: an oficio's steps in order. It moves forward and may skip; each step reached is dated. */
-const OFICIO_STEPS = ["issued", "sent", "signed", "answered", "paid"];
-const OFICIO_STAMPS = { sent: "sent_at", signed: "signed_at", answered: "answered_at", paid: "paid_at" };
-
 /** RF-FIN-15: `incoming` pays an oficio, `outgoing` pays a provider's invoice. */
 const PAYMENT_DIRECTIONS = ["incoming", "outgoing"];
-
-/**
- * RF-FIN-16: a referenced receipt is drafted, submitted, validated by someone else, then issued
- * and paid; a rejection returns it to draft. These are the moves after validation.
- */
-const RECEIPT_STATUSES = ["draft", "pending_validation", "validated", "issued", "paid", "cancelled"];
-const RECEIPT_MOVES = {
-  issued: { from: ["validated"], stamp: "issued_at" },
-  paid: { from: ["issued"], stamp: "paid_at" },
-  cancelled: { from: ["draft", "pending_validation", "validated", "issued"], stamp: "cancelled_at" },
-};
 
 /** What finance's project list can be filtered by; computed in query.financeProjects(). */
 export const FINANCE_FLAGS = [
@@ -67,10 +34,22 @@ export const FINANCE_FLAGS = [
   "costed_no_quote",
   "delivered_no_invoice",
   "invoice_not_in_oficio",
-  "oficio_unanswered",
   "payment_no_folio",
+  "correction_requested",
   "no_finance_records",
 ];
+
+/** The records finance can ask to correct: route kind to its getter (here and in query), its query updater, and how it reads. */
+const CORRECTABLE = {
+  quotes: { get: "getQuote", update: "updateQuote", label: "la cotización" },
+  invoices: { get: "getInvoice", update: "updateInvoice", label: "la factura" },
+  oficios: { get: "getOficio", update: "updateOficio", label: "el oficio" },
+  payments: { get: "getPayment", update: "updatePayment", label: "el pago" },
+  receipts: { get: "getReceipt", update: "updateReceipt", label: "el recibo" },
+};
+
+/** Fields every edit sets: an edit answers any pending correction request. */
+const CORRECTION_CLEARED = { correction_note: null, correction_requested_at: null, correction_requested_by: null };
 
 /**
  * A non-negative amount with at most two decimals, as the string Postgres stores exactly.
@@ -165,9 +144,6 @@ const RECEIPT_FIELDS = {
 
 /** The file columns a finance record may point at, each checked to lie in the project's folder. */
 const FILE_COLUMNS = { file_id: "fileId", stamped_file_id: "stampedFileId", proof_file_id: "proofFileId" };
-
-/** `column in ('a', 'b')` for a guard. The values are this module's own constants, never input. */
-const inList = (column, values) => `${column} in (${values.map((value) => `'${value}'`).join(", ")})`;
 
 /**
  * Reads `input` through `spec` into column values. `partial` skips absent keys (a PATCH); a full
@@ -296,16 +272,67 @@ class Finance {
 
   /**
    * Projects with their finance standing, the most missing invoices first; `flag` keeps only the
-   * projects showing it (RF-EST-08, RF-FIN-07).
+   * projects showing it (RF-EST-08, RF-FIN-07). `completed` lists the ones finance marked complete
+   * instead of the open ones.
    *
    * @throws {ApiError} 400 on an unknown flag.
    */
-  async listProjects({ flag, limit, offset } = {}) {
+  async listProjects({ flag, completed, limit, offset } = {}) {
     const rows = await query.financeProjects({
       flag: optionalChoice(flag, "flag", FINANCE_FLAGS),
+      completed: optionalBoolean(completed, "completed") ?? false,
       ...page({ limit, offset }),
     });
     return rows.map(shapeStanding);
+  }
+
+  /**
+   * Marks a project's finance complete, which takes it out of the working list and silences its
+   * flags, or reopens it. It stays editable either way.
+   *
+   * @throws {ApiError} 400 unless `complete` is a boolean, 404.
+   */
+  async setFinanceComplete(projectId, { complete } = {}) {
+    const id = requireId(projectId, "projectId");
+    const done = optionalBoolean(complete, "complete");
+    if (done === null) throw ApiError.badRequest("complete is required.");
+    const fields = done
+      ? { finance_completed_at: new Date().toISOString(), finance_completed_by: actorId() }
+      : { finance_completed_at: null, finance_completed_by: null };
+    const row = await query.setFinanceComplete(id, fields, {
+      action: done ? "project_finance_completed" : "project_finance_reopened",
+      actorId: actorId(),
+    });
+    if (!row) throw ApiError.notFound("Project not found.");
+    return this.projectSummary(id);
+  }
+
+  /**
+   * Asks whoever uploaded a record to correct it, with what is wrong. The record keeps the request
+   * until someone edits it; a repeated request replaces the note and notifies again.
+   *
+   * @param {string} kind a key of CORRECTABLE
+   * @throws {ApiError} 400 on an unknown kind or a missing note, 404.
+   */
+  async requestCorrection(kind, recordId, { note } = {}) {
+    const spec = CORRECTABLE[kind];
+    if (!spec) throw ApiError.badRequest(`kind must be one of: ${Object.keys(CORRECTABLE).join(", ")}.`);
+    const id = requireId(recordId, "id");
+    const record = await query[spec.get](id);
+    if (!record) throw ApiError.notFound("Record not found.");
+    const text = requireText(note, "note", TEXT_MAX);
+    const row = await query[spec.update](id, {
+      correction_note: text,
+      correction_requested_at: new Date().toISOString(),
+      correction_requested_by: actorId(),
+    }, { action: "correction_requested", actorId: actorId() });
+    if (!row) throw ApiError.notFound("Record not found.");
+    await notifications.correctionRequested(
+      { kind, id, label: spec.label, projectKey: record.project_key, note: text },
+      record.created_by,
+      actorId(),
+    );
+    return this[spec.get](id);
   }
 
   /**
@@ -329,10 +356,10 @@ class Finance {
     return standing?.flags ?? [];
   }
 
-  /** Quotes across projects, newest first (RF-FIN-04). @throws {ApiError} 400 */
-  async listQuotes({ status, projectId, limit, offset } = {}) {
+  /** Quotes across projects, newest first (RF-FIN-04); `correction` keeps those with or without a pending request. @throws {ApiError} 400 */
+  async listQuotes({ correction, projectId, limit, offset } = {}) {
     const rows = await query.listQuotes({
-      status: optionalChoice(status, "status", Object.keys(QUOTE_MOVES)),
+      correction: optionalBoolean(correction, "correction"),
       projectId: optionalId(projectId, "projectId"),
       ...page({ limit, offset }),
     });
@@ -347,7 +374,7 @@ class Finance {
   }
 
   /**
-   * Records a quote on a project, as `issued` (RF-FIN-01, RF-FIN-03).
+   * Records a quote on a project (RF-FIN-01).
    *
    * @throws {ApiError} 400 on a bad field, an unknown provider or a file outside the project, 404.
    */
@@ -359,73 +386,32 @@ class Finance {
     return this.getQuote(row.id);
   }
 
-  /**
-   * Corrects a quote still waiting for its decision.
-   *
-   * @throws {ApiError} 400, 404, 409 once it is approved or rejected.
-   */
+  /** Corrects a quote, answering any pending correction request. @throws {ApiError} 400, 404 */
   async updateQuote(quoteId, input) {
     const quote = await this.getQuote(quoteId);
     const fields = readFields(input, QUOTE_FIELDS, { partial: true });
     await this.#checkReferences(quote.projectId, fields);
-    const row = await query.updateQuote(quote.id, fields, {
-      actorId: actorId(),
-      guard: "x.status in ('issued', 'in_review')",
-    });
-    if (!row) throw ApiError.conflict("A decided quote cannot be changed.");
+    const row = await query.updateQuote(quote.id, { ...fields, ...CORRECTION_CLEARED }, { actorId: actorId() });
+    if (!row) throw ApiError.notFound("Quote not found.");
     return this.getQuote(row.id);
   }
 
-  /**
-   * Moves a quote to `in_review`, `approved` or `rejected` (RF-FIN-03). The route requires
-   * `finance.write`.
-   *
-   * @throws {ApiError} 400, 404, 409 when the move is not allowed from its status.
-   */
-  async decideQuote(quoteId, { decision, comment } = {}) {
-    const quote = await this.getQuote(quoteId);
-    const next = optionalChoice(decision, "decision", ["in_review", "approved", "rejected"]);
-    if (next === null) throw ApiError.badRequest("decision is required.");
-    const allowedFrom = Object.keys(QUOTE_MOVES).filter((status) => QUOTE_MOVES[status].includes(next));
-    if (!allowedFrom.includes(quote.status)) {
-      throw ApiError.conflict(`A quote that is ${quote.status} cannot move to ${next}.`);
-    }
-
-    const now = new Date().toISOString();
-    const fields =
-      next === "in_review"
-        ? { status: next, in_review_at: now }
-        : {
-            status: next,
-            decided_at: now,
-            decided_by: actorId(),
-            decision_comment: optionalText(comment, "comment", TEXT_MAX),
-          };
-    const row = await query.updateQuote(quote.id, fields, {
-      action: "quote_decided",
-      actorId: actorId(),
-      guard: `x.status in (${allowedFrom.map((status) => `'${status}'`).join(", ")})`,
-    });
-    if (!row) throw ApiError.conflict("The quote changed meanwhile; reload it.");
-    return this.getQuote(row.id);
-  }
-
-  /** @throws {ApiError} 404, 409 once decided. */
+  /** @throws {ApiError} 404, 409 while an invoice points at it. */
   async deleteQuote(quoteId) {
     const quote = await this.getQuote(quoteId);
     const row = await query.updateQuote(quote.id, { deleted_at: new Date().toISOString() }, {
       action: "quote_deleted",
       actorId: actorId(),
-      guard: "x.status in ('issued', 'in_review') and not exists (select 1 from invoices i where i.quote_id = x.id and i.deleted_at is null)",
+      guard: "not exists (select 1 from invoices i where i.quote_id = x.id and i.deleted_at is null)",
     });
-    if (!row) throw ApiError.conflict("A decided quote, or one an invoice points at, cannot be deleted.");
+    if (!row) throw ApiError.conflict("A quote an invoice points at cannot be deleted.");
     return shapeQuote(row);
   }
 
-  /** Invoices across projects, newest first (RF-FIN-09). @throws {ApiError} 400 */
-  async listInvoices({ status, projectId, limit, offset } = {}) {
+  /** Invoices across projects, newest first (RF-FIN-09); `correction` keeps those with or without a pending request. @throws {ApiError} 400 */
+  async listInvoices({ correction, projectId, limit, offset } = {}) {
     const rows = await query.listInvoices({
-      status: optionalChoice(status, "status", INVOICE_STATUSES),
+      correction: optionalBoolean(correction, "correction"),
       projectId: optionalId(projectId, "projectId"),
       ...page({ limit, offset }),
     });
@@ -440,7 +426,7 @@ class Finance {
   }
 
   /**
-   * Uploads an invoice to a project, as `uploaded`. Only the amount is required (RF-FIN-06).
+   * Uploads an invoice to a project. Only the amount is required (RF-FIN-06).
    *
    * @throws {ApiError} 400 on a bad field, an unknown provider, a quote of another project or a file
    *   outside the project, 404, 409 when the fiscal folio is already uploaded.
@@ -457,31 +443,30 @@ class Finance {
   }
 
   /**
-   * Corrects an invoice not yet sent.
+   * Corrects an invoice, answering any pending correction request.
    *
-   * @throws {ApiError} 400, 404, 409 once sent or on a fiscal folio already uploaded.
+   * @throws {ApiError} 400, 404, 409 on a fiscal folio already uploaded.
    */
   async updateInvoice(invoiceId, input) {
     const invoice = await this.getInvoice(invoiceId);
     const fields = readFields(input, INVOICE_FIELDS, { partial: true });
     await this.#checkReferences(invoice.projectId, fields);
     const row = await uniquely(
-      () => query.updateInvoice(invoice.id, fields, { actorId: actorId(), guard: "x.status = 'uploaded'" }),
+      () => query.updateInvoice(invoice.id, { ...fields, ...CORRECTION_CLEARED }, { actorId: actorId() }),
       "An invoice with that fiscal folio is already uploaded.",
     );
-    if (!row) throw ApiError.conflict("An invoice already sent cannot be changed.");
+    if (!row) throw ApiError.notFound("Invoice not found.");
     return this.getInvoice(row.id);
   }
 
-  /** @throws {ApiError} 404, 409 once sent. */
+  /** @throws {ApiError} 404 */
   async deleteInvoice(invoiceId) {
     const invoice = await this.getInvoice(invoiceId);
     const row = await query.updateInvoice(invoice.id, { deleted_at: new Date().toISOString() }, {
       action: "invoice_deleted",
       actorId: actorId(),
-      guard: "x.status = 'uploaded'",
     });
-    if (!row) throw ApiError.conflict("An invoice already sent cannot be deleted.");
+    if (!row) throw ApiError.notFound("Invoice not found.");
     return shapeInvoice(row);
   }
 
@@ -514,17 +499,11 @@ class Finance {
     }
   }
 
-  /** Oficios across projects; with `unansweredDays`, those waiting longer, oldest first (RF-FIN-13). @throws {ApiError} 400 */
-  async listOficios({ status, projectId, unansweredDays, limit, offset } = {}) {
-    const days =
-      unansweredDays === undefined || unansweredDays === "" ? null : Number(unansweredDays);
-    if (days !== null && (!Number.isInteger(days) || days < 0)) {
-      throw ApiError.badRequest("unansweredDays must be a non-negative integer.");
-    }
+  /** Oficios across projects, newest first; `correction` keeps those with or without a pending request. @throws {ApiError} 400 */
+  async listOficios({ correction, projectId, limit, offset } = {}) {
     const rows = await query.listOficios({
-      status: optionalChoice(status, "status", OFICIO_STEPS),
+      correction: optionalBoolean(correction, "correction"),
       projectId: optionalId(projectId, "projectId"),
-      unansweredDays: days,
       ...page({ limit, offset }),
     });
     return rows.map(shapeOficio);
@@ -541,7 +520,7 @@ class Finance {
    * Issues an oficio charging the requesting entity, with the invoices it carries (RF-FIN-11).
    *
    * @throws {ApiError} 400 on a bad field or an invoice of another project, 404, 409 on a folio
-   *   already used or an invoice already sent or in another oficio.
+   *   already used or an invoice in another oficio.
    */
   async createOficio(projectId, input) {
     const id = await this.#liveProject(projectId);
@@ -557,95 +536,35 @@ class Finance {
   }
 
   /**
-   * Corrects an oficio. Its fields change at any step -- the stamped document arrives once it is
-   * signed -- but `invoiceIds`, which replaces its invoices, only while it is `issued`.
+   * Corrects an oficio, answering any pending correction request. `invoiceIds` replaces its invoices.
    *
-   * @throws {ApiError} 400, 404, 409 on a folio already used, or invoices of an oficio already sent.
+   * @throws {ApiError} 400, 404, 409 on a folio already used or an invoice in another oficio.
    */
   async updateOficio(oficioId, input) {
     const oficio = await this.getOficio(oficioId);
     const hasInvoices = input?.invoiceIds !== undefined;
     const fields = readFields(input, OFICIO_FIELDS, { partial: true, allowEmpty: hasInvoices });
     await this.#checkReferences(oficio.projectId, fields);
+    const invoiceIds = hasInvoices ? uniqueIds(input.invoiceIds, "invoiceIds") : null;
+    if (hasInvoices) await this.#checkOficioInvoices(oficio.projectId, invoiceIds, oficio.id);
 
-    if (Object.keys(fields).length > 0) {
-      const row = await uniquely(
-        () => query.updateOficio(oficio.id, fields, { actorId: actorId() }),
-        "An oficio with that folio already exists.",
-      );
-      if (!row) throw ApiError.notFound("Oficio not found.");
-    }
-    if (hasInvoices) {
-      if (oficio.status !== "issued") throw ApiError.conflict("The invoices of an oficio already sent cannot change.");
-      const invoiceIds = uniqueIds(input.invoiceIds, "invoiceIds");
-      await this.#checkOficioInvoices(oficio.projectId, invoiceIds, oficio.id);
-      if (!(await query.setOficioInvoices(oficio.id, invoiceIds, actorId()))) {
-        throw ApiError.conflict("The invoices of an oficio already sent cannot change.");
-      }
-    }
-    return this.getOficio(oficio.id);
-  }
-
-  /**
-   * Moves an oficio forward, possibly skipping steps; only the step reached gets its date
-   * (RF-FIN-12). Leaving `issued` marks its invoices `sent`. Reaching `sent` (or skipping past it)
-   * and reaching `paid` remind the actor to email the people who uploaded its invoices.
-   *
-   * @throws {ApiError} 400 on an unknown step, 404, 409 when it is not ahead of the current one.
-   */
-  async advanceOficio(oficioId, { status } = {}) {
-    const oficio = await this.getOficio(oficioId);
-    const next = optionalChoice(status, "status", OFICIO_STEPS.slice(1));
-    if (next === null) throw ApiError.badRequest("status is required.");
-    const from = OFICIO_STEPS.slice(0, OFICIO_STEPS.indexOf(next));
-    if (!from.includes(oficio.status)) {
-      throw ApiError.conflict(`An oficio that is ${oficio.status} cannot move to ${next}.`);
-    }
-
-    const row = await query.advanceOficio(
-      oficio.id,
-      { status: next, stampColumn: OFICIO_STAMPS[next], from, at: new Date().toISOString() },
-      actorId(),
+    const row = await uniquely(
+      () => query.updateOficio(oficio.id, { ...fields, ...CORRECTION_CLEARED }, { actorId: actorId() }),
+      "An oficio with that folio already exists.",
     );
-    if (!row) throw ApiError.conflict("The oficio changed meanwhile; reload it.");
-
-    const step = next === "paid" ? "paid" : oficio.status === "issued" ? "sent" : null;
-    if (step) await notifications.remindOficioEmail({ id: oficio.id, folio: oficio.folio }, actorId(), step);
+    if (!row) throw ApiError.notFound("Oficio not found.");
+    if (hasInvoices && !(await query.setOficioInvoices(oficio.id, invoiceIds, actorId()))) {
+      throw ApiError.notFound("Oficio not found.");
+    }
     return this.getOficio(oficio.id);
   }
 
-  /** Deletes an oficio still `issued`, releasing its invoices. @throws {ApiError} 404, 409 once sent. */
+  /** Deletes an oficio, releasing its invoices. @throws {ApiError} 404 */
   async deleteOficio(oficioId) {
     const oficio = await this.getOficio(oficioId);
     const row = await query.deleteOficio(oficio.id, actorId(), new Date().toISOString());
-    if (!row) throw ApiError.conflict("An oficio already sent cannot be deleted.");
+    if (!row) throw ApiError.notFound("Oficio not found.");
     return shapeOficio({ ...row, invoices: [] });
-  }
-
-  /**
-   * Moves an invoice to `in_payment`, with the folio that proves it (RF-FIN-10), or from there to
-   * `paid`. `sent` is never set here: the oficio sets it.
-   *
-   * @throws {ApiError} 400 on an unknown status or a missing folio, 404, 409 when not allowed from its status.
-   */
-  async setInvoiceStatus(invoiceId, { status, paymentFolio } = {}) {
-    const invoice = await this.getInvoice(invoiceId);
-    const next = optionalChoice(status, "status", Object.keys(INVOICE_MOVES));
-    if (next === null) throw ApiError.badRequest("status is required.");
-    const move = INVOICE_MOVES[next];
-    if (!move.from.includes(invoice.status)) {
-      throw ApiError.conflict(`An invoice that is ${invoice.status} cannot move to ${next}.`);
-    }
-
-    const fields = { status: next, [move.stamp]: new Date().toISOString() };
-    if (next === "in_payment") fields.payment_folio = requireText(paymentFolio, "paymentFolio", FOLIO_MAX);
-    const row = await query.updateInvoice(invoice.id, fields, {
-      action: "invoice_status_changed",
-      actorId: actorId(),
-      guard: inList("x.status", move.from),
-    });
-    if (!row) throw ApiError.conflict("The invoice changed meanwhile; reload it.");
-    return this.getInvoice(row.id);
   }
 
   /** Payments across projects; `missingFolio` keeps those without a tracking folio (RF-FIN-14). @throws {ApiError} 400 */
@@ -704,7 +623,7 @@ class Finance {
     const payment = await this.getPayment(paymentId);
     const fields = readFields(input, PAYMENT_FIELDS, { partial: true });
     await this.#checkReferences(payment.projectId, fields);
-    const row = await query.updatePayment(payment.id, fields, { actorId: actorId() });
+    const row = await query.updatePayment(payment.id, { ...fields, ...CORRECTION_CLEARED }, { actorId: actorId() });
     if (!row) throw ApiError.notFound("Payment not found.");
     return this.getPayment(row.id);
   }
@@ -720,10 +639,10 @@ class Finance {
     return shapePayment(row);
   }
 
-  /** Referenced receipts across projects. @throws {ApiError} 400 */
-  async listReceipts({ status, projectId, limit, offset } = {}) {
+  /** Referenced receipts across projects; `correction` keeps those with or without a pending request. @throws {ApiError} 400 */
+  async listReceipts({ correction, projectId, limit, offset } = {}) {
     const rows = await query.listReceipts({
-      status: optionalChoice(status, "status", RECEIPT_STATUSES),
+      correction: optionalBoolean(correction, "correction"),
       projectId: optionalId(projectId, "projectId"),
       ...page({ limit, offset }),
     });
@@ -738,7 +657,7 @@ class Finance {
   }
 
   /**
-   * Drafts a referenced receipt: coordination charging the requesting entity (RF-FIN-15).
+   * Records a referenced receipt: coordination charging the requesting entity (RF-FIN-15).
    *
    * @throws {ApiError} 400 on a bad field, a quote of another project or a file outside it, 404.
    */
@@ -750,83 +669,32 @@ class Finance {
     return this.getReceipt(row.id);
   }
 
-  /** Corrects a draft. @throws {ApiError} 400, 404, 409 once submitted. */
+  /** Corrects a receipt, answering any pending correction request. @throws {ApiError} 400, 404 */
   async updateReceipt(receiptId, input) {
     const receipt = await this.getReceipt(receiptId);
     const fields = readFields(input, RECEIPT_FIELDS, { partial: true });
     await this.#checkReferences(receipt.projectId, fields);
-    const row = await query.updateReceipt(receipt.id, fields, { actorId: actorId(), guard: "x.status = 'draft'" });
-    if (!row) throw ApiError.conflict("Only a draft receipt can be changed.");
+    const row = await query.updateReceipt(receipt.id, { ...fields, ...CORRECTION_CLEARED }, { actorId: actorId() });
+    if (!row) throw ApiError.notFound("Receipt not found.");
     return this.getReceipt(row.id);
   }
 
-  /** Sends a draft to be validated (RF-FIN-16). @throws {ApiError} 404, 409 unless a draft. */
-  async submitReceipt(receiptId) {
+  /** @throws {ApiError} 404 */
+  async deleteReceipt(receiptId) {
     const receipt = await this.getReceipt(receiptId);
-    const row = await query.updateReceipt(
-      receipt.id,
-      { status: "pending_validation", submitted_at: new Date().toISOString() },
-      { action: "receipt_submitted", actorId: actorId(), guard: "x.status = 'draft'" },
-    );
-    if (!row) throw ApiError.conflict("Only a draft receipt can be submitted.");
-    return this.getReceipt(row.id);
-  }
-
-  /**
-   * Validates a submitted receipt, or sends it back to draft with the reason (RF-FIN-16). Never by
-   * whoever created it. The route requires `finance.validate`.
-   *
-   * @throws {ApiError} 400 on a missing decision, 403 on the creator, 404, 409 when it is not awaiting validation.
-   */
-  async validateReceipt(receiptId, { decision, comment } = {}) {
-    const receipt = await this.getReceipt(receiptId);
-    const verdict = optionalChoice(decision, "decision", ["approved", "rejected"]);
-    if (verdict === null) throw ApiError.badRequest("decision is required.");
-    if (receipt.createdBy !== null && String(receipt.createdBy) === String(actorId())) {
-      throw ApiError.forbidden("A receipt cannot be validated by whoever created it.");
-    }
-
-    const note = optionalText(comment, "comment", TEXT_MAX);
-    const approved = verdict === "approved";
-    const fields = approved
-      ? { status: "validated", validated_by: actorId(), validated_at: new Date().toISOString(), validation_comment: note }
-      : { status: "draft", validation_comment: note };
-    const row = await query.updateReceipt(receipt.id, fields, {
-      action: approved ? "receipt_validated" : "receipt_rejected",
+    const row = await query.updateReceipt(receipt.id, { deleted_at: new Date().toISOString() }, {
+      action: "receipt_deleted",
       actorId: actorId(),
-      guard: "x.status = 'pending_validation'",
     });
-    if (!row) throw ApiError.conflict("Only a receipt awaiting validation can be validated.");
-    return this.getReceipt(row.id);
+    if (!row) throw ApiError.notFound("Receipt not found.");
+    return shapeReceipt(row);
   }
 
   /**
-   * Issues a validated receipt, marks an issued one paid, or cancels any not yet paid.
+   * Checks the invoices an oficio is to carry: of this project, live, and in no other oficio than
+   * `oficioId`.
    *
-   * @throws {ApiError} 400 on an unknown status, 404, 409 when not allowed from its status.
-   */
-  async setReceiptStatus(receiptId, { status } = {}) {
-    const receipt = await this.getReceipt(receiptId);
-    const next = optionalChoice(status, "status", Object.keys(RECEIPT_MOVES));
-    if (next === null) throw ApiError.badRequest("status is required.");
-    const move = RECEIPT_MOVES[next];
-    if (!move.from.includes(receipt.status)) {
-      throw ApiError.conflict(`A receipt that is ${receipt.status} cannot move to ${next}.`);
-    }
-    const row = await query.updateReceipt(
-      receipt.id,
-      { status: next, [move.stamp]: new Date().toISOString() },
-      { action: "receipt_status_changed", actorId: actorId(), guard: inList("x.status", move.from) },
-    );
-    if (!row) throw ApiError.conflict("The receipt changed meanwhile; reload it.");
-    return this.getReceipt(row.id);
-  }
-
-  /**
-   * Checks the invoices an oficio is to carry: of this project, live, `uploaded`, and in no other
-   * oficio than `oficioId`.
-   *
-   * @throws {ApiError} 400 on an invoice of another project, 409 on one already sent or taken.
+   * @throws {ApiError} 400 on an invoice of another project, 409 on one already taken.
    */
   async #checkOficioInvoices(projectId, invoiceIds, oficioId) {
     for (const invoiceId of invoiceIds) {
@@ -834,8 +702,8 @@ class Finance {
       if (invoice?.project_id !== projectId) {
         throw ApiError.badRequest(`Invoice ${invoiceId} is not an invoice of this project.`);
       }
-      if (invoice.status !== "uploaded" || (invoice.oficio_id !== null && invoice.oficio_id !== oficioId)) {
-        throw ApiError.conflict(`Invoice ${invoiceId} is already sent or in another oficio.`);
+      if (invoice.oficio_id !== null && invoice.oficio_id !== oficioId) {
+        throw ApiError.conflict(`Invoice ${invoiceId} is already in another oficio.`);
       }
     }
   }
@@ -873,11 +741,7 @@ function shapeQuote(row) {
     amount: amount(row.amount),
     description: row.description,
     fileId: row.file_id,
-    status: row.status,
-    inReviewAt: row.in_review_at,
-    decidedAt: row.decided_at,
-    decidedBy: row.decided_by,
-    decisionComment: row.decision_comment,
+    ...shapeCorrection(row),
     createdBy: row.created_by,
     createdAt: row.created_at,
     deletedAt: row.deleted_at ?? null,
@@ -899,15 +763,11 @@ function shapeInvoice(row) {
     fiscalFolio: row.fiscal_folio,
     destination: row.destination,
     fileId: row.file_id,
-    status: row.status,
     oficioId: row.oficio_id ?? null,
     oficioFolio: row.oficio_folio ?? null,
-    paymentFolio: row.payment_folio,
     paidAmount: amount(row.paid_amount ?? 0),
     balance: amount(Number(row.amount) - Number(row.paid_amount ?? 0)),
-    sentAt: row.sent_at,
-    inPaymentAt: row.in_payment_at,
-    paidAt: row.paid_at,
+    ...shapeCorrection(row),
     createdBy: row.created_by,
     createdAt: row.created_at,
     deletedAt: row.deleted_at ?? null,
@@ -922,6 +782,7 @@ function shapeStanding(row) {
     requester: row.requester,
     hasCost: row.has_cost,
     noFinance: row.no_finance,
+    financeCompletedAt: row.finance_completed_at,
     closedAt: row.closed_at,
     archivedAt: row.archived_at,
     expectedInvoices: row.expected,
@@ -932,6 +793,7 @@ function shapeStanding(row) {
     oficios: row.oficios,
     payments: row.payments,
     receipts: row.receipts,
+    corrections: row.corrections,
     flags: row.flags,
   };
 }
@@ -948,17 +810,12 @@ function shapeOficio(row) {
     amount: amount(row.amount),
     note: row.note,
     stampedFileId: row.stamped_file_id,
-    status: row.status,
-    sentAt: row.sent_at,
-    signedAt: row.signed_at,
-    answeredAt: row.answered_at,
-    paidAt: row.paid_at,
-    daysUnanswered: row.days_unanswered ?? null,
     invoices,
     invoicesTotal: amount(row.invoices_total ?? 0),
     amountMismatch: amount(row.amount) !== amount(row.invoices_total ?? 0),
     paidAmount: amount(row.paid_amount ?? 0),
     balance: amount(Number(row.amount) - Number(row.paid_amount ?? 0)),
+    ...shapeCorrection(row),
     createdBy: row.created_by,
     createdAt: row.created_at,
     deletedAt: row.deleted_at ?? null,
@@ -991,6 +848,7 @@ function shapePayment(row) {
     trackingFolio: row.tracking_folio,
     proofFileId: row.proof_file_id,
     note: row.note,
+    ...shapeCorrection(row),
     createdBy: row.created_by,
     createdAt: row.created_at,
     deletedAt: row.deleted_at ?? null,
@@ -1008,16 +866,19 @@ function shapeReceipt(row) {
     reference: row.reference,
     concept: row.concept,
     fileId: row.file_id,
-    status: row.status,
-    submittedAt: row.submitted_at,
-    validatedBy: row.validated_by,
-    validatedAt: row.validated_at,
-    validationComment: row.validation_comment,
-    issuedAt: row.issued_at,
-    paidAt: row.paid_at,
-    cancelledAt: row.cancelled_at,
+    ...shapeCorrection(row),
     createdBy: row.created_by,
     createdAt: row.created_at,
+    deletedAt: row.deleted_at ?? null,
+  };
+}
+
+/** The pending correction request on a finance record, all null when there is none. */
+function shapeCorrection(row) {
+  return {
+    correctionNote: row.correction_note ?? null,
+    correctionRequestedAt: row.correction_requested_at ?? null,
+    correctionRequestedBy: row.correction_requested_by ?? null,
   };
 }
 

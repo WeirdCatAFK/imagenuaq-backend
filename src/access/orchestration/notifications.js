@@ -263,20 +263,22 @@ class Notifications {
   }
 
   /**
-   * Recuerda a quien movió un oficio que escriba el correo a quienes subieron sus facturas: al
-   * enviarlo (`step` = `sent`), que sus facturas van en él; al pagarse (`paid`), que ya se pagó.
-   * Avisar al solicitante es un correo de finanzas, no un aviso del sistema. Una vez por oficio y paso.
+   * Avisa a quien subió un registro de finanzas que finanzas pide corregirlo, con la nota. No avisa
+   * cuando nadie lo subió o cuando lo subió quien pide. No lleva clave de duplicado, así que cada solicitud avisa.
+   *
+   * @param {{kind: string, id: number, label: string, projectKey: string|null, note: string}} record
    */
-  async remindOficioEmail(oficio, userId, step) {
-    const sent = step === "sent";
-    return this.deliver(
-      await query.notifyOficioEmail(oficio.id, userId, {
-        step,
-        title: sent ? "Avisa del oficio enviado" : "Avisa del oficio pagado",
-        lead: `Oficio ${oficio.folio} ${sent ? "enviado" : "pagado"}: escribe el correo a `,
-        trail: sent ? " de que sus facturas van en este oficio." : " de que ya se pagó.",
-      }),
-    );
+  async correctionRequested({ kind, id, label, projectKey, note }, uploaderId, actorId) {
+    if (uploaderId == null || String(uploaderId) === String(actorId)) return null;
+    return this.create({
+      userId: uploaderId,
+      category: "alerta",
+      type: "proyecto",
+      title: `Corrige ${label}${projectKey ? ` de ${projectKey}` : ""}`,
+      message: note,
+      sourceType: kind,
+      sourceId: id,
+    });
   }
 
   /** Registra este módulo como suscriptor de eventos de dominio. Se llama una vez al iniciar la aplicación. */

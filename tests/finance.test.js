@@ -1,6 +1,6 @@
 // Quotes, invoices, providers and the finance standing of a project (RF-FIN-01 to RF-FIN-10): areas
-// upload, finance decides and reads the gaps, closing never waits on them, and finance files outlive
-// the semester sweep.
+// upload, finance asks for corrections, reads the gaps and marks projects complete, closing never waits
+// on them, and finance files outlive the semester sweep.
 import { test, before, after, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -78,34 +78,73 @@ describe("/api/finance", () => {
     (await server.get(`/api/finance/projects/${projectId}`, { token: moneyToken })).body.finance;
 
   describe("quotes", () => {
-    test("an area uploads, finance decides, and each write is logged in the same statement", async () => {
+    test("an area uploads, finance asks for a correction, and the uploader's edit answers it", async () => {
       const made = await project();
       const file = await upload(made.folderId);
 
       const created = await quote(made.id, { amount: "1250.50", entity: "Facultad de Ingeniería", fileId: file.id });
       assert.equal(created.status, 201);
-      assert.equal(created.body.quote.status, "issued");
       assert.equal(created.body.quote.amount, "1250.50");
+      assert.equal(created.body.quote.correctionNote, null);
+      assert.equal("status" in created.body.quote, false);
 
-      const decide = (decision, token = moneyToken) =>
-        server.post(`/api/finance/quotes/${created.body.quote.id}/decision`, { token, body: { decision, comment: "Ok" } });
-      assert.equal((await decide("approved", workerToken)).status, 403);
-      assert.equal((await decide("in_review")).body.quote.status, "in_review");
-      const approved = await decide("approved");
-      assert.equal(approved.body.quote.status, "approved");
-      assert.equal(String(approved.body.quote.decidedBy), String(money.id));
-      assert.equal((await decide("rejected")).status, 409);
+      const id = created.body.quote.id;
+      const ask = (body, token = moneyToken) => server.post(`/api/finance/quotes/${id}/correction`, { token, body });
+      assert.equal((await ask({ note: "Falta el RFC" }, workerToken)).status, 403);
+      assert.equal((await ask({})).status, 400);
+      const asked = await ask({ note: "Falta el RFC" });
+      assert.equal(asked.status, 200);
+      assert.equal(asked.body.quote.correctionNote, "Falta el RFC");
+      assert.equal(String(asked.body.quote.correctionRequestedBy), String(money.id));
 
-      const edit = await server.patch(`/api/finance/quotes/${created.body.quote.id}`, {
-        token: workerToken,
-        body: { amount: 10 },
-      });
-      assert.equal(edit.status, 409);
+      const [told] = await sql("select * from notifications where source_type = 'quotes' and source_id = $1", [id]);
+      assert.equal(told.message, "Falta el RFC");
+      assert.match(told.title, new RegExp(made.key));
+      assert.deepEqual((await standing(made.id)).flags, ["correction_requested"]);
+      const pending = await server.get("/api/finance/quotes?correction=true", { token: moneyToken });
+      assert.deepEqual(pending.body.quotes.map((row) => row.id), [id]);
 
-      const logs = await logsFor("quotes", created.body.quote.id);
-      assert.deepEqual(logs.map((log) => log.action), ["quote_created", "quote_decided", "quote_decided"]);
-      assert.equal(logs[1].before_data.status, "issued");
-      assert.equal(logs[2].after_data.status, "approved");
+      const edit = await server.patch(`/api/finance/quotes/${id}`, { token: workerToken, body: { amount: 10 } });
+      assert.equal(edit.status, 200);
+      assert.equal(edit.body.quote.correctionNote, null);
+      assert.equal(edit.body.quote.correctionRequestedAt, null);
+      assert.deepEqual((await standing(made.id)).flags, []);
+
+      const logs = await logsFor("quotes", id);
+      assert.deepEqual(logs.map((log) => log.action), ["quote_created", "correction_requested", "quote_updated"]);
+    });
+
+    test("every kind of record takes a correction request, and an unknown one is 404", async () => {
+      const made = await project();
+      const inv = (await invoice(made.id, { amount: 5 })).body.invoice;
+      const oficio = (await server.post(`/api/finance/projects/${made.id}/oficios`, {
+        token: moneyToken,
+        body: { folio: "OF-CORR-1", amount: 5, invoiceIds: [inv.id] },
+      })).body.oficio;
+      const payment = (await server.post(`/api/finance/projects/${made.id}/payments`, {
+        token: moneyToken,
+        body: { direction: "incoming", oficioId: oficio.id, amount: 5 },
+      })).body.payment;
+      const receipt = (await server.post(`/api/finance/projects/${made.id}/receipts`, {
+        token: moneyToken,
+        body: { amount: 5 },
+      })).body.receipt;
+
+      for (const [kind, key, id] of [
+        ["invoices", "invoice", inv.id],
+        ["oficios", "oficio", oficio.id],
+        ["payments", "payment", payment.id],
+        ["receipts", "receipt", receipt.id],
+      ]) {
+        const res = await server.post(`/api/finance/${kind}/${id}/correction`, { token: moneyToken, body: { note: "Revisa" } });
+        assert.equal(res.status, 200, kind);
+        assert.equal(res.body[key].correctionNote, "Revisa", kind);
+      }
+      assert.equal((await standing(made.id)).corrections, 4);
+      assert.equal(
+        (await server.post("/api/finance/invoices/999999/correction", { token: moneyToken, body: { note: "x" } })).status,
+        404,
+      );
     });
 
     test("a bad amount, an unknown provider or a file outside the project is refused", async () => {
@@ -124,7 +163,7 @@ describe("/api/finance", () => {
     test("finance lists quotes across projects; an area cannot", async () => {
       const made = await project();
       await quote(made.id, { amount: 5 });
-      const res = await server.get("/api/finance/quotes?status=issued", { token: moneyToken });
+      const res = await server.get("/api/finance/quotes?correction=false", { token: moneyToken });
       assert.equal(res.status, 200);
       assert.equal(res.body.quotes[0].projectKey, made.key);
       assert.equal((await server.get("/api/finance/quotes", { token: workerToken })).status, 403);
@@ -136,7 +175,6 @@ describe("/api/finance", () => {
       const made = await project();
       const bare = await invoice(made.id, { amount: 300 });
       assert.equal(bare.status, 201);
-      assert.equal(bare.body.invoice.status, "uploaded");
 
       assert.equal((await invoice(made.id, { amount: 1, fiscalFolio: "nope" })).status, 400);
       assert.equal((await invoice(made.id, { amount: 1, fiscalFolio: FISCAL.toLowerCase() })).status, 201);
@@ -148,16 +186,6 @@ describe("/api/finance", () => {
       const other = await project({ title: "Otro" });
       const foreign = (await quote(other.id, { amount: 1 })).body.quote;
       assert.equal((await invoice(made.id, { amount: 1, quoteId: foreign.id })).status, 400);
-    });
-
-    test("once sent it can be neither changed nor deleted", async () => {
-      const made = await project();
-      const created = (await invoice(made.id, { amount: 300 })).body.invoice;
-      await sql("update invoices set status = 'sent', sent_at = now() where id = $1", [created.id]);
-
-      const path = `/api/finance/invoices/${created.id}`;
-      assert.equal((await server.patch(path, { token: workerToken, body: { amount: 1 } })).status, 409);
-      assert.equal((await server.delete(path, { token: workerToken })).status, 409);
     });
 
     test("a deleted one stops counting", async () => {
@@ -225,6 +253,34 @@ describe("/api/finance", () => {
       assert.deepEqual(listed.body.projects.map((row) => row.projectId), [made.id]);
       assert.equal((await server.get("/api/finance/projects?flag=nope", { token: moneyToken })).status, 400);
       assert.equal((await server.get("/api/finance/projects", { token: workerToken })).status, 403);
+    });
+
+    test("a project finance marks complete leaves the working list, shows no flags, and reopens", async () => {
+      const made = await project({ hasCost: true });
+      const complete = (value, token = moneyToken) =>
+        server.put(`/api/finance/projects/${made.id}/complete`, { token, body: { complete: value } });
+      const ids = async (query) =>
+        (await server.get(`/api/finance/projects${query}`, { token: moneyToken })).body.projects.map((row) => row.projectId);
+
+      assert.equal((await complete(true, workerToken)).status, 403);
+      assert.equal((await complete("yes")).status, 400);
+      const done = await complete(true);
+      assert.equal(done.status, 200);
+      assert.ok(done.body.finance.financeCompletedAt);
+      assert.deepEqual(done.body.finance.flags, []);
+      assert.equal((await ids("")).includes(made.id), false);
+      assert.deepEqual(await ids("?completed=true"), [made.id]);
+
+      assert.equal((await invoice(made.id, { amount: 1 })).status, 201, "stays editable");
+
+      const reopened = await complete(false);
+      assert.equal(reopened.body.finance.financeCompletedAt, null);
+      assert.deepEqual(reopened.body.finance.flags, ["costed_no_quote", "invoice_not_in_oficio"]);
+      assert.equal((await ids("")).includes(made.id), true);
+      assert.deepEqual((await logsFor("projects", made.id)).map((log) => log.action).slice(-2), [
+        "project_finance_completed",
+        "project_finance_reopened",
+      ]);
     });
 
     test("withdrawing the invoice request clears the declared count", async () => {
