@@ -317,6 +317,7 @@ describe('/api/notifications', () => {
         assert.equal(matching[0].category, 'alerta');
         assert.equal(matching[0].type, 'proyecto');
         assert.equal(matching[0].title, 'Nueva etapa activada');
+        assert.equal(String(matching[0].projectId), String(project.id));
 
         assert.match(matching[0].message, /Proyecto de notificaciones/);
         assert.match(matching[0].message, /Diseño gráfico/);

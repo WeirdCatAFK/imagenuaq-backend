@@ -5470,6 +5470,7 @@ export function buildOpenApiDocument() {
                         message: 'Se entregó la etapa "Arte" del proyecto "Cartel" (PRY-000004) y espera tu visto bueno.',
                         sourceType: 'project_stages',
                         sourceId: 41,
+                        projectId: 4,
                         createdAt: '2026-10-21T16:02:11.000Z',
                         readAt: null,
                         isRead: false,

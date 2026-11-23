@@ -151,6 +151,7 @@ function shapeNotification(row) {
     message: row.message,
     sourceType: row.source_type,
     sourceId: row.source_id,
+    projectId: row.project_id ?? (row.source_type === "projects" ? row.source_id : null),
     createdAt: row.created_at,
     readAt: row.read_at,
     isRead: row.read_at !== null,

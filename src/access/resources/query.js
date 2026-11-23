@@ -4474,11 +4474,14 @@ class Query {
   /** A user's notifications, newest first. */
   async listNotifications(userId, limit = 50, offset = 0) {
     return this.#rows(
-      `select id, user_id, category, type, title, message,
-              source_type, source_id, created_at, read_at
-         from notifications
-        where user_id = $1
-        order by created_at desc, id desc
+      `select n.id, n.user_id, n.category, n.type, n.title, n.message,
+              n.source_type, n.source_id, n.created_at, n.read_at, fp.project_id
+         from notifications n
+         left join project_stages ps on n.source_type = 'project_stages' and ps.id = n.source_id
+         left join flow_stages fs on fs.id = ps.flow_stage_id
+         left join flow_phases fp on fp.id = fs.phase_id
+        where n.user_id = $1
+        order by n.created_at desc, n.id desc
         limit $2 offset $3`,
       [userId, limit, offset],
     );
@@ -4558,7 +4561,7 @@ class Query {
     return this.#rows(
       `with stage_info as (
          select ps.id, ps.assigned_to, ps.delivered_by, fs.area_id, fs.title as stage_title,
-                p.key as project_key, p.title as project_title
+                p.id as project_id, p.key as project_key, p.title as project_title
            from project_stages ps
            join flow_stages fs on fs.id = ps.flow_stage_id
            join flow_phases fp on fp.id = fs.phase_id
@@ -4593,7 +4596,7 @@ class Query {
         cross join stage_info s
         where u.id is distinct from $6::bigint
        on conflict (user_id, dedup_key) where dedup_key is not null do nothing
-       returning *`,
+       returning *, (select project_id from stage_info) as project_id`,
       [
         stageId,
         Boolean(to.assignee),
