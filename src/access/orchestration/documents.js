@@ -92,7 +92,7 @@ class Documents {
     const actor = currentActor();
     const parent = optionalId(parentId, "parentId");
     const cleanName = requireName(name);
-    if (parent !== null) await this.#writable(parent);
+    if (parent !== null) await this.#uploadable(parent);
 
     try {
       const row = await query.createFolder({ parentId: parent, name: cleanName, ownerId: actor.id });
@@ -196,7 +196,7 @@ class Documents {
     const id = requireId(folderId, "folderId");
     const cleanName = requireName(name);
     const cleanMime = optionalText(mime, "Content-Type", MIME_MAX);
-    await this.#writable(id);
+    await this.#uploadable(id);
 
     let stored;
     try {
@@ -582,7 +582,7 @@ class Documents {
     const id = requireId(folderId, "folderId");
     const cleanName = requireName(name);
     const cleanMime = optionalText(mime, "mime", MIME_MAX);
-    await this.#writable(id);
+    await this.#uploadable(id);
 
     sweepStaleUploads();
 
@@ -756,6 +756,20 @@ class Documents {
     const result = await this.#readable(folderId);
     if (result.access === "read") throw ApiError.forbidden("This folder is read-only for you.");
     return result;
+  }
+
+  /**
+   * Adding to a folder: write on it, or `finance.write` anywhere inside a project's folder, where
+   * finance attaches its records without being in the project's areas (RF-ARC-05).
+   *
+   * @throws {ApiError} 404 when missing, 403 when read-only.
+   */
+  async #uploadable(folderId) {
+    const { access } = await this.#readable(folderId);
+    if (access !== "read") return;
+    const codes = await query.getRolePermissionCodes(currentActor().roleId);
+    if (codes.includes("finance.write") && (await query.folderProject(folderId))) return;
+    throw ApiError.forbidden("This folder is read-only for you.");
   }
 
   /** @throws {ApiError} 404 when missing, 403 when the caller may not manage it. */
