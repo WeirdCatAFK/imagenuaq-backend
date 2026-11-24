@@ -5565,6 +5565,33 @@ class Query {
     );
   }
 
+  /**
+   * Creates the balances a person is due in a cycle and has no row for: a copy of their contract
+   * type's cap valid on `on` (RF-AUS-04), with what the absences already authorised in that cycle
+   * consumed. With `absenceTypeId`, only that type's.
+   */
+  async ensureBalances(userId, { cycleStart, cycleEnd, on, absenceTypeId = null }) {
+    await this.#rows(
+      `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted, used)
+       select u.id, t.id, $2::date, $3::date, c.amount,
+              coalesce((
+                select sum(greatest(1, ceil(extract(epoch from (e.ends_at - e.starts_at)) / 86400)))
+                  from absences a
+                  join events e on e.id = a.event_id
+                  join event_participants ep on ep.event_id = e.id and ep.user_id = u.id
+                 where a.absence_type_id = t.id and a.status in ('approved', 'taken') and e.all_day
+                   and e.starts_at >= $2::date and e.starts_at < $3::date + 1), 0)
+         from users u
+         join contract_type_entitlements c on c.contract_type_id = u.contract_type_id
+         join absence_types t on t.id = c.absence_type_id and t.consumes_balance
+        where u.id = $1::bigint
+          and c.valid_from <= $4::date and (c.valid_to is null or c.valid_to >= $4::date)
+          and ($5::bigint is null or t.id = $5::bigint)
+       on conflict (user_id, absence_type_id, cycle_start) do nothing`,
+      [userId, cycleStart, cycleEnd, on, absenceTypeId],
+    );
+  }
+
   async upsertBalance(userId, absenceTypeId, cycleStart, cycleEnd, granted) {
     const [row] = await this.#rows(
       `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted)
@@ -5575,17 +5602,6 @@ class Query {
       [userId, absenceTypeId, cycleStart, cycleEnd, granted],
     );
     return row;
-  }
-
-  /** Adds `delta` to `used`; negative to restore on cancellation. */
-  async adjustBalanceUsed(userId, absenceTypeId, cycleStart, delta) {
-    const [row] = await this.#rows(
-      `update leave_balances set used = used + $4
-        where user_id = $1 and absence_type_id = $2 and cycle_start = $3::date
-       returning *`,
-      [userId, absenceTypeId, cycleStart, delta],
-    );
-    return row ?? null;
   }
 
   /**
@@ -5675,9 +5691,12 @@ class Query {
     return row ?? null;
   }
 
-  /** Absences filtered by user, area, status and type. */
+  /**
+   * Absences, newest first. With `viewerId`, only that person's own and everyone's `approved` and
+   * `taken` ones, which is what availability is (RF-AUS-12).
+   */
   async listAbsences({ userId = null, areaId = null, status = null, absenceTypeId = null,
-                        limit = 50, offset = 0 } = {}) {
+                        viewerId = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
       `select a.event_id, a.reason, a.status, a.absence_type_id, a.document_file_id,
               a.approved_by, a.approved_at, a.created_at,
@@ -5695,26 +5714,39 @@ class Query {
           and ($2::bigint is null or ep.area_id = $2::bigint)
           and ($3::text is null or a.status = $3::text)
           and ($4::bigint is null or a.absence_type_id = $4::bigint)
+          and ($7::bigint is null or ep.user_id = $7::bigint or a.status in ('approved', 'taken'))
         order by a.created_at desc, a.event_id desc
         limit $5 offset $6`,
-      [userId, areaId, status, absenceTypeId, limit, offset],
+      [userId, areaId, status, absenceTypeId, limit, offset, viewerId],
     );
   }
 
-  /** Transitions an absence's status and records the change in one statement. */
-  async updateAbsenceStatus(eventId, { status, changedBy, note, approvedBy, approvedAt, documentFileId }) {
+  /**
+   * Transitions an absence out of `from`, with its history row and its effect on the balance, in one
+   * statement. Null when it was no longer in `from`, so two decisions at once cannot both count.
+   */
+  async updateAbsenceStatus(eventId, {
+    from, status, changedBy, note = null, approvedBy = null, approvedAt = null,
+    balanceDelta = 0, cycleStart = null,
+  }) {
     const [row] = await this.#rows(
       `with changed as (
          update absences set status = $2,
            approved_by = coalesce($4::bigint, approved_by),
-           approved_at = coalesce($5::timestamptz, approved_at),
-           document_file_id = coalesce($7::bigint, document_file_id)
-         where event_id = $1
+           approved_at = coalesce($5::timestamptz, approved_at)
+         where event_id = $1 and status = $7
          returning *
        ),
        hist as (
          insert into absence_status_history (event_id, status, changed_by, note)
-         values ($1, $2, $3::bigint, $6)
+         select event_id, $2, $3::bigint, $6 from changed
+       ),
+       balance as (
+         update leave_balances lb set used = greatest(0, lb.used + $8::numeric)
+           from changed c
+           join event_participants p on p.event_id = c.event_id
+          where $8::numeric <> 0 and lb.user_id = p.user_id
+            and lb.absence_type_id = c.absence_type_id and lb.cycle_start = $9::date
        )
        select changed.*, e.starts_at, e.ends_at, e.all_day,
               ep.user_id, ep.area_id
@@ -5729,7 +5761,7 @@ class Query {
   /** The system folder for absence documents, by its key. */
   async getAbsenceDocumentFolder() {
     const [row] = await this.#rows(
-      `select id from folders where name = 'Oficios de ausencia' and parent_id is null and deleted_at is null limit 1`,
+      `select id from folders where system_key = 'absence_documents' and deleted_at is null`,
       [],
     );
     return row ?? null;
@@ -5741,28 +5773,6 @@ class Query {
       `update absences set document_file_id = $2 where event_id = $1`,
       [eventId, fileId],
     );
-  }
-
-  /** Deletes a requested absence and its event. Null when missing or not in requested status. */
-  async deleteAbsence(eventId) {
-    const [row] = await this.#rows(
-      `with guard as (
-         select event_id from absences where event_id = $1 and status = 'requested'
-       ),
-       del_hist as (
-         delete from absence_status_history where event_id = (select event_id from guard)
-       ),
-       del_abs as (
-         delete from absences where event_id = (select event_id from guard)
-       ),
-       del_part as (
-         delete from event_participants where event_id = (select event_id from guard)
-       )
-       delete from events where id = (select event_id from guard)
-       returning id`,
-      [eventId],
-    );
-    return row ?? null;
   }
 
   async absenceStatusHistory(eventId) {

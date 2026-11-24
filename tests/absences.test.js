@@ -252,7 +252,7 @@ describe("/api/absences", () => {
       assert.equal(res.body.absence.status, "approved");
     });
 
-    test("delete removes a requested absence", async () => {
+    test("withdrawing a request leaves it cancelled, with who and when (RF-AUS-14)", async () => {
       const created = await createAbsence();
       const eventId = created.body.absence.eventId;
 
@@ -260,7 +260,40 @@ describe("/api/absences", () => {
       assert.equal(del.status, 200);
 
       const get = await server.get(`/api/absences/${eventId}`, { token: workerToken });
-      assert.equal(get.status, 404);
+      assert.equal(get.body.absence.status, "cancelled");
+      const { history } = (await server.get(`/api/absences/${eventId}/history`, { token: workerToken })).body;
+      assert.equal(history.at(-1).status, "cancelled");
+      assert.equal(String(history.at(-1).changedBy), String(workerUser.id));
+      assert.equal((await server.delete(`/api/absences/${eventId}`, { token: workerToken })).status, 409);
+    });
+
+    test("an approved absence is not withdrawn by its person", async () => {
+      const { eventId } = (await createAbsence()).body.absence;
+      await server.post(`/api/absences/${eventId}/status`, { token: leadToken, body: { status: "approved" } });
+      assert.equal((await server.delete(`/api/absences/${eventId}`, { token: workerToken })).status, 409);
+      assert.equal((await server.get(`/api/absences/${eventId}`, { token: workerToken })).body.absence.status, "approved");
+    });
+
+    test("going over the balance is warned about, never refused (RF-AUS-07)", async () => {
+      const { eventId } = (await createAbsence({ endsAt: "2026-06-23T08:00:00Z" })).body.absence;
+      const approve = await server.post(`/api/absences/${eventId}/status`, { token: leadToken, body: { status: "approved" } });
+      assert.equal(approve.status, 200);
+      const [balance] = await sql(
+        "select granted, used from leave_balances where user_id = $1 and absence_type_id = $2",
+        [workerUser.id, absenceTypeId],
+      );
+      assert.deepEqual([Number(balance.granted), Number(balance.used)], [5, 8]);
+    });
+
+    test("no file but the one uploaded for it backs an absence", async () => {
+      const created = await createAbsence({ documentFileId: 999999 });
+      assert.equal(created.status, 201);
+      assert.equal(created.body.absence.documentFileId, null);
+      const res = await server.post(`/api/absences/${created.body.absence.eventId}/status`, {
+        token: leadToken,
+        body: { status: "approved", documentFileId: 999999 },
+      });
+      assert.equal(res.status, 400);
     });
 
     test("warns when balance would be exceeded", async () => {
@@ -375,6 +408,109 @@ describe("/api/absences", () => {
     });
   });
 
+  describe("balances are created from the contract's cap (RF-AUS-06, RF-AUS-15)", () => {
+    const year = new Date().getFullYear();
+    let type;
+
+    beforeEach(async () => {
+      const { types } = (await server.get("/api/absences/types", { token: adminToken })).body;
+      type = types.find((t) => t.code === "permiso_economico");
+      await sql("delete from contract_type_entitlements where absence_type_id = $1", [type.id]);
+      await sql(
+        `insert into contract_type_entitlements (contract_type_id, absence_type_id, amount, valid_from)
+         select contract_type_id, $2, 5, $3 from users where id = $1`,
+        [workerUser.id, type.id, `${year}-01-01`],
+      );
+    });
+
+    after(() => sql("delete from contract_type_entitlements where absence_type_id = $1", [type.id]));
+
+    const request = async (from, to) =>
+      (await server.post("/api/absences", {
+        token: workerToken,
+        body: {
+          userId: workerUser.id, absenceTypeId: type.id, reason: "x",
+          startsAt: `${year}-${from}T08:00:00Z`, endsAt: `${year}-${to}T08:00:00Z`,
+        },
+      })).body;
+    const move = (eventId, status) =>
+      server.post(`/api/absences/${eventId}/status`, { token: leadToken, body: { status } });
+    const mine = async () =>
+      (await server.get(`/api/absences/balances/${workerUser.id}`, { token: workerToken })).body.balances
+        .find((row) => row.absenceTypeId === type.id);
+
+    test("looking at it creates it, once", async () => {
+      const first = await mine();
+      assert.deepEqual([first.granted, first.used, first.remaining], [5, 0, 5]);
+      assert.deepEqual([first.cycleStart, first.cycleEnd], [`${year}-01-01`, `${year}-12-31`]);
+      assert.equal((await mine()).id, first.id);
+    });
+
+    test("approving deducts and cancelling gives back, with no balance beforehand", async () => {
+      const { absence } = await request("06-01", "06-03");
+      assert.equal((await move(absence.eventId, "approved")).status, 200);
+      assert.equal((await mine()).used, 2);
+      assert.equal((await move(absence.eventId, "cancelled")).status, 200);
+      assert.equal((await mine()).used, 0);
+    });
+
+    test("an absence approved before the balance existed counts in it", async () => {
+      const { absence } = await request("06-01", "06-03");
+      await move(absence.eventId, "approved");
+      await sql("delete from leave_balances where user_id = $1", [workerUser.id]);
+      assert.equal((await mine()).used, 2);
+      await move(absence.eventId, "cancelled");
+      assert.equal((await mine()).used, 0);
+    });
+
+    test("a request over the cap warns", async () => {
+      assert.ok((await request("06-01", "06-08")).warning);
+      assert.equal((await request("07-01", "07-02")).warning, undefined);
+    });
+
+    test("no cap, or one not yet in force, grants nothing", async () => {
+      await sql("update contract_type_entitlements set valid_from = $1 where absence_type_id = $2", [`${year + 1}-01-01`, type.id]);
+      assert.equal(await mine(), undefined);
+      const { absence } = await request("06-01", "06-03");
+      assert.equal((await move(absence.eventId, "approved")).status, 200);
+    });
+
+    test("two decisions at once count once", async () => {
+      const { absence } = await request("06-01", "06-03");
+      const both = await Promise.all([move(absence.eventId, "approved"), move(absence.eventId, "approved")]);
+      assert.equal(both.filter((res) => res.status === 200).length, 1);
+      assert.equal((await mine()).used, 2);
+    });
+  });
+
+  test("the person opens their own backing document, and a colleague does not (RF-AUS-13)", async () => {
+    await sql(
+      `insert into folders (parent_id, name, owner_id, system_key)
+       values (null, 'Oficios de ausencia', $1, 'absence_documents')`,
+      [adminUser.id],
+    );
+    const { types } = (await server.get("/api/absences/types", { token: adminToken })).body;
+    const { absence } = (await server.post("/api/absences", {
+      token: workerToken,
+      body: {
+        userId: workerUser.id, absenceTypeId: types[0].id, reason: "x",
+        startsAt: "2026-06-15T08:00:00Z", endsAt: "2026-06-16T08:00:00Z",
+      },
+    })).body;
+    const path = `/api/absences/${absence.eventId}/document`;
+    assert.equal((await server.get(path, { token: workerToken })).status, 404, "none yet");
+    const up = await server.post(`${path}?name=oficio.pdf`, {
+      token: leadToken, raw: Buffer.from("%PDF oficio"), headers: { "content-type": "application/pdf" },
+    });
+    assert.equal(up.status, 201);
+
+    await createActive({ email: "colega.oficio@uaq.mx", area: area.name });
+    const peer = await tokenFor(server, "colega.oficio@uaq.mx");
+    assert.equal((await server.get(path, { token: workerToken })).status, 200);
+    assert.equal((await server.get(path, { token: adminToken })).status, 200);
+    assert.equal((await server.get(path, { token: peer })).status, 404);
+  });
+
   describe("availability", () => {
     test("returns who is away without the motive", async () => {
       const types = await server.get("/api/absences/types", { token: adminToken });
@@ -414,6 +550,19 @@ describe("/api/absences", () => {
         assert.equal(row.reason, undefined);
       }
     });
+
+    test("availability.read is enough, and opens nothing else (RF-USR-10)", async () => {
+      await grantPermissions(server, adminToken, "worker", ["availability.read"]);
+      try {
+        const path = "/api/absences/availability?from=2026-06-15&to=2026-06-16";
+        assert.equal((await server.get(path, { token: workerToken })).status, 200);
+        assert.equal((await server.get("/api/absences", { token: workerToken })).status, 403);
+        await grantPermissions(server, adminToken, "worker", []);
+        assert.equal((await server.get(path, { token: workerToken })).status, 403);
+      } finally {
+        await grantPermissions(server, adminToken, "worker", ["absence.read", "absence.write"]);
+      }
+    });
   });
 
   describe("privacy", () => {
@@ -442,7 +591,37 @@ describe("/api/absences", () => {
 
       const list = await server.get("/api/absences", { token: leadToken });
       assert.equal(list.status, 200);
+      await createActive({ email: "colega.aus@uaq.mx", area: area.name });
+      const peer = await tokenFor(server, "colega.aus@uaq.mx");
+      const path = `/api/absences/${created.body.absence.eventId}`;
+      const peerSees = async () =>
+        (await server.get("/api/absences", { token: peer })).body.some((a) => a.eventId === created.body.absence.eventId);
+      assert.equal(await peerSees(), false, "a request is not yet an absence");
+      assert.equal((await server.get(path, { token: peer })).status, 404);
+      assert.equal((await server.get(`${path}/history`, { token: peer })).status, 404);
+      assert.equal((await server.get(path, { token: workerToken })).status, 200);
+      assert.equal((await server.get(path, { token: leadToken })).status, 200, "decides on it");
+
+      const byType = await server.get(`/api/absences?absenceTypeId=${pe.id}`, { token: leadToken });
+      assert.deepEqual(byType.body, [], "the type filter would tell the type");
+      const own = await server.get(`/api/absences?absenceTypeId=${pe.id}`, { token: workerToken });
+      assert.deepEqual(own.body.map((a) => a.eventId), [created.body.absence.eventId]);
+      assert.equal(own.body[0].typeLabel, pe.label);
+
+      const balances = (token) => server.get(`/api/absences/balances/${workerUser.id}`, { token });
+      assert.equal((await balances(leadToken)).status, 403);
+      assert.equal((await balances(workerToken)).status, 200);
+      assert.equal((await balances(adminToken)).status, 200);
+
+      const decided = await server.post(`${path}/status`, { token: leadToken, body: { status: "approved" } });
+      assert.equal(decided.status, 200);
+      assert.equal(await peerSees(), true);
+      assert.equal((await server.get(path, { token: peer })).body.absence.reason, null);
+
       const absence = list.body.find((a) => a.eventId === created.body.absence.eventId);
+      assert.equal(absence.typeLabel, null);
+      assert.equal(absence.typeCode, null);
+      assert.equal(absence.absenceTypeId, null);
       assert.equal(absence.reason, null);
     });
   });

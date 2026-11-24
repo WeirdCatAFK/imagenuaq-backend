@@ -7290,7 +7290,6 @@ const EXTRA_SCHEMAS = {
       startsAt: { type: 'string', format: 'date-time' },
       endsAt: { type: 'string', format: 'date-time', description: 'Later than startsAt.' },
       reason: { type: 'string', maxLength: 4000 },
-      documentFileId: { type: 'integer', minimum: 1 },
     },
     required: ['userId', 'absenceTypeId', 'startsAt', 'endsAt', 'reason'],
   },
@@ -7302,7 +7301,11 @@ const EXTRA_SCHEMAS = {
     properties: {
       status: { type: 'string', enum: ABSENCE_STATUSES },
       note: { type: 'string', maxLength: 4000 },
-      documentFileId: { type: 'integer', minimum: 1 },
+      documentFileId: {
+        type: 'integer',
+        minimum: 1,
+        description: 'Only the file already uploaded for this absence; any other is refused.',
+      },
     },
     required: ['status'],
   },
@@ -7530,7 +7533,7 @@ const EXTRA_PATHS = {
       tags: ['absences'],
       summary: 'Who is away, day by day',
       description:
-        'Needs absence.read. It reads the absence_availability view, so it carries dates and ' +
+        'Needs availability.read or absence.read. It reads the absence_availability view, so it carries dates and ' +
         'people but never the reason (RF-AUS-12). Each row is one person away on one day.',
       parameters: [
         { name: 'from', in: 'query', required: true, schema: DATE },
@@ -7550,7 +7553,9 @@ const EXTRA_PATHS = {
     get: {
       tags: ['absences'],
       summary: "A person's balances, by query",
-      description: 'Needs absence.read. The same as /api/absences/balances/{id}, with the user in userId.',
+      description:
+        'Needs absence.read, and absence.read_detail for someone else (RF-AUS-13). The same as ' +
+        '/api/absences/balances/{id}, with the user in userId.',
       parameters: [{ name: 'userId', in: 'query', required: true, schema: { type: 'integer', minimum: 1 } }],
       responses: {
         200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
@@ -7564,7 +7569,9 @@ const EXTRA_PATHS = {
     get: {
       tags: ['absences'],
       summary: "A person's balances",
-      description: 'Needs absence.read. What each absence type grants the person per cycle, with use and remainder.',
+      description:
+        'Needs absence.read, and absence.read_detail for someone else (RF-AUS-13). What each absence type ' +
+        'grants the person per cycle, with use and remainder.',
       parameters: [pathId('id', 'users.id')],
       responses: {
         200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
@@ -7578,7 +7585,8 @@ const EXTRA_PATHS = {
       tags: ['absences'],
       summary: 'List absences',
       description:
-        'Needs absence.read. Everyone sees who is away. The reason and the document come back ' +
+        'Needs absence.read. Everyone sees who is away: the approved and taken ones, and their own. Whoever ' +
+        'holds absence.approve also sees the requests. The type, the reason and the document come back ' +
         'only to absence.read_detail or to the person the absence belongs to (RF-AUS-13).',
       parameters: [
         { name: 'userId', in: 'query', schema: { type: 'integer', minimum: 1 } },
@@ -7658,13 +7666,16 @@ const EXTRA_PATHS = {
     delete: {
       tags: ['absences'],
       summary: 'Withdraw a request',
-      description: 'Needs absence.write. Only while it is requested. After that, cancel it through /status.',
+      description:
+        'Needs absence.write. Only while it is requested: it stays, cancelled, with its history (RF-AUS-14). ' +
+        'After that, whoever approves cancels it through /status.',
       parameters: [absenceId],
       responses: {
         200: wrappedInline('Withdrawn.', 'deleted', { type: 'boolean', const: true }),
         401: UNAUTHORIZED,
         403: FORBIDDEN,
-        404: errorResponse('No such absence, or no longer requested.', 'Absence not found or not in requested status.'),
+        404: NO_ABSENCE,
+        409: errorResponse('No longer requested.', 'Only a requested absence can be withdrawn.'),
       },
     },
   },
@@ -7685,6 +7696,20 @@ const EXTRA_PATHS = {
     },
   },
   '/api/absences/{id}/document': {
+    get: {
+      tags: ['absences'],
+      summary: 'Download the oficio',
+      description:
+        'Needs absence.read. Only the person the absence belongs to and absence.read_detail (RF-AUS-13).',
+      parameters: [absenceId],
+      responses: {
+        200: { description: 'The file.' },
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('None, or not visible to the caller.', 'That absence has no document.'),
+        503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+      },
+    },
     post: {
       tags: ['absences'],
       summary: 'Attach the oficio',

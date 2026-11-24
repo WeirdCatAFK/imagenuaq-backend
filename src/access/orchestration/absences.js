@@ -5,7 +5,7 @@ import query from "../resources/query.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { putContent, StorageError } from "../primitives/minioStorage.js";
+import { putContent, readContent, StorageError } from "../primitives/minioStorage.js";
 import {
   UNIQUE_VIOLATION,
   EXCLUSION_VIOLATION,
@@ -34,6 +34,9 @@ const STATUS_MOVES = {
   taken: [],
 };
 
+/** The statuses that make someone unavailable, as in the `absence_availability` view. */
+const PUBLIC_STATUSES = ["approved", "taken"];
+
 /** The actor's id; absence writes are always someone's. */
 function actorId() {
   const actor = currentActor();
@@ -49,6 +52,15 @@ async function seesDetail(userId) {
   const actor = currentActor();
   if (actor.role === "admin" || userId === actor.id) return true;
   return (await query.getRolePermissionCodes(actor.roleId)).includes("absence.read_detail");
+}
+
+/**
+ * Whether the actor sees an absence at all: a colleague's only counts once it makes them unavailable
+ * (RF-AUS-12), except for whoever decides on it or sees its motive.
+ */
+async function seesAbsence(row) {
+  if (PUBLIC_STATUSES.includes(row.status) || (await seesDetail(row.user_id))) return true;
+  return (await query.getRolePermissionCodes(currentActor().roleId)).includes("absence.approve");
 }
 
 /** @throws {ApiError} 400 */
@@ -238,9 +250,20 @@ class Absences {
     }
   }
 
-  /** @returns {Promise<object[]>} */
+  /**
+   * A person's balances, the current cycle's created from their contract's caps the first time
+   * (RF-AUS-15). Someone else's name the types they consumed, so they need `absence.read_detail` (RF-AUS-13).
+   *
+   * @returns {Promise<object[]>}
+   * @throws {ApiError} 400, 403
+   */
   async listBalances(userId) {
-    const rows = await query.listBalances(requireId(userId, "userId"));
+    const id = requireId(userId, "userId");
+    if (!(await seesDetail(id))) throw ApiError.forbidden("You can only read your own balances.");
+    const today = new Date().toISOString();
+    const { start, end } = cycleOf(today);
+    await query.ensureBalances(id, { cycleStart: start, cycleEnd: end, on: today.slice(0, 10) });
+    const rows = await query.listBalances(id);
     return rows.map(shapeBalance);
   }
 
@@ -261,6 +284,10 @@ class Absences {
   }
 
   /**
+   * Someone else's absence shows without its motive, and only once approved, unless the caller decides
+   * on it (`absence.approve`). Filtering by type would tell the type, so without `absence.read_detail`
+   * it only reaches one's own (RF-AUS-12).
+   *
    * @throws {ApiError} 400
    */
   async list({ userId, areaId, status, absenceTypeId, limit, offset } = {}) {
@@ -274,6 +301,11 @@ class Absences {
     const actor = currentActor();
     const perms = await query.getRolePermissionCodes(actor.roleId);
     const canDetail = actor.role === "admin" || perms.includes("absence.read_detail");
+    if (!canDetail && filters.absenceTypeId !== null) {
+      if (filters.userId !== null && String(filters.userId) !== String(actor.id)) return [];
+      filters.userId = actor.id;
+    }
+    if (!canDetail && !perms.includes("absence.approve")) filters.viewerId = actor.id;
     const rows = await query.listAbsences(filters);
     return rows.map((row) => canDetail || row.user_id === actor.id ? shapeAbsence(row) : shapeAbsencePublic(row));
   }
@@ -284,7 +316,7 @@ class Absences {
   async get(eventId) {
     const id = requireId(eventId, "eventId");
     const row = await query.getAbsence(id);
-    if (!row) throw ApiError.notFound("Absence not found.");
+    if (!row || !(await seesAbsence(row))) throw ApiError.notFound("Absence not found.");
     return (await seesDetail(row.user_id)) ? shapeAbsence(row) : shapeAbsencePublic(row);
   }
 
@@ -302,7 +334,6 @@ class Absences {
     if (endsAt <= startsAt) throw ApiError.badRequest("endsAt must be after startsAt.");
     const allDay = input?.allDay !== false;
     const reason = requireText(input?.reason, "reason", TEXT_MAX);
-    const documentFileId = optionalId(input?.documentFileId, "documentFileId");
 
     const actor = currentActor();
     if (!actor) throw ApiError.badRequest("No acting user.");
@@ -320,6 +351,9 @@ class Absences {
     if (type.consumes_balance && allDay) {
       const days = durationDays(startsAt, endsAt);
       const { start, end } = cycleOf(startsAt);
+      await query.ensureBalances(userId, {
+        cycleStart: start, cycleEnd: end, on: startsAt.slice(0, 10), absenceTypeId,
+      });
       const balance = await query.getBalance(userId, absenceTypeId, start);
       if (balance && Number(balance.used) + days > Number(balance.granted)) {
         warning = `Exceeds available balance by ${Number(balance.used) + days - Number(balance.granted)} ${type.unit}(s).`;
@@ -329,7 +363,7 @@ class Absences {
     const row = await query.createAbsence({
       title: type.label, description: reason, allDay, startsAt, endsAt,
       rule: null, recurrenceUntil: null, createdBy: actor.id,
-      reason, absenceTypeId, documentFileId, userId, areaId: null,
+      reason, absenceTypeId, documentFileId: null, userId, areaId: null,
     });
     if (!row) throw ApiError.badRequest("Failed to create absence — check that the 'ausencia' event type exists.");
 
@@ -403,9 +437,10 @@ class Absences {
   }
 
   /**
-   * Moves an absence between statuses. RF-AUS-06: deducts on approve, restores on cancel.
+   * Moves an absence between statuses. RF-AUS-06: deducts on approve, restores on cancel. Its backing
+   * document is whatever `uploadDocument()` left on it; naming another file is refused.
    *
-   * @throws {ApiError} 400, 403, 404
+   * @throws {ApiError} 400, 404, 409 when it moved meanwhile.
    */
   async changeStatus(eventId, input) {
     const id = requireId(eventId, "eventId");
@@ -418,6 +453,10 @@ class Absences {
 
     const row = await query.getAbsence(id);
     if (!row) throw ApiError.notFound("Absence not found.");
+
+    if (documentFileId !== null && String(documentFileId) !== String(row.document_file_id)) {
+      throw ApiError.badRequest("documentFileId must be the file uploaded for this absence.");
+    }
 
     const allowed = STATUS_MOVES[row.status];
     if (!allowed.includes(target)) {
@@ -440,16 +479,20 @@ class Absences {
       balanceDelta = -durationDays(row.starts_at, row.ends_at);
     }
 
-    const { start } = cycleOf(row.starts_at);
-    const updated = await query.updateAbsenceStatus(id, {
-      status: target, changedBy: actor.id, note,
-      approvedBy: updates.approved_by ?? null, approvedAt: updates.approved_at ?? null,
-      documentFileId,
-    });
-
+    const { start, end } = cycleOf(row.starts_at);
     if (balanceDelta !== 0) {
-      await query.adjustBalanceUsed(row.user_id, row.absence_type_id, start, balanceDelta);
+      await query.ensureBalances(row.user_id, {
+        cycleStart: start, cycleEnd: end,
+        on: new Date(row.starts_at).toISOString().slice(0, 10),
+        absenceTypeId: row.absence_type_id,
+      });
     }
+    const updated = await query.updateAbsenceStatus(id, {
+      from: row.status, status: target, changedBy: actor.id, note,
+      approvedBy: updates.approved_by ?? null, approvedAt: updates.approved_at ?? null,
+      balanceDelta, cycleStart: start,
+    });
+    if (!updated) throw ApiError.conflict("That absence changed meanwhile; read it again.");
 
     if (target === "approved") {
       await events.emit({
@@ -463,15 +506,15 @@ class Absences {
   }
 
   /**
-   * Removes a requested absence before anyone acts on it. Only its person, or someone with
-   * absence.request_others, may remove it (RF-USR-05).
+   * Withdraws a requested absence before anyone acts on it: it stays, cancelled, with who and when
+   * (RF-AUS-14). Only its person, or someone with absence.request_others, may withdraw it (RF-USR-05).
    *
-   * @throws {ApiError} 403, 404
+   * @throws {ApiError} 403, 404, 409 once it is no longer requested.
    */
   async remove(eventId) {
     const id = requireId(eventId, "eventId");
     const existing = await query.getAbsence(id);
-    if (!existing) throw ApiError.notFound("Absence not found or not in requested status.");
+    if (!existing) throw ApiError.notFound("Absence not found.");
 
     const actor = currentActor();
     if (existing.user_id !== actor.id) {
@@ -481,8 +524,8 @@ class Absences {
       }
     }
 
-    const row = await query.deleteAbsence(id);
-    if (!row) throw ApiError.notFound("Absence not found or not in requested status.");
+    const row = await query.updateAbsenceStatus(id, { from: "requested", status: "cancelled", changedBy: actor.id });
+    if (!row) throw ApiError.conflict("Only a requested absence can be withdrawn.");
   }
 
   /**
@@ -495,7 +538,7 @@ class Absences {
   async statusHistory(eventId) {
     const id = requireId(eventId, "eventId");
     const row = await query.getAbsence(id);
-    if (!row) throw ApiError.notFound("Absence not found.");
+    if (!row || !(await seesAbsence(row))) throw ApiError.notFound("Absence not found.");
     const full = await seesDetail(row.user_id);
     return (await query.absenceStatusHistory(id))
       .map(shapeStatusEntry)
@@ -555,6 +598,32 @@ class Absences {
 
     await query.setAbsenceDocument(id, file.id);
     return { id: file.id, name: file.name, size: file.size };
+  }
+
+  /**
+   * An absence's backing document, for the person it belongs to and whoever sees its motive
+   * (RF-AUS-13). The folder it lives in stays hidden from everyone else.
+   *
+   * @returns {Promise<{file: object, stream: import('node:stream').Readable, size: number}>}
+   * @throws {ApiError} 404 when there is none or the caller may not see it, 503.
+   */
+  async downloadDocument(eventId) {
+    const row = await query.getAbsence(requireId(eventId, "eventId"));
+    const visible = row !== null && (await seesDetail(row.user_id));
+    const file = visible && row.document_file_id ? await query.getFile(row.document_file_id) : null;
+    if (!file) throw ApiError.notFound("That absence has no document.");
+
+    let content;
+    try {
+      content = await readContent(file.hash);
+    } catch (err) {
+      if (err instanceof StorageError) throw ApiError.unavailable("File storage is unavailable.");
+      throw err;
+    }
+    if (!content) throw new Error(`File ${file.id} has a row but no content (hash ${file.hash}).`);
+
+    await events.emit({ action: "file_downloaded", target: { table: "files", id: file.id } });
+    return { file: { name: file.name, mime: file.mime }, stream: content.stream, size: content.size };
   }
 }
 
@@ -623,11 +692,17 @@ function shapeAbsence(row) {
   };
 }
 
+/** Who is away and when, without the motive: its type and document would give it away (RF-AUS-12). */
 function shapeAbsencePublic(row) {
-  const shaped = shapeAbsence(row);
-  shaped.reason = null;
-  shaped.documentFileId = null;
-  return shaped;
+  return {
+    ...shapeAbsence(row),
+    absenceTypeId: null,
+    typeCode: null,
+    typeLabel: null,
+    consumesBalance: null,
+    reason: null,
+    documentFileId: null,
+  };
 }
 
 function shapeStatusEntry(row) {
