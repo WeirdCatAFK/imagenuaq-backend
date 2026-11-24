@@ -6375,6 +6375,53 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/tasks/stages/{stageId}/folder': {
+        get: {
+          tags: ['tasks'],
+          summary: "The folder a stage's delivery file goes in",
+          description:
+            "RF-TSK-03: the project's folder, for the stage's assignee, a leader of its area or coordination. Needs task.read.",
+          parameters: [pathId('stageId', 'project_stages.id')],
+          responses: {
+            200: { description: '`{ folder }`, as GET /api/documents/folders/{id}.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+          },
+        },
+      },
+      '/api/tasks/stages/{stageId}/delivery': {
+        put: {
+          tags: ['tasks'],
+          summary: 'Deliver an open stage from «Mis tareas»',
+          description:
+            'RF-TSK-03: the same delivery as the project route, with task.read instead of project.read.',
+          parameters: [pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    note: { type: 'string', maxLength: 4000 },
+                    fileId: { type: ['integer', 'null'], description: 'files.id' },
+                  },
+                  required: ['note'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('No note, or a file the caller cannot read.', 'note is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+            409: errorResponse('The stage is not open.', 'Only an open stage takes a delivery.'),
+          },
+        },
+      },
       '/api/projects/{id}/stages/{stageId}/delivery': {
         put: {
           tags: ['projects'],

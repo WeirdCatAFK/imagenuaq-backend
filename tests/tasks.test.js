@@ -87,6 +87,42 @@ describe("/api/tasks", () => {
       body: { decision: "approved" },
     });
 
+  test("whoever holds a stage delivers it with a file and task.read alone (RF-TSK-03)", async () => {
+    const made = await project();
+    const mine = await stage(made.id, design.id, { title: "Diseño", assignedTo: ana.id, status: "active" });
+    const path = `/api/tasks/stages/${mine.id}`;
+    await grantPermissions(server, adminToken, "worker", ["task.read", "document.read", "document.write"]);
+    try {
+      assert.equal((await server.get(`/api/projects/${made.id}`, { token: anaToken })).status, 403);
+
+      const folder = await server.get(`${path}/folder`, { token: anaToken });
+      assert.equal(folder.status, 200);
+      const file = await server.post(`/api/documents/folders/${folder.body.folder.id}/files?name=arte.pdf`, {
+        token: anaToken, raw: Buffer.from("%PDF tarea"), headers: { "content-type": "application/pdf" },
+      });
+      assert.equal(file.status, 201);
+
+      const delivered = await server.put(`${path}/delivery`, {
+        token: anaToken, body: { note: "Arte final", fileId: file.body.file.id },
+      });
+      assert.equal(delivered.status, 200);
+      assert.equal(delivered.body.stage.deliveryNote, "Arte final");
+
+      const betoToken = await tokenFor(server, "beto@uaq.mx");
+      assert.equal((await server.get(`${path}/folder`, { token: betoToken })).status, 403);
+      assert.equal((await server.put(`${path}/delivery`, { token: betoToken, body: { note: "x" } })).status, 403);
+      assert.equal((await server.put("/api/tasks/stages/999999/delivery", { token: anaToken, body: { note: "x" } })).status, 404);
+      assert.equal((await server.get("/api/tasks/stages/999999/folder", { token: anaToken })).status, 404);
+      assert.equal((await server.get(`${path}/folder`, { token: leadToken })).status, 200);
+      assert.equal((await server.get(`${path}/folder`, { token: otherLeadToken })).status, 403);
+
+      await grantPermissions(server, adminToken, "worker", []);
+      assert.equal((await server.put(`${path}/delivery`, { token: anaToken, body: { note: "x" } })).status, 403);
+    } finally {
+      await grantPermissions(server, adminToken, "worker", ["project.read", "task.read"]);
+    }
+  });
+
   test("«Mis tareas» lists my open stages, delivered ones until their sign-off", async () => {
     const made = await project();
     const mine = await stage(made.id, design.id, { title: "Diseño", assignedTo: ana.id, status: "active" });
