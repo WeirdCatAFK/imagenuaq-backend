@@ -239,20 +239,21 @@ The scheduler runs inside the API process. A second instance would run every job
 
 Reads need only a session. RF-USR-03 gives everyone sight of their colleagues' work.
 Writes need the `area.manage` permission. `admin` holds it from the seed, and any other
-role can get it through `PUT /api/roles/:id/permissions`.
+role can get it through `PUT /api/roles/:id/permissions`. Outside `admin` it reaches the areas
+the caller leads and those below them (RF-USR-06). Who leads an area is decided from above it.
 
 | Method | Route                                | Auth    | Notes                                                        |
 | ------ | ------------------------------------ | ------- | ------------------------------------------------------------ |
-| GET    | `/api/areas`                       | session | Flat and alphabetical                                        |
+| GET    | `/api/areas`                       | session | Flat and alphabetical. `?includeRetired=true` adds the retired ones |
 | GET    | `/api/areas/orgchart`              | session | The whole organisation, nested. Returns `{ roots: [...] }`        |
 | GET    | `/api/areas/:id`                   | session | One area                                                     |
 | GET    | `/api/areas/:id/orgchart`          | session | The subtree under one area, the read `RF-USR-04` asks for  |
 | GET    | `/api/areas/:id/members`           | session | Leaders first, then by name                                  |
-| POST   | `/api/areas`                       | area.manage | `{ name, description?, leaderUserId?, parentAreaId? }`     |
-| PATCH  | `/api/areas/:id`                   | area.manage | Partial. Absent keys stay unchanged                          |
-| DELETE | `/api/areas/:id`                   | area.manage | 409 while anyone is still assigned to it                     |
-| PUT    | `/api/areas/:id/parent`            | area.manage | `{ parentAreaId }`. 409 if the move would close a cycle     |
-| DELETE | `/api/areas/:id/parent`            | area.manage | Promote the area back to a root                              |
+| POST   | `/api/areas`                       | area.manage | `{ name, description?, leaderUserId?, parentAreaId? }`. Outside `admin`, under an area the caller leads |
+| PATCH  | `/api/areas/:id`                   | area.manage | Partial. Absent keys stay unchanged. `isActive: true` (`admin`) brings back a retired area |
+| DELETE | `/api/areas/:id`                   | area.manage | `admin` only. 409 naming what still uses it. One with history is retired instead |
+| PUT    | `/api/areas/:id/parent`            | area.manage | `admin` only. `{ parentAreaId }`. 409 if the move would close a cycle |
+| DELETE | `/api/areas/:id/parent`            | area.manage | `admin` only. Promote the area back to a root                |
 | PUT    | `/api/areas/:id/members/:userId`   | area.manage | `{ isAreaLeader? }`. An upsert, so it also promotes/demotes |
 | DELETE | `/api/areas/:id/members/:userId`   | area.manage | Deletes the membership, not the account                      |
 
