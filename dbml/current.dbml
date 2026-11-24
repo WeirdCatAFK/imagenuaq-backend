@@ -27,6 +27,7 @@ Table "areas" {
   "id" int8 [pk, not null, increment]
   "name" varchar(200) [unique, not null]
   "description" text
+  "is_active" bool [not null, default: true]
 }
 
 Table "users" {
@@ -172,6 +173,7 @@ Table "folders" {
   "owner_id" int8 [not null]
   "created_at" timestamptz [not null, default: `CURRENT_TIMESTAMP`]
   "deleted_at" timestamptz
+  "system_key" varchar(50) [unique, note: 'What the system uses the folder for; such a folder is not renamed, moved, shared or deleted.']
 
   Indexes {
     owner_id [type: btree, name: "idx_folders_owner_id"]
@@ -306,8 +308,8 @@ Table "leave_balances" {
   }
   Note: '''One row per person, type and cycle. RF-AUS-15. The cycle is a date range rather than a year, so calendar-year and contract-anniversary cycles both fit.
 CHECK lb_cycle_range: cycle_end >= cycle_start
-CHECK lb_used_within: (used >= (0)::numeric) AND (used <= granted)
-CHECK lb_granted_nonneg: granted >= (0)::numeric'''
+CHECK lb_granted_nonneg: granted >= (0)::numeric
+CHECK lb_used_nonneg: used >= (0)::numeric'''
 }
 
 Table "absence_status_history" {
