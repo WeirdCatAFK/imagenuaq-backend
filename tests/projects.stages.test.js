@@ -142,7 +142,7 @@ describe("/api/projects/:id/stages", () => {
   });
 
   test("a retitle reaches every attempt; a reassignment touches only one", async () => {
-    const worker = await createActive({ email: "diseno@uaq.mx", role: "worker" });
+    const worker = await createActive({ email: "diseno@uaq.mx", role: "worker", area: area.name });
     const made = await project();
     const res = await addStage(made.id, { areaId: area.id, title: "Diseño", status: "active" });
     const stage = res.body.stage;
@@ -185,7 +185,7 @@ describe("/api/projects/:id/stages", () => {
     assert.equal((await addStage(made.id, { areaId: 999999, title: "X" })).status, 400);
     const badUser = await addStage(made.id, { areaId: area.id, title: "X", assignedTo: 999999 });
     assert.equal(badUser.status, 400);
-    assert.match(badUser.body.error.message, /referenced record/);
+    assert.match(badUser.body.error.message, /member of the stage's area/);
   });
 
   test("pending to active stamps started_at; active to blocked needs a reason", async () => {
@@ -243,7 +243,7 @@ describe("/api/projects/:id/stages", () => {
 
   test("reassigning and retitling work without touching the status", async () => {
     const made = await project({ stages: [{ areaId: area.id, title: "Diseño" }] });
-    const [{ id: userId }] = await sql("select id from users limit 1");
+    const { id: userId } = await createActive({ email: "propuesta@uaq.mx", area: area.name });
 
     const res = await patchStage(made.id, made.stages[0].id, {
       title: "Diseño de la propuesta",
@@ -254,6 +254,18 @@ describe("/api/projects/:id/stages", () => {
     assert.equal(res.body.stage.title, "Diseño de la propuesta");
     assert.equal(String(res.body.stage.assignedTo), String(userId));
     assert.equal(res.body.stage.status, "active", "untouched");
+  });
+
+  test("the assignee can be taken off, and stays when not sent", async () => {
+    const { id: userId } = await createActive({ email: "quitar@uaq.mx", area: area.name });
+    const made = await project({ stages: [{ areaId: area.id, title: "Diseño", assignedTo: userId }] });
+    const stage = made.stages[0];
+
+    const retitled = await patchStage(made.id, stage.id, { title: "Otro" });
+    assert.equal(String(retitled.body.stage.assignedTo), String(userId));
+    const off = await patchStage(made.id, stage.id, { assignedTo: null });
+    assert.equal(off.status, 200);
+    assert.equal(off.body.stage.assignedTo, null);
   });
 
   test("a stage of another project is a 404, not someone else's row", async () => {

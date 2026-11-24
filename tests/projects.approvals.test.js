@@ -113,6 +113,7 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
   });
 
   test("the rerun keeps the assignee", async () => {
+    await server.put(`/api/areas/${area.id}/members/${worker.id}`, { token: adminToken, body: {} });
     const made = await project([{ areaId: area.id, title: "Diseño", assignedTo: worker.id }]);
     const res = await sign(made.id, made.stages[0].id, { decision: "rejected" });
 
@@ -187,13 +188,21 @@ describe("/api/projects/:id/stages/:stageId/approvals", () => {
     assert.match(res.body.error.message, /approved|rejected/);
   });
 
-  test("any project.write holder may sign, and no one else", async () => {
+  test("signing needs project.write, a part in the project and leading the stage's area", async () => {
     const made = await project();
 
     assert.equal((await sign(made.id, made.stages[0].id, { decision: "approved" }, workerToken)).status, 403);
 
     await grantWorker(["project.read", "project.write"]);
     try {
+      const stranger = await sign(made.id, made.stages[0].id, { decision: "approved" }, workerToken);
+      assert.equal(stranger.status, 403);
+
+      await server.put(`/api/areas/${area.id}/members/${worker.id}`, { token: adminToken, body: {} });
+      const member = await sign(made.id, made.stages[0].id, { decision: "approved" }, workerToken);
+      assert.equal(member.status, 403, "taking part is not leading the stage's area");
+
+      await server.put(`/api/areas/${area.id}/members/${worker.id}`, { token: adminToken, body: { isAreaLeader: true } });
       const res = await sign(made.id, made.stages[0].id, { decision: "approved" }, workerToken);
       assert.equal(res.status, 201);
       assert.equal(res.body.approval.approverUserId, worker.id);

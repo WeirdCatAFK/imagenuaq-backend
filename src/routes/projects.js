@@ -1,5 +1,6 @@
 // Projects, stages, sign-offs and stage values (RF-PRY-02, RF-FLW-01, RF-FLW-03, RF-FLW-06).
-// Reads need `project.read` and writes `project.write`; linking a request also needs `request.write`.
+// Reads need `project.read` and writes `project.write`; linking a request, here or when creating a
+// project, also needs `request.write`.
 import { Router } from "express";
 
 import projects from "../access/orchestration/projects.js";
@@ -9,6 +10,14 @@ import { idParam } from "../utils/params.js";
 const router = Router();
 const projectId = (req) => idParam(req, "id", "project id");
 const stageId = (req) => idParam(req, "stageId", "stage id");
+const requestWrite = requirePermission("request.write");
+
+/** Creating a project over requests converts them, which takes what converting one takes. */
+const mayLinkRequests = async (req, res, next) => {
+  const { requestIds } = req.body ?? {};
+  if (Array.isArray(requestIds) && requestIds.length === 0) return next();
+  return requestIds === undefined || requestIds === null ? next() : requestWrite(req, res, next);
+};
 
 router.use(authenticate);
 router.use(requirePermission("project.read"));
@@ -47,7 +56,7 @@ router.put("/:id/stages/:stageId/delivery", async (req, res) => {
 
 router.use(requirePermission("project.write"));
 
-router.post("/", async (req, res) => {
+router.post("/", mayLinkRequests, async (req, res) => {
   res.status(201).json({ project: await projects.create(req.body ?? {}) });
 });
 
@@ -72,7 +81,7 @@ router.delete("/:id", async (req, res) => {
   res.json({ project: await projects.remove(projectId(req)) });
 });
 
-router.post("/:id/requests", requirePermission("request.write"), async (req, res) => {
+router.post("/:id/requests", requestWrite, async (req, res) => {
   const { requestIds } = req.body ?? {};
   res.json({ project: await projects.attachRequests(projectId(req), requestIds) });
 });

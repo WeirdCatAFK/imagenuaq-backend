@@ -929,6 +929,79 @@ class Query {
     return row?.is_member === 1;
   }
 
+  /** Whether `userId` leads `areaId` or any area above it (RF-USR-04). */
+  async leadsArea(userId, areaId) {
+    const [row] = await this.#rows(
+      `with recursive up as (
+           select $2::bigint as id
+         union all
+           select h.parent_area_id
+             from area_hierarchy h
+             join up on up.id = h.child_area_id
+       ) cycle id set is_cycle using path
+       select exists (
+         select 1
+           from up
+           join area_members am on am.area_id = up.id
+          where not up.is_cycle and am.user_id = $1::bigint and am.is_area_leader
+       ) as leads`,
+      [userId, areaId],
+    );
+    return row.leads;
+  }
+
+  /** The ids of the areas `userId` leads and of those below them (RF-USR-04). */
+  async areasUnder(userId) {
+    const rows = await this.#rows(
+      `with recursive down as (
+           select area_id as id from area_members where user_id = $1 and is_area_leader
+         union all
+           select h.child_area_id
+             from area_hierarchy h
+             join down on down.id = h.parent_area_id
+       ) cycle id set is_cycle using path
+       select distinct id from down where not is_cycle`,
+      [userId],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * Whether `userId` takes part in a project (RF-USR-06): created it, holds one of its stages, is in
+   * an area with a stage in it, or leads an area above one of those (RF-USR-04).
+   */
+  async takesPartInProject(userId, projectId) {
+    const [row] = await this.#rows(
+      `with recursive stage_areas as (
+           select distinct fs.area_id as id
+             from flow_phases fp
+             join flow_stages fs on fs.phase_id = fp.id
+            where fp.project_id = $2::bigint
+       ), up as (
+           select id from stage_areas
+         union all
+           select h.parent_area_id
+             from area_hierarchy h
+             join up on up.id = h.child_area_id
+       ) cycle id set is_cycle using path
+       select exists (select 1 from projects where id = $2::bigint and created_by = $1::bigint)
+           or exists (select 1
+                        from flow_phases fp
+                        join flow_stages fs on fs.phase_id = fp.id
+                        join project_stages ps on ps.flow_stage_id = fs.id
+                       where fp.project_id = $2::bigint and ps.assigned_to = $1::bigint)
+           or exists (select 1
+                        from area_members am
+                       where am.user_id = $1::bigint and am.area_id in (select id from stage_areas))
+           or exists (select 1
+                        from up
+                        join area_members am on am.area_id = up.id
+                       where not up.is_cycle and am.user_id = $1::bigint and am.is_area_leader) as part`,
+      [userId, projectId],
+    );
+    return row.part;
+  }
+
   /** One area's members, leaders first then alphabetical. */
   async getAreaMembers(areaId) {
     const rows = await this.#rows(
@@ -1822,26 +1895,30 @@ class Query {
     );
   }
 
-  /** Only the keys the caller sent; the row is merged in orchestration. */
+  /** Only the keys the caller sent. Those a project may be without are cleared by null and left by undefined. */
   async updateProject(projectId, {
-    title = null, description = null, requester = null, priority = null,
-    hasCost = null, carriedOver = null, startsOn = null, dueOn = null, key = null, noFinance = null,
+    title = null, description, requester, priority = null,
+    hasCost = null, carriedOver = null, startsOn, dueOn, key = null, noFinance = null,
   }) {
     const [row] = await this.#rows(
       `update projects set
         key          = coalesce($2, key),
         title        = coalesce($3, title),
-        description  = coalesce($4, description),
-        requester    = coalesce($5, requester),
+        description  = case when $12::boolean then $4::text else description end,
+        requester    = case when $13::boolean then $5::text else requester end,
         priority     = coalesce($6, priority),
         has_cost     = coalesce($7, has_cost),
         carried_over = coalesce($8, carried_over),
-        starts_on    = coalesce($9::date, starts_on),
-        due_on       = coalesce($10::date, due_on),
+        starts_on    = case when $14::boolean then $9::date else starts_on end,
+        due_on       = case when $15::boolean then $10::date else due_on end,
         no_finance   = coalesce($11::boolean, no_finance)
       where id = $1 and deleted_at is null
       returning *`,
-      [projectId, key, title, description, requester, priority, hasCost, carriedOver, startsOn, dueOn, noFinance],
+      [
+        projectId, key, title, description ?? null, requester ?? null, priority, hasCost, carriedOver,
+        startsOn ?? null, dueOn ?? null, noFinance,
+        description !== undefined, requester !== undefined, startsOn !== undefined, dueOn !== undefined,
+      ],
     );
     return row ?? null;
   }
@@ -1871,15 +1948,81 @@ class Query {
     return row ?? null;
   }
 
-  async deleteProject(projectId) {
+  /**
+   * Soft-deletes a project with what hangs from it, in one statement. Its requests go back to the
+   * inbox without a project. Its open stages and print orders are cancelled, and its folders, files
+   * and finance records are marked deleted, the last with their own log row (RF-USR-07).
+   *
+   * @returns {Promise<object|null>} The row plus `released`, the ids of the requests it let go.
+   */
+  async deleteProject(projectId, actorId = null) {
+    const records = Object.entries({
+      quotes: "quote_deleted", invoices: "invoice_deleted", oficios: "oficio_deleted",
+      payments: "payment_deleted", receipts: "receipt_deleted",
+    });
+    const finance = records.map(([table, action]) => `
+       gone_${table} as (
+         update ${table} set deleted_at = current_timestamp
+          where project_id in (select id from gone) and deleted_at is null
+         returning *
+       ),
+       ${loggedChange(action, table, "$2", beforeRow(table), { source: `gone_${table}`, name: `logged_${table}` })}`);
+
     const [row] = await this.#rows(
-      `update projects
-        set deleted_at = current_timestamp
-      where id = $1 and deleted_at is null
-      returning *`,
-      [projectId],
+      `with recursive gone as (
+         update projects set deleted_at = current_timestamp
+          where id = $1 and deleted_at is null
+         returning *
+       ),
+       released as (
+         update requests set project_id = null
+          where project_id in (select id from gone)
+         returning id
+       ),
+       cancelled_stages as (
+         update project_stages ps
+            set status = 'cancelled', blocked_reason = null,
+                ended_at = coalesce(ps.ended_at, current_timestamp)
+           from flow_stages fs, flow_phases fp
+          where fs.id = ps.flow_stage_id and fp.id = fs.phase_id
+            and fp.project_id in (select id from gone)
+            and ps.status in ('pending', 'active', 'waiting_external')
+         returning ps.id
+       ),
+       cancelled_prints as (
+         update print_orders set status = 'cancelled'
+          where project_id in (select id from gone) and status in ('pending', 'in_progress')
+         returning id
+       ),
+       subtree as (
+         select f.id from folders f
+          where f.id in (select folder_id from gone) and f.deleted_at is null
+         union all
+         select f.id from folders f join subtree s on f.parent_id = s.id where f.deleted_at is null
+       ),
+       gone_files as (
+         update files set deleted_at = current_timestamp
+          where folder_id in (select id from subtree) and deleted_at is null
+         returning id
+       ),
+       gone_folders as (
+         update folders set deleted_at = current_timestamp
+          where id in (select id from subtree)
+         returning id
+       ),${finance.join(",")}
+       select gone.*, coalesce((select array_agg(id) from released), '{}') as released from gone`,
+      [projectId, actorId],
     );
     return row ?? null;
+  }
+
+  /** Whether some project keeps its events in this calendar collection. */
+  async isProjectCollection(collectionId) {
+    const [row] = await this.#rows(
+      `select exists (select 1 from projects where event_collection_id = $1) as taken`,
+      [collectionId],
+    );
+    return row.taken;
   }
 
   /** Links unconverted requests to an existing project (RF-PRY-01). */
@@ -1982,7 +2125,7 @@ class Query {
    * @returns {Promise<{ stage: object, definition: object|null }|null>}
    */
   async updateProjectStage(stageId, {
-    title = null, status = null, blockedReason = null, assignedTo = null, clearBlocked = false,
+    title = null, status = null, blockedReason = null, assignedTo, clearBlocked = false,
     inputs = null, outputs = null,
     inputNote, outputNote, estimatedDays,
   }) {
@@ -2007,7 +2150,7 @@ class Query {
         update project_stages set
           status         = coalesce($3, status),
           blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
-          assigned_to    = coalesce($5::bigint, assigned_to),
+          assigned_to    = case when $16::boolean then $5::bigint else assigned_to end,
           started_at     = case
                              when started_at is null and coalesce($3, status) = 'active'
                              then current_timestamp else started_at
@@ -2025,13 +2168,13 @@ class Query {
         (select to_json(definition.*) from definition) as definition
       from execution`,
       [
-        stageId, title, status, blockedReason, assignedTo, clearBlocked,
+        stageId, title, status, blockedReason, assignedTo ?? null, clearBlocked,
         inputs === null ? null : JSON.stringify(inputs),
         outputs === null ? null : JSON.stringify(outputs),
         inputNote !== undefined, inputNote ?? null,
         outputNote !== undefined, outputNote ?? null,
         estimatedDays !== undefined, estimatedDays ?? null,
-        definitionChanged,
+        definitionChanged, assignedTo !== undefined,
       ],
     );
     return row ?? null;

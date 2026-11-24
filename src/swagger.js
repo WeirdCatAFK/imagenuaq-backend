@@ -1327,6 +1327,16 @@ export function buildOpenApiDocument() {
             startedAt: { type: ['string', 'null'], format: 'date-time' },
             endedAt: { type: ['string', 'null'], format: 'date-time' },
             createdAt: { type: 'string', format: 'date-time' },
+            canDeliver: {
+              type: 'boolean',
+              readOnly: true,
+              description: 'Only in GET /api/projects/{id}: whether the caller may deliver it.',
+            },
+            canSign: {
+              type: 'boolean',
+              readOnly: true,
+              description: "Only in GET /api/projects/{id}: whether the caller may sign it off, leading its area or one above.",
+            },
             deliveryNote: { type: ['string', 'null'], description: 'RF-FLW-03: the evidence of what this attempt delivered.' },
             deliveryFileId: { type: ['integer', 'null'], description: 'files.id of the optional file delivered.' },
             deliveryFileName: { type: ['string', 'null'], description: 'Only in GET /api/projects/{id}.' },
@@ -1436,6 +1446,11 @@ export function buildOpenApiDocument() {
                   description: 'The template version its flow came from; null when built by hand.',
                 },
                 statusIsTerminal: { type: 'boolean' },
+                editable: {
+                  type: 'boolean',
+                  readOnly: true,
+                  description: 'The caller holds project.write and takes part in the project (RF-USR-06).',
+                },
                 folderId: { type: ['integer', 'null'] },
                 eventCollectionId: { type: ['integer', 'null'] },
                 createdBy: { type: ['integer', 'null'] },
@@ -4574,6 +4589,9 @@ export function buildOpenApiDocument() {
         delete: {
           tags: ['projects'],
           summary: 'Soft-delete a project',
+          description:
+            'Its requests go back to the inbox, its open stages and print orders are cancelled, and its ' +
+            'folders, files and finance records are marked deleted with it.',
           parameters: [pathId('id', 'projects.id')],
           responses: {
             200: wrapped('The deleted project.', 'project', 'Project'),
@@ -6365,7 +6383,8 @@ export function buildOpenApiDocument() {
             'RF-FLW-03: the written evidence of what the stage delivered and, optionally, a file ' +
             "already uploaded (normally to the project's folder) that the caller can read. Needs " +
             "project.read plus being the stage's assignee, a leader of its area, or holding " +
-            'project.write. A second delivery replaces the first; a rerun starts blank.',
+            'project.write and taking part in the project. A second delivery replaces the first; a ' +
+            'rerun starts blank.',
           parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
           requestBody: {
             required: true,
