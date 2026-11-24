@@ -11,6 +11,7 @@ import {
   createActive,
   tokenFor,
   areaMemberships,
+  grantPermissions,
 } from './helpers/fixtures.js';
 
 describe('/api/areas/:id/members', () => {
@@ -48,6 +49,76 @@ describe('/api/areas/:id/members', () => {
       token: adminToken,
       body: { isAreaLeader },
     });
+
+  describe('area.manage reaches the areas the caller leads and those below (RF-USR-06)', () => {
+    let child;
+    let lead;
+    let leadToken;
+    let person;
+
+    beforeEach(async () => {
+      await grantPermissions(server, adminToken, 'area_lead', ['area.manage']);
+      child = await createArea('Subárea');
+      await server.put(`/api/areas/${child.id}/parent`, { token: adminToken, body: { parentAreaId: area.id } });
+      lead = await createActive({ email: 'lider@uaq.mx', role: 'area_lead', area: area.name, isAreaLeader: true });
+      person = await createActive({ email: 'persona@uaq.mx', role: 'worker' });
+      leadToken = await tokenFor(server, 'lider@uaq.mx');
+    });
+
+    after(() => grantPermissions(server, adminToken, 'area_lead', []));
+
+    const put = (path, body, token = leadToken) => server.put(`/api/areas/${path}`, { token, body });
+    const patch = (id, token = leadToken) =>
+      server.patch(`/api/areas/${id}`, { token, body: { description: 'cambio' } });
+
+    test('edits its own area and the ones below, not another', async () => {
+      assert.equal((await patch(area.id)).status, 200);
+      assert.equal((await patch(child.id)).status, 200);
+      assert.equal((await patch(other.id)).status, 403);
+      assert.equal((await patch(999999)).status, 404);
+    });
+
+    test('adds and removes members there, not elsewhere', async () => {
+      assert.equal((await put(`${area.id}/members/${person.id}`, {})).status, 200);
+      assert.equal((await server.delete(`/api/areas/${area.id}/members/${person.id}`, { token: leadToken })).status, 200);
+      assert.equal((await put(`${other.id}/members/${person.id}`, {})).status, 403);
+      await put(`${other.id}/members/${person.id}`, {}, adminToken);
+      assert.equal((await server.delete(`/api/areas/${other.id}/members/${person.id}`, { token: leadToken })).status, 403);
+    });
+
+    test('names the leader of a sub-area, never of its own', async () => {
+      assert.equal((await put(`${child.id}/members/${person.id}`, { isAreaLeader: true })).status, 200);
+      assert.equal((await put(`${area.id}/members/${person.id}`, { isAreaLeader: true })).status, 403);
+      assert.equal((await put(`${area.id}/members/${lead.id}`, { isAreaLeader: false })).status, 403);
+      assert.equal((await server.delete(`/api/areas/${area.id}/members/${lead.id}`, { token: leadToken })).status, 403);
+      assert.equal((await put(`${area.id}/members/${lead.id}`, { isAreaLeader: true })).status, 200, 'unchanged');
+    });
+
+    test('a leader cannot make themself leader of another area', async () => {
+      assert.equal((await put(`${other.id}/members/${lead.id}`, { isAreaLeader: true })).status, 403);
+      assert.equal((await areaMemberships(lead.id)).length, 1);
+    });
+
+    test('creates under what it leads, and neither deletes nor moves areas', async () => {
+      const create = (parentAreaId) =>
+        server.post('/api/areas', { token: leadToken, body: { name: 'zz-test:Nueva', parentAreaId } });
+      assert.equal((await create(other.id)).status, 403);
+      assert.equal((await create(null)).status, 403);
+      assert.equal((await create(undefined)).status, 403);
+      assert.equal((await create(child.id)).status, 201);
+
+      assert.equal((await server.delete(`/api/areas/${child.id}`, { token: leadToken })).status, 403);
+      assert.equal((await put(`${child.id}/parent`, { parentAreaId: other.id })).status, 403);
+      assert.equal((await server.delete(`/api/areas/${child.id}/parent`, { token: leadToken })).status, 403);
+    });
+
+    test('someone who leads nothing only reads', async () => {
+      await createActive({ email: 'sinarea@uaq.mx', role: 'area_lead', area: area.name });
+      const token = await tokenFor(server, 'sinarea@uaq.mx');
+      assert.equal((await patch(area.id, token)).status, 403);
+      assert.equal((await server.get(`/api/areas/${area.id}`, { token })).status, 200);
+    });
+  });
 
   describe('PUT /api/areas/:id/members/:userId', () => {
     test('adds a member', async () => {

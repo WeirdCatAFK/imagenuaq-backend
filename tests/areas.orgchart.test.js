@@ -297,15 +297,13 @@ describe('the organisation chart', () => {
     });
   });
 
-  test('deleting a parent area promotes its children to roots', async () => {
-    await server.delete(`/api/areas/${diseno.id}/parent`, { token: adminToken });
+  test('a parent area is not deleted from under its children', async () => {
     const res = await server.delete(`/api/areas/${diseno.id}`, { token: adminToken });
-    assert.equal(res.status, 200);
+    assert.equal(res.status, 409);
+    assert.match(res.body.error.message, /1 sub-areas/);
 
+    await server.delete(`/api/areas/${web.id}/parent`, { token: adminToken });
     const chart = await server.get('/api/areas/orgchart', { token: adminToken });
-    assert.ok(
-      chart.body.roots.some((node) => node.id === web.id),
-      'the orphaned child should become a root rather than disappear',
-    );
+    assert.ok(chart.body.roots.some((node) => node.id === web.id));
   });
 });

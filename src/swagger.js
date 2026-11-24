@@ -625,6 +625,7 @@ export function buildOpenApiDocument() {
                 'Present on the create response only: the parent the area was written ' +
                 'under, or null for a root. The chart carries it on every node.',
             },
+            isActive: { type: 'boolean', readOnly: true, description: 'False once retired.' },
           },
           required: ['id', 'name', 'description'],
         },
@@ -3332,6 +3333,9 @@ export function buildOpenApiDocument() {
             'Flat and alphabetical. The nesting is a separate read -- see ' +
             '`/api/areas/orgchart` -- because a picker wants the list and a chart wants the ' +
             'tree, and neither should pay for the other.',
+          parameters: [
+            { name: 'includeRetired', in: 'query', schema: { type: 'string', enum: ['true'] } },
+          ],
           responses: {
             200: wrapped('Every area, by name.', 'areas', 'Area', true),
             401: UNAUTHORIZED,
@@ -3414,21 +3418,19 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Delete an area',
           description:
-            'Needs area.manage, and a hard delete -- `areas` has no deleted_at. Child areas are ' +
-            'promoted to roots of the chart by the cascade on `area_hierarchy`; people are ' +
-            'not, so an area with members or with users whose primary area it is cannot be ' +
-            'deleted at all.',
+            'Coordination only. An area with people, sub-areas, open stages, requests without a project or ' +
+            'flow templates is refused. One that only has history is retired: `isActive` comes back false, ' +
+            'it leaves the lists and the chart, and PATCH with `isActive: true` brings it back.',
           parameters: [pathId('id', 'areas.id')],
           responses: {
-            200: wrapped('The deleted area.', 'area', 'Area'),
+            200: wrapped('The deleted or retired area.', 'area', 'Area'),
             400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such area.', 'Area not found.'),
             409: errorResponse(
-              'Somebody is still assigned to it. The foreign key is the authority here: a ' +
-                'count taken first would race a concurrent assignment.',
-              'That area still has users or records assigned to it; reassign them first.',
+              'Something still uses it, named in the message.',
+              'That area is still in use: 3 people, 1 open stages.',
             ),
           },
         },
@@ -3527,7 +3529,8 @@ export function buildOpenApiDocument() {
           summary: 'Add a user to an area, or change whether they lead it',
           description:
             'Needs area.manage, and one route for both because they are one upsert -- the client ' +
-            'should not have to know which of the two it is doing. A user can be in several ' +
+            'should not have to know which of the two it is doing. Outside admin the caller leads ' +
+            'the area or one above it, and one above it to change who leads. A user can be in several ' +
             'areas and lead only some of them, which is why leadership lives here rather ' +
             'than on `areas`.',
           parameters: [pathId('id', 'areas.id'), pathId('userId', 'users.id')],

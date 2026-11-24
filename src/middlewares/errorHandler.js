@@ -1,4 +1,5 @@
 import { ApiError } from '../utils/ApiError.js';
+import { AREA_RETIRED } from '../utils/validate.js';
 
 const isProd = () => process.env.NODE_ENV === 'production';
 
@@ -18,9 +19,11 @@ const isBodyParserRefusal = (err) =>
 /**
  * Express identifies error middleware by arity, so `next` must stay declared. An
  * ApiError is a refusal the caller earned; anything else is a bug, logged in full and
- * reported as a 500 whose message is withheld in production.
+ * reported as a 500 whose message is withheld in production. The one database refusal read here is
+ * the retired area's, which any write naming an area can meet.
  */
-export const errorHandler = (err, _req, res, _next) => {
+export const errorHandler = (error, _req, res, _next) => {
+  const err = error?.constraint === AREA_RETIRED ? ApiError.conflict('That area is retired.') : error;
   const known = err instanceof ApiError;
   const refused = !known && isBodyParserRefusal(err);
 

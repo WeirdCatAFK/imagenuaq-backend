@@ -13,6 +13,7 @@ import {
   UNIQUE_VIOLATION,
   FOREIGN_KEY_VIOLATION,
   CHECK_VIOLATION,
+  AREA_RETIRED,
   cleanText,
   requireText,
   optionalText,
@@ -1238,6 +1239,7 @@ function translate(err) {
   if (err?.code === FOREIGN_KEY_VIOLATION) {
     return ApiError.badRequest("A referenced record does not exist.");
   }
+  if (err?.constraint === AREA_RETIRED) return err;
   if (err?.code === CHECK_VIOLATION) {
     if (err.constraint === "projects_date_range") {
       return ApiError.badRequest("dueOn must not be earlier than startsOn.");

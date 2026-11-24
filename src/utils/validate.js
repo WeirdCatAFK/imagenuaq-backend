@@ -5,6 +5,8 @@ import { ApiError } from "./ApiError.js";
 /** Postgres error codes the orchestration tier translates into refusals. */
 export const UNIQUE_VIOLATION = "23505";
 export const FOREIGN_KEY_VIOLATION = "23503";
+/** The constraint name `refuse_retired_area()` raises: something new was given to a retired area. */
+export const AREA_RETIRED = "area_retired";
 export const CHECK_VIOLATION = "23514";
 export const EXCLUSION_VIOLATION = "23P01";
 

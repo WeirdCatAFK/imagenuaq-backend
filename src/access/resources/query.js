@@ -583,7 +583,7 @@ class Query {
     return this.#findCatalog(
       `select id, name from areas
         where ($1::bigint is not null and id = $1::bigint)
-           or ($1::bigint is null and lower(name) = lower($2))
+           or ($1::bigint is null and lower(name) = lower($2) and is_active)
         order by id
         limit 1`,
       ref,
@@ -800,9 +800,11 @@ class Query {
     return row;
   }
 
-  async getAreas() {
+  /** The areas in use, or with `includeRetired` every one. */
+  async getAreas({ includeRetired = false } = {}) {
     const rows = await this.#rows(
-      "select id, name, description from areas order by name",
+      "select id, name, description, is_active from areas where is_active or $1::boolean order by name",
+      [includeRetired],
     );
     return rows;
   }
@@ -813,21 +815,67 @@ class Query {
         set name = $2,
             description = $3
         where id = $1
-        returning id, name, description`,
+        returning id, name, description, is_active`,
       [areaId, name, description],
     );
     return row ?? null;
   }
 
+  /** Retires an area, or with `isActive` brings it back. */
+  async setAreaActive(areaId, isActive) {
+    const [row] = await this.#rows(
+      `update areas set is_active = $2 where id = $1
+        returning id, name, description, is_active`,
+      [areaId, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** What still uses an area, as counts: an area with none of it may be retired (RF-USR-09). */
+  async areaUsage(areaId) {
+    const [row] = await this.#rows(
+      `select
+        (select count(*) from users u
+          where u.deleted_at is null
+            and (u.primary_area_id = $1 or exists (
+              select 1 from area_members am where am.user_id = u.id and am.area_id = $1)))::int as people,
+        (select count(*) from area_hierarchy h
+           join areas c on c.id = h.child_area_id and c.is_active
+          where h.parent_area_id = $1)::int as sub_areas,
+        (select count(*) from project_stages ps
+           join flow_stages fs on fs.id = ps.flow_stage_id
+           join flow_phases fp on fp.id = fs.phase_id
+           join projects p on p.id = fp.project_id
+          where fs.area_id = $1 and p.deleted_at is null
+            and ps.status in ('pending', 'active', 'waiting_external'))::int as stages,
+        (select count(*) from requests r
+          where r.deleted_at is null and r.project_id is null
+            and (r.area_id = $1 or exists (
+              select 1 from flow_phases fp
+                join flow_stages fs on fs.phase_id = fp.id
+               where fp.request_id = r.id and fs.area_id = $1)))::int as requests,
+        (select count(*) from workflows w
+          where w.is_active and exists (
+            select 1 from flow_phases fp
+              join flow_stages fs on fs.phase_id = fp.id
+             where fs.area_id = $1
+               and fp.workflow_version_id = (
+                 select v.id from workflow_versions v
+                  where v.workflow_id = w.id order by v.version desc limit 1)))::int as templates`,
+      [areaId],
+    );
+    return row;
+  }
+
   /**
-   * Hard delete; `areas` has no `deleted_at`. The 23503 raised while people are still
-   * assigned is the refusal, which orchestration turns into a 409.
+   * Hard delete; `areas` has no `deleted_at`. The 23503 an area with history raises tells
+   * orchestration to retire it instead.
    */
   async deleteArea(areaId) {
     const [row] = await this.#rows(
       `delete from areas
         where id = $1
-        returning id, name, description`,
+        returning id, name, description, is_active`,
       [areaId],
     );
     return row ?? null;
@@ -835,7 +883,7 @@ class Query {
 
   async getAreaById(areaId) {
     const [row] = await this.#rows(
-      "select id, name, description from areas where id = $1",
+      "select id, name, description, is_active from areas where id = $1",
       [areaId],
     );
     return row ?? null;
@@ -1106,11 +1154,12 @@ class Query {
                     when $1::bigint is null then h.child_area_id is null
                     else a.id = $1::bigint
                   end
+              and a.is_active
          union all
            select a.id, a.name, a.description, h.parent_area_id, t.depth + 1
              from tree t
              join area_hierarchy h on h.parent_area_id = t.id
-             join areas a on a.id = h.child_area_id
+             join areas a on a.id = h.child_area_id and a.is_active
        ) cycle id set is_cycle using path
        select id, name, description, parent_area_id, depth
          from tree
@@ -4267,9 +4316,10 @@ class Query {
   async areasHandedOutBy(userId) {
     return this.#rows(
       `select a.id, a.name from areas a
-        where $1::bigint is null
-           or exists (select 1 from area_members am
-                       where am.area_id = a.id and am.user_id = $1 and am.is_area_leader)
+        where a.is_active
+          and ($1::bigint is null
+               or exists (select 1 from area_members am
+                           where am.area_id = a.id and am.user_id = $1 and am.is_area_leader))
         order by a.name`,
       [userId],
     );

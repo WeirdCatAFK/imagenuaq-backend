@@ -3,6 +3,7 @@
 // Membership arguments are always (userId, areaId): swapped, they write the wrong row silently.
 import query from "../resources/query.js";
 import events from "../../utils/events.js";
+import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
 import {
   UNIQUE_VIOLATION,
@@ -29,6 +30,15 @@ const FK_FIELDS = {
  */
 const NAME_MAX = 200;
 
+/** What keeps an area from being retired: the key of `query.areaUsage()` and how a refusal names it. */
+const USES = [
+  ["people", "people"],
+  ["sub_areas", "sub-areas"],
+  ["stages", "open stages"],
+  ["requests", "requests without a project"],
+  ["templates", "flow templates"],
+];
+
 class Areas {
   /**
    * Creates an area, with its first leader and its parent in the same statement -- a
@@ -42,7 +52,8 @@ class Areas {
    * @param {number|string|null} [input.parentAreaId] Omitted: the DEFAULT_AREA area.
    *   Null: a root. No cycle check -- a new area has no descendants to close one with.
    * @returns {Promise<object>} The area, plus `parentAreaId` as written.
-   * @throws {ApiError} 400 on a bad payload or an unknown parent, 409 on a duplicate name.
+   * @throws {ApiError} 400 on a bad payload or an unknown parent, 403 unless the caller leads the
+   *   parent, 409 on a duplicate name.
    */
   async create({ name, description = null, leaderUserId = null, parentAreaId }) {
     const cleanName = cleanText(name);
@@ -57,6 +68,7 @@ class Areas {
       parentAreaId === undefined
         ? ((await this.defaultArea())?.id ?? null)
         : optionalId(parentAreaId, "parentAreaId");
+    await requireLeads(parent);
 
     try {
       const area = await query.createArea({
@@ -90,8 +102,9 @@ class Areas {
     return ref === null ? null : query.findArea(ref);
   }
 
-  async get() {
-    const areas = await query.getAreas();
+  /** The areas in use; with `includeRetired`, the retired ones too. */
+  async get({ includeRetired = false } = {}) {
+    const areas = await query.getAreas({ includeRetired });
     return areas.map(shapeArea);
   }
 
@@ -101,14 +114,18 @@ class Areas {
    * into query.js.
    *
    * @param {number|string} areaId
-   * @param {{ name?: string, description?: string|null }} changes
+   * @param {{ name?: string, description?: string|null, isActive?: boolean }} changes `isActive: true`
+   *   brings a retired area back, which is coordination's; retiring one is `delete()`.
    * @returns {Promise<object>}
-   * @throws {ApiError} 400 on a bad payload, 404 when the area does not exist.
+   * @throws {ApiError} 400 on a bad payload, 403 unless the caller leads it, 404 when the area does
+   *   not exist.
    */
-  async update(areaId, { name, description }) {
+  async update(areaId, { name, description, isActive }) {
     const id = requireId(areaId, "areaId");
     const current = await query.getAreaById(id);
     if (!current) throw ApiError.notFound("Area not found.");
+    await requireLeads(id);
+    if (isActive === true && !current.is_active) return this.#setActive(current, true);
 
     const nextName = name === undefined ? current.name : cleanText(name);
     if (!nextName || nextName.length > NAME_MAX) {
@@ -140,16 +157,36 @@ class Areas {
     }
   }
 
+  async #setActive(current, isActive) {
+    requireCoordination();
+    const area = await query.setAreaActive(current.id, isActive);
+    await events.emit({
+      action: "record_updated",
+      target: { table: "areas", id: area.id },
+      before: current,
+      after: area,
+    });
+    return shapeArea(area);
+  }
+
   /**
-   * Deletes an area. Children are promoted to roots by ON DELETE CASCADE on
-   * area_hierarchy; people are not, and the NO ACTION foreign key is deliberately the
-   * gate -- counting members first would still race a concurrent assignment.
+   * Deletes an area nobody uses. One that stages, requests or the audit trail still name is
+   * retired instead (RF-USR-09): it leaves the pickers and the org chart, and its history stays.
    *
    * @param {number|string} areaId
-   * @throws {ApiError} 404 when it does not exist, 409 when people are still assigned.
+   * @returns {Promise<object>} The area; `isActive: false` when it was retired.
+   * @throws {ApiError} 403 to anyone but coordination, 404 when it does not exist, 409 naming what
+   *   still uses it.
    */
   async delete(areaId) {
     const id = requireId(areaId, "areaId");
+    requireCoordination();
+
+    const current = await query.getAreaById(id);
+    if (!current) throw ApiError.notFound("Area not found.");
+    const usage = await query.areaUsage(id);
+    const uses = USES.filter(([key]) => usage[key] > 0).map(([key, name]) => `${usage[key]} ${name}`);
+    if (uses.length > 0) throw ApiError.conflict(`That area is still in use: ${uses.join(", ")}.`);
 
     try {
       const area = await query.deleteArea(id);
@@ -163,11 +200,7 @@ class Areas {
 
       return shapeArea(area);
     } catch (err) {
-      if (err?.code === FOREIGN_KEY_VIOLATION) {
-        throw ApiError.conflict(
-          "That area still has users or records assigned to it; reassign them first.",
-        );
-      }
+      if (err?.code === FOREIGN_KEY_VIOLATION) return this.#setActive(current, false);
       throw translate(err);
     }
   }
@@ -214,9 +247,19 @@ class Areas {
     );
   }
 
+  /**
+   * Adds someone to an area, or changes whether they lead it.
+   *
+   * @throws {ApiError} 400 on an unknown user or area, 403 unless the caller leads the area, or
+   *   leads one above it when this changes who leads.
+   */
   async setMembership(userId, areaId, isAreaLeader = false) {
     const user = requireId(userId, "userId");
     const area = requireId(areaId, "areaId");
+    await requireLeads(area);
+    if ((await query.isUserAreaLeader(user, area)) !== Boolean(isAreaLeader)) {
+      await requireLeadsAbove(area);
+    }
 
     try {
       const row = await query.setAreaMembership(
@@ -241,11 +284,14 @@ class Areas {
     }
   }
 
+  /** @throws {ApiError} 403 as in `setMembership()`, 404 when the user is not a member. */
   async removeMembership(userId, areaId) {
-    const row = await query.removeAreaMembership(
-      requireId(userId, "userId"),
-      requireId(areaId, "areaId"),
-    );
+    const user = requireId(userId, "userId");
+    const area = requireId(areaId, "areaId");
+    await requireLeads(area);
+    if (await query.isUserAreaLeader(user, area)) await requireLeadsAbove(area);
+
+    const row = await query.removeAreaMembership(user, area);
     if (!row) throw ApiError.notFound("That user is not a member of this area.");
 
     await events.emit({
@@ -280,12 +326,13 @@ class Areas {
    * @param {number|string} childAreaId
    * @param {number|string} parentAreaId
    * @returns {Promise<object>}
-   * @throws {ApiError} 404 when either area is missing, 400 for self-parenting, 409 when
-   *   the proposed parent already sits below this area.
+   * @throws {ApiError} 403 to anyone but coordination, 404 when either area is missing, 400 for
+   *   self-parenting, 409 when the proposed parent already sits below this area.
    */
   async setParent(childAreaId, parentAreaId) {
     const child = requireId(childAreaId, "areaId");
     const parent = requireId(parentAreaId, "parentAreaId");
+    requireCoordination();
 
     if (child === parent) {
       throw ApiError.badRequest("An area cannot be its own parent.");
@@ -329,9 +376,11 @@ class Areas {
    * @returns {Promise<{ areaId: number, parentAreaId: null, changed: boolean }>}
    *   `changed` distinguishes "it had a parent" from "it never did", which the caller
    *   cannot see from parentAreaId being null either way.
+   * @throws {ApiError} 403 to anyone but coordination, 404.
    */
   async clearParent(areaId) {
     const id = requireId(areaId, "areaId");
+    requireCoordination();
     if (!(await query.getAreaById(id))) {
       throw ApiError.notFound("Area not found.");
     }
@@ -404,12 +453,42 @@ class Areas {
   }
 }
 
+const isCoordination = () => currentActor()?.role === "admin";
+
+/** Deleting an area or moving it in the org chart is coordination's. @throws {ApiError} 403 */
+function requireCoordination() {
+  if (!isCoordination()) throw ApiError.forbidden("Only coordination deletes or moves an area.");
+}
+
+/**
+ * `area.manage` reaches the areas the caller leads and those below them (RF-USR-06).
+ *
+ * @throws {ApiError} 403
+ */
+async function requireLeads(areaId) {
+  if (isCoordination()) return;
+  const actor = currentActor();
+  if (!actor || areaId === null || !(await query.leadsArea(actor.id, areaId))) {
+    throw ApiError.forbidden("Only a leader of that area, or of one above it, manages it.");
+  }
+}
+
+/** Who leads an area is decided from above it, never by its own leader. @throws {ApiError} 403 */
+async function requireLeadsAbove(areaId) {
+  if (isCoordination()) return;
+  const parent = await query.getAreaParent(areaId);
+  const actor = currentActor();
+  if (!actor || !parent || !(await query.leadsArea(actor.id, parent.id))) {
+    throw ApiError.forbidden("Only coordination, or a leader of an area above, changes who leads it.");
+  }
+}
+
 /**
  * snake_case row in, camelCase JSON out. The boundary is here because column names are
  * the schema's business and field names are the API's.
  */
 function shapeArea(row) {
-  return { id: row.id, name: row.name, description: row.description };
+  return { id: row.id, name: row.name, description: row.description, isActive: row.is_active ?? true };
 }
 
 function shapeMember(row) {
