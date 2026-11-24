@@ -5721,12 +5721,12 @@ class Query {
          from changed
          join events e on e.id = changed.event_id
          join event_participants ep on ep.event_id = changed.event_id`,
-      [eventId, status, changedBy, approvedBy, approvedAt, note, documentFileId ?? null],
+      [eventId, status, changedBy, approvedBy, approvedAt, note, from, balanceDelta, cycleStart],
     );
     return row ?? null;
   }
 
-  /** Finds the system folder for absence documents by name. */
+  /** The system folder for absence documents, by its key. */
   async getAbsenceDocumentFolder() {
     const [row] = await this.#rows(
       `select id from folders where name = 'Oficios de ausencia' and parent_id is null and deleted_at is null limit 1`,

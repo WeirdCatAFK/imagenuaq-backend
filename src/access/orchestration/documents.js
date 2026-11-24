@@ -116,6 +116,7 @@ class Documents {
   async updateFolder(folderId, { name, parentId }) {
     const id = requireId(folderId, "folderId");
     const { folder, access } = await this.#writable(id);
+    refuseSystem(folder);
     const cleanName = name === undefined ? null : requireName(name);
     const parent = parentId === undefined ? undefined : optionalId(parentId, "parentId");
 
@@ -145,7 +146,7 @@ class Documents {
    */
   async deleteFolder(folderId) {
     const id = requireId(folderId, "folderId");
-    await this.#managed(id);
+    refuseSystem((await this.#managed(id)).folder);
     const row = await query.deleteFolder(id);
     await events.emit({ action: "record_deleted", target: { table: "folders", id }, before: row });
     return {
@@ -163,7 +164,7 @@ class Documents {
    */
   async setFolderAreas(folderId, grants) {
     const id = requireId(folderId, "folderId");
-    await this.#managed(id);
+    refuseSystem((await this.#managed(id)).folder);
     const clean = requireGrants(grants);
     const before = await query.listFolderAreas(id);
 
@@ -815,6 +816,15 @@ function sweepStaleUploads() {
       abortMultipart(session.key, session.s3UploadId).catch(() => {});
     }
   }
+}
+
+/**
+ * A folder the system relies on is not renamed, moved, shared or deleted (RF-AUS-13).
+ *
+ * @throws {ApiError} 403
+ */
+function refuseSystem(folder) {
+  if (folder.system_key !== null) throw ApiError.forbidden("The system uses that folder; it stays as it is.");
 }
 
 function isAdmin(actor) {
