@@ -5,6 +5,7 @@ import query from "../resources/query.js";
 import statuses from "./statuses.js";
 import documents from "./documents.js";
 import finance from "./finance.js";
+import { requireMember, requirePart, takesPart } from "./projectAccess.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -12,6 +13,7 @@ import {
   UNIQUE_VIOLATION,
   FOREIGN_KEY_VIOLATION,
   CHECK_VIOLATION,
+  AREA_RETIRED,
   cleanText,
   requireText,
   optionalText,
@@ -101,6 +103,11 @@ class Projects {
       workflowVersionId: requestFlow?.workflowVersionId ?? null,
     };
 
+    if (payload.eventCollectionId !== null && (await query.isProjectCollection(payload.eventCollectionId))) {
+      throw ApiError.conflict("That calendar collection belongs to another project.");
+    }
+    for (const stage of payload.stages) await requireMember(stage.assignedTo, stage.areaId);
+
     let row;
     try {
       row = await query.createProject(payload);
@@ -109,7 +116,7 @@ class Projects {
     }
 
     if (row.linked_count !== payload.requestIds.length) {
-      await query.deleteProject(row.id);
+      await query.deleteProject(row.id, payload.createdBy);
       throw ApiError.conflict(
         "One of those requests already belongs to a project; nothing was created.",
       );
@@ -146,11 +153,33 @@ class Projects {
     return documents.getFolder(folderId);
   }
 
-  /** @throws {ApiError} 404 */
+  /**
+   * The project plus what the caller may do with it: `editable`, and `canDeliver` and `canSign` on
+   * each stage.
+   *
+   * @throws {ApiError} 404
+   */
   async getById(projectId) {
     const row = await query.getProject(requireId(projectId, "projectId"));
     if (!row) throw ApiError.notFound("Project not found.");
-    return shapeProject(row);
+
+    const actor = currentActor();
+    const editable = await this.#mayEdit(row.id);
+    const [areas, under] = actor
+      ? await Promise.all([query.getUserAreas(actor.id), query.areasUnder(actor.id)])
+      : [[], []];
+    const led = areas.filter((area) => area.is_area_leader).map((area) => String(area.id));
+    const signs = under.map(String);
+    const project = shapeProject(row);
+    return {
+      ...project,
+      editable,
+      stages: project.stages.map((stage) => ({
+        ...stage,
+        canDeliver: editable || holds(actor, stage.assignedTo) || led.includes(String(stage.areaId)),
+        canSign: editable && (actor.role === "admin" || signs.includes(String(stage.areaId))),
+      })),
+    };
   }
 
   /**
@@ -206,26 +235,29 @@ class Projects {
     const payload = {
       key: input.key === undefined ? null : requireKey(input.key),
       title: input.title === undefined ? null : requireText(input.title, "title", TITLE_MAX),
-      description: input.description === undefined ? null : cleanText(input.description),
+      description: input.description === undefined ? undefined : cleanText(input.description),
       requester:
         input.requester === undefined
-          ? null
+          ? undefined
           : optionalText(input.requester, "requester", REQUESTER_MAX),
       priority: input.priority === undefined ? null : requireInt(input.priority, "priority"),
       hasCost: input.hasCost === undefined ? null : requireBoolean(input.hasCost, "hasCost"),
       carriedOver:
         input.carriedOver === undefined ? null : requireBoolean(input.carriedOver, "carriedOver"),
-      startsOn: input.startsOn === undefined ? null : optionalDate(input.startsOn, "startsOn"),
-      dueOn: input.dueOn === undefined ? null : optionalDate(input.dueOn, "dueOn"),
+      startsOn: input.startsOn === undefined ? undefined : optionalDate(input.startsOn, "startsOn"),
+      dueOn: input.dueOn === undefined ? undefined : optionalDate(input.dueOn, "dueOn"),
       noFinance: input.noFinance === undefined ? null : requireBoolean(input.noFinance, "noFinance"),
     };
 
-    if (Object.values(payload).every((value) => value === null)) {
+    const clearable = ["description", "requester", "startsOn", "dueOn"];
+    const sent = ([key, value]) => (clearable.includes(key) ? value !== undefined : value !== null);
+    if (!Object.entries(payload).some(sent)) {
       throw ApiError.badRequest("Nothing to update.");
     }
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
     if (payload.noFinance && !before.no_finance) await finance.assertCanSkip(id);
 
     let row;
@@ -257,6 +289,7 @@ class Projects {
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
     await this.#assertStatusUsable(status, id);
 
@@ -286,6 +319,7 @@ class Projects {
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
     const open = before.stages.filter((stage) =>
       stage.status === "active" || stage.status === "waiting_external",
@@ -322,6 +356,7 @@ class Projects {
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
     const row = await query.stampProject(id, "archived");
     if (!row) throw ApiError.conflict("Project is already archived.");
@@ -336,14 +371,19 @@ class Projects {
     return this.getById(id);
   }
 
-  /** @throws {ApiError} 404 */
+  /**
+   * Soft-deletes a project and what hangs from it; its requests go back to the inbox (RF-PRY-01).
+   *
+   * @throws {ApiError} 403, 404
+   */
   async remove(projectId) {
     const id = requireId(projectId, "projectId");
 
     const before = await query.getProject(id);
     if (!before) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
-    const row = await query.deleteProject(id);
+    const { released, ...row } = await query.deleteProject(id, currentActor()?.id ?? null);
 
     await events.emit({
       action: "record_deleted",
@@ -351,6 +391,14 @@ class Projects {
       before,
       after: row,
     });
+    for (const requestId of released) {
+      await events.emit({
+        action: "record_updated",
+        target: { table: "requests", id: requestId },
+        before: { project_id: id },
+        after: { project_id: null },
+      });
+    }
 
     return shapeProject({ ...before, deleted_at: row.deleted_at });
   }
@@ -366,6 +414,7 @@ class Projects {
     if (ids.length === 0) throw ApiError.badRequest("requestIds must not be empty.");
 
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
     const linked = await query.attachRequests(id, ids);
     if (linked.length !== ids.length) {
@@ -404,6 +453,7 @@ class Projects {
     const id = requireId(projectId, "projectId");
     const project = await query.getProject(id);
     if (!project) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
     if (project.closed_at) throw ApiError.conflict("Project is closed.");
 
     const state = requireStageStatus(status);
@@ -414,14 +464,18 @@ class Projects {
       throw ApiError.badRequest("A stage is completed by an approval, not created done.");
     }
 
+    const area = requireId(areaId, "areaId");
+    const assignee = optionalId(assignedTo, "assignedTo");
+    await requireMember(assignee, area);
+
     try {
       const { stage, definition, phase } = await query.addProjectStage({
         projectId: id,
         seq: requirePhaseSeq(seq, "seq"),
-        areaId: requireId(areaId, "areaId"),
+        areaId: area,
         title: requireText(title, "title", TITLE_MAX),
         status: state,
-        assignedTo: optionalId(assignedTo, "assignedTo"),
+        assignedTo: assignee,
         inputs: requireKeyList(inputs, "inputs"),
         outputs: requireKeyList(outputs, "outputs"),
         inputNote: optionalText(inputNote, "inputNote", NOTE_MAX),
@@ -467,6 +521,7 @@ class Projects {
     estimatedDays,
   }) {
     const { id, before } = await this.#ownStage(projectId, stageId);
+    await requirePart(before.project_id);
 
     let next = status === undefined ? undefined : requireStageStatus(status);
     if (next === "done") {
@@ -485,7 +540,7 @@ class Projects {
       title: title === undefined ? null : requireText(title, "title", TITLE_MAX),
       status: next ?? null,
       blockedReason: reason ?? null,
-      assignedTo: assignedTo === undefined ? null : optionalId(assignedTo, "assignedTo"),
+      assignedTo: assignedTo === undefined ? undefined : optionalId(assignedTo, "assignedTo"),
       inputs: inputs === undefined ? null : requireKeyList(inputs, "inputs"),
       outputs: outputs === undefined ? null : requireKeyList(outputs, "outputs"),
       inputNote: inputNote === undefined ? undefined : optionalText(inputNote, "inputNote", NOTE_MAX),
@@ -498,11 +553,14 @@ class Projects {
 
     if (
       payload.title === null && payload.status === null && payload.blockedReason === null &&
-      payload.assignedTo === null && payload.inputs === null && payload.outputs === null &&
+      payload.assignedTo === undefined && payload.inputs === null && payload.outputs === null &&
       payload.inputNote === undefined && payload.outputNote === undefined &&
       payload.estimatedDays === undefined && !payload.clearBlocked
     ) {
       throw ApiError.badRequest("Nothing to update.");
+    }
+    if (payload.assignedTo !== undefined && String(payload.assignedTo) !== String(before.assigned_to)) {
+      await requireMember(payload.assignedTo, before.area_id);
     }
 
     let updated;
@@ -538,7 +596,8 @@ class Projects {
    * Records what an open stage delivered: the written evidence and, optionally, a file the caller
    * can read -- normally one just uploaded to the project's folder. A second delivery on the same
    * attempt replaces the first; a rerun starts blank (RF-FLW-03). The person assigned may deliver
-   * without `project.write`, as may a leader of the stage's area.
+   * without `project.write`, as may a leader of the stage's area. The task route reaches this with
+   * `task.read` alone (RF-TSK-03).
    *
    * @param {{note: string, fileId?: number|null}} input
    * @throws {ApiError} 400 on no note or an unreadable file, 403, 404, 409 when the stage is
@@ -552,10 +611,10 @@ class Projects {
 
     const actor = currentActor();
     const allowed =
-      String(before.assigned_to) === String(actor.id) ||
+      holds(actor, before.assigned_to) ||
       actor.role === "admin" ||
-      (await query.getRolePermissionCodes(actor.roleId)).includes("project.write") ||
-      (await query.isUserAreaLeader(actor.id, before.area_id));
+      (await query.isUserAreaLeader(actor.id, before.area_id)) ||
+      (await this.#mayEdit(before.project_id));
     if (!allowed) {
       throw ApiError.forbidden("Only the person on the stage or its area's leader delivers it.");
     }
@@ -582,17 +641,33 @@ class Projects {
   }
 
   /**
+   * The project's sign-off, given by whoever edits the project and leads the stage's area or one
+   * above it (RF-FLW-03).
+   *
+   * @throws {ApiError} 403 when the caller takes no part in the project or leads no such area, and as
+   *   `signOff()`.
+   */
+  async approve(projectId, stageId, input) {
+    const { before } = await this.#ownStage(projectId, stageId);
+    await requirePart(before.project_id);
+    const actor = currentActor();
+    if (actor.role !== "admin" && !(await query.leadsArea(actor.id, before.area_id))) {
+      throw ApiError.forbidden("Only a leader of the stage's area signs it off.");
+    }
+    return this.signOff(projectId, stageId, input);
+  }
+
+  /**
    * Records a sign-off and moves the stage. `approved` completes it; `rejected` completes it
    * too and opens the same stage again at the next attempt, which is how RF-FLW-03's returned
-   * work stays visible instead of overwriting what happened (§2.6). Callers check who may sign:
-   * the project route asks only for `project.write`, and `tasks.signOff` lets the stage's area
-   * leader sign from the review queue (RF-FLW-03 asks for the author to be recorded).
+   * work stays visible instead of overwriting what happened (§2.6). It checks no one: `approve()`
+   * and `tasks.signOff` decide who signs (RF-FLW-03 asks for the author to be recorded).
    *
    * @param {{decision: 'approved'|'rejected', comment?: string, evidenceFileId?: number}} input
    * @throws {ApiError} 400 on a bad decision or unknown evidence file, 404, 409 when the
    *   stage is not open.
    */
-  async approve(projectId, stageId, { decision, comment = null, evidenceFileId = null }) {
+  async signOff(projectId, stageId, { decision, comment = null, evidenceFileId = null }) {
     const { id, before } = await this.#ownStage(projectId, stageId);
 
     if (decision !== "approved" && decision !== "rejected") {
@@ -740,6 +815,7 @@ class Projects {
   async setFieldValue(projectId, key, { value, producedByStageId = null }) {
     const id = requireId(projectId, "projectId");
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
     const cleanKey = requireFieldKey(key);
     const text = storedText(value);
@@ -778,6 +854,7 @@ class Projects {
   async deleteFieldValue(projectId, key) {
     const id = requireId(projectId, "projectId");
     if (!(await query.getProject(id))) throw ApiError.notFound("Project not found.");
+    await requirePart(id);
 
     const row = await query.deleteFieldValue(id, requireFieldKey(key));
     if (!row) throw ApiError.notFound("That project has no value under that key.");
@@ -789,6 +866,16 @@ class Projects {
     });
 
     return shapeFieldValue(row);
+  }
+
+  /** Whether the actor may change a project: `project.write`, and a part in it (RF-USR-06). */
+  async #mayEdit(projectId) {
+    const actor = currentActor();
+    if (!actor) return false;
+    return (
+      (await query.getRolePermissionCodes(actor.roleId)).includes("project.write") &&
+      (await takesPart(projectId))
+    );
   }
 
   /** The status to start at: the caller's, checked, or the global `recibido`. */
@@ -836,6 +923,11 @@ class Projects {
     }
     return { id, before };
   }
+}
+
+/** Whether `userId`, a stage's assignee, is the actor. */
+function holds(actor, userId) {
+  return actor !== null && userId !== null && String(userId) === String(actor.id);
 }
 
 /** Uppercased before the CHECK sees it: `papel-fcq` is a typo, not a refusal. */
@@ -1147,6 +1239,7 @@ function translate(err) {
   if (err?.code === FOREIGN_KEY_VIOLATION) {
     return ApiError.badRequest("A referenced record does not exist.");
   }
+  if (err?.constraint === AREA_RETIRED) return err;
   if (err?.code === CHECK_VIOLATION) {
     if (err.constraint === "projects_date_range") {
       return ApiError.badRequest("dueOn must not be earlier than startsOn.");

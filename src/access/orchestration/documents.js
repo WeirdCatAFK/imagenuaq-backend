@@ -92,7 +92,7 @@ class Documents {
     const actor = currentActor();
     const parent = optionalId(parentId, "parentId");
     const cleanName = requireName(name);
-    if (parent !== null) await this.#writable(parent);
+    if (parent !== null) await this.#uploadable(parent);
 
     try {
       const row = await query.createFolder({ parentId: parent, name: cleanName, ownerId: actor.id });
@@ -116,6 +116,7 @@ class Documents {
   async updateFolder(folderId, { name, parentId }) {
     const id = requireId(folderId, "folderId");
     const { folder, access } = await this.#writable(id);
+    refuseSystem(folder);
     const cleanName = name === undefined ? null : requireName(name);
     const parent = parentId === undefined ? undefined : optionalId(parentId, "parentId");
 
@@ -145,7 +146,7 @@ class Documents {
    */
   async deleteFolder(folderId) {
     const id = requireId(folderId, "folderId");
-    await this.#managed(id);
+    refuseSystem((await this.#managed(id)).folder);
     const row = await query.deleteFolder(id);
     await events.emit({ action: "record_deleted", target: { table: "folders", id }, before: row });
     return {
@@ -163,7 +164,7 @@ class Documents {
    */
   async setFolderAreas(folderId, grants) {
     const id = requireId(folderId, "folderId");
-    await this.#managed(id);
+    refuseSystem((await this.#managed(id)).folder);
     const clean = requireGrants(grants);
     const before = await query.listFolderAreas(id);
 
@@ -196,7 +197,7 @@ class Documents {
     const id = requireId(folderId, "folderId");
     const cleanName = requireName(name);
     const cleanMime = optionalText(mime, "Content-Type", MIME_MAX);
-    await this.#writable(id);
+    await this.#uploadable(id);
 
     let stored;
     try {
@@ -582,7 +583,7 @@ class Documents {
     const id = requireId(folderId, "folderId");
     const cleanName = requireName(name);
     const cleanMime = optionalText(mime, "mime", MIME_MAX);
-    await this.#writable(id);
+    await this.#uploadable(id);
 
     sweepStaleUploads();
 
@@ -758,6 +759,20 @@ class Documents {
     return result;
   }
 
+  /**
+   * Adding to a folder: write on it, or `finance.write` anywhere inside a project's folder, where
+   * finance attaches its records without being in the project's areas (RF-ARC-05).
+   *
+   * @throws {ApiError} 404 when missing, 403 when read-only.
+   */
+  async #uploadable(folderId) {
+    const { access } = await this.#readable(folderId);
+    if (access !== "read") return;
+    const codes = await query.getRolePermissionCodes(currentActor().roleId);
+    if (codes.includes("finance.write") && (await query.folderProject(folderId))) return;
+    throw ApiError.forbidden("This folder is read-only for you.");
+  }
+
   /** @throws {ApiError} 404 when missing, 403 when the caller may not manage it. */
   async #managed(folderId) {
     const result = await this.#writable(folderId);
@@ -801,6 +816,15 @@ function sweepStaleUploads() {
       abortMultipart(session.key, session.s3UploadId).catch(() => {});
     }
   }
+}
+
+/**
+ * A folder the system relies on is not renamed, moved, shared or deleted (RF-AUS-13).
+ *
+ * @throws {ApiError} 403
+ */
+function refuseSystem(folder) {
+  if (folder.system_key !== null) throw ApiError.forbidden("The system uses that folder; it stays as it is.");
 }
 
 function isAdmin(actor) {

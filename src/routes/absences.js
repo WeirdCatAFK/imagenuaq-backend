@@ -3,8 +3,9 @@
 import { Router } from "express";
 
 import absences from "../access/orchestration/absences.js";
-import { authenticate, requirePermission } from "../middlewares/auth.js";
+import { authenticate, requireAnyPermission, requirePermission } from "../middlewares/auth.js";
 import { idParam } from "../utils/params.js";
+import { sendContent } from "./documents.js";
 
 const router = Router();
 const eventId = (req) => idParam(req, "id", "absence id");
@@ -24,7 +25,7 @@ router.patch("/types/:id", requirePermission("absence.manage"), async (req, res)
   res.json({ type: await absences.updateType(typeId(req), req.body ?? {}) });
 });
 
-router.get("/availability", requirePermission("absence.read"), async (req, res) => {
+router.get("/availability", requireAnyPermission("availability.read", "absence.read"), async (req, res) => {
   res.json(await absences.availability(req.query));
 });
 
@@ -59,6 +60,10 @@ router.post("/:id/status", requirePermission("absence.approve"), async (req, res
 router.delete("/:id", requirePermission("absence.write"), async (req, res) => {
   await absences.remove(eventId(req));
   res.json({ deleted: true });
+});
+
+router.get("/:id/document", requirePermission("absence.read"), async (req, res) => {
+  sendContent(res, await absences.downloadDocument(eventId(req)));
 });
 
 router.post("/:id/document", requirePermission("absence.approve"), async (req, res) => {

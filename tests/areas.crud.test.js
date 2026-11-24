@@ -91,12 +91,13 @@ describe('/api/areas', () => {
       });
       assert.equal(granted.status, 200);
 
-      await createActive({ email: 'gestor@uaq.mx', role: role.name });
+      const led = await createArea('Del gestor');
+      await createActive({ email: 'gestor@uaq.mx', role: role.name, area: led.name, isAreaLeader: true });
       const gestorToken = await tokenFor(server, 'gestor@uaq.mx');
 
       const allowed = await server.post('/api/areas', {
         token: gestorToken,
-        body: { name: `${TEST_PREFIX}Creada por gestor` },
+        body: { name: `${TEST_PREFIX}Creada por gestor`, parentAreaId: led.id },
       });
       assert.equal(allowed.status, 201);
 
@@ -331,6 +332,7 @@ describe('/api/areas', () => {
         id: area.id,
         name: `${TEST_PREFIX}Una`,
         description: 'con descripción',
+        isActive: true,
       });
     });
 
@@ -431,10 +433,53 @@ describe('/api/areas', () => {
       const res = await server.delete(`/api/areas/${area.id}`, { token: adminToken });
 
       assert.equal(res.status, 409);
-      assert.equal(
-        res.body.error.message,
-        'That area still has users or records assigned to it; reassign them first.',
-      );
+      assert.equal(res.body.error.message, 'That area is still in use: 1 people.');
+    });
+
+    test('one with history is retired: it leaves the lists, takes nothing new and can come back', async () => {
+      const area = await createArea('Con historia');
+      const parent = await createArea('Superior');
+      const project = (
+        await server.post('/api/projects', {
+          token: adminToken,
+          body: { title: 'P', stages: [{ areaId: area.id, title: 'Etapa' }] },
+        })
+      ).body.project;
+      const busy = await server.delete(`/api/areas/${area.id}`, { token: adminToken });
+      assert.equal(busy.status, 409);
+      assert.equal(busy.body.error.message, 'That area is still in use: 1 open stages.');
+
+      await server.delete(`/api/projects/${project.id}`, { token: adminToken });
+      const res = await server.delete(`/api/areas/${area.id}`, { token: adminToken });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.area.isActive, false);
+
+      const listed = async (query = '') =>
+        (await server.get(`/api/areas${query}`, { token: adminToken })).body.areas.some((a) => a.id === area.id);
+      assert.equal(await listed(), false);
+      assert.equal(await listed('?includeRetired=true'), true);
+      const chart = JSON.stringify((await server.get('/api/areas/orgchart', { token: adminToken })).body);
+      assert.ok(!chart.includes('Con historia'));
+
+      const user = await createActive({ email: 'nuevo@uaq.mx', role: 'worker' });
+      const live = (await server.post('/api/projects', { token: adminToken, body: { title: 'Q' } })).body.project;
+      const attempts = [
+        ['member', server.put(`/api/areas/${area.id}/members/${user.id}`, { token: adminToken, body: {} })],
+        ['stage', server.post(`/api/projects/${live.id}/stages`, { token: adminToken, body: { areaId: area.id, title: 'x' } })],
+        ['project', server.post('/api/projects', { token: adminToken, body: { title: 'R', stages: [{ areaId: area.id, title: 'x' }] } })],
+        ['sub-area', server.put(`/api/areas/${parent.id}/parent`, { token: adminToken, body: { parentAreaId: area.id } })],
+        ['user', server.patch(`/api/users/${user.id}`, { token: adminToken, body: { primaryAreaId: area.id } })],
+      ];
+      for (const [name, call] of attempts) {
+        const refused = await call;
+        assert.equal(refused.status, 409, name);
+        assert.equal(refused.body.error.message, 'That area is retired.', name);
+      }
+
+      const back = await server.patch(`/api/areas/${area.id}`, { token: adminToken, body: { isActive: true } });
+      assert.equal(back.status, 200);
+      assert.equal(back.body.area.isActive, true);
+      assert.equal(await listed(), true);
     });
 
     test('an id that names no area is 404', async () => {

@@ -579,7 +579,8 @@ describe("/api/documents", () => {
 
     test("absence documents are hidden without absence.read_detail and never shared (RF-AUS-13)", async () => {
       const [oficios] = await sql(
-        "insert into folders (parent_id, name, owner_id) values (null, 'Oficios de ausencia', $1) returning id",
+        `insert into folders (parent_id, name, owner_id, system_key)
+         values (null, 'Oficios de ausencia', $1, 'absence_documents') returning id`,
         [users.admin.id],
       );
       const sub = await createFolder({ parentId: oficios.id, name: "2026" }, tokens.admin);
@@ -598,6 +599,15 @@ describe("/api/documents", () => {
       assert.equal(found.body.files.length, 0);
 
       assert.equal((await server.get(`/api/documents/${file.body.file.id}/content`, { token: tokens.admin })).status, 200);
+
+      const decoy = await createFolder({ name: "Oficios de ausencia" }, tokens.colleague);
+      assert.equal(decoy.status, 201);
+      assert.equal((await server.get(`/api/documents/folders/${oficios.id}`, { token: tokens.colleague })).status, 404);
+      const path = `/api/documents/folders/${oficios.id}`;
+      assert.equal((await server.patch(path, { token: tokens.admin, body: { name: "Otro" } })).status, 403);
+      assert.equal((await server.put(`${path}/areas`, { token: tokens.admin, body: { areas: [] } })).status, 403);
+      assert.equal((await server.delete(path, { token: tokens.admin })).status, 403);
+
       const link = await server.post(`/api/documents/folders/${oficios.id}/links`, {
         token: tokens.admin,
         body: { expiresAt: new Date(Date.now() + 86_400_000).toISOString() },

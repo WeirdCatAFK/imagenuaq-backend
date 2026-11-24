@@ -59,9 +59,17 @@ describe("/api/finance", () => {
     moneyToken = await tokenFor(server, "hilda@uaq.mx");
   });
 
-  const project = async (body = {}) =>
-    (await server.post("/api/projects", { token: adminToken, body: { title: "Papel institucional", ...body } }))
-      .body.project;
+  /** A project the worker's area takes part in, its stage cancelled so nothing holds it open. */
+  const project = async (body = {}) => {
+    const made = (await server.post("/api/projects", {
+      token: adminToken,
+      body: { title: "Papel institucional", stages: [{ areaId: area.id, title: "Impresión" }], ...body },
+    })).body.project;
+    await server.patch(`/api/projects/${made.id}/stages/${made.stages[0].id}`, {
+      token: adminToken, body: { status: "cancelled" },
+    });
+    return made;
+  };
 
   const upload = async (folderId, token = adminToken) =>
     (await server.post(`/api/documents/folders/${folderId}/files?name=factura.pdf`, {

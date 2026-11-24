@@ -55,8 +55,10 @@ describe("/api/finance collection cycle", () => {
   });
 
   const project = async (body = {}) =>
-    (await server.post("/api/projects", { token: adminToken, body: { title: "Papel institucional", ...body } }))
-      .body.project;
+    (await server.post("/api/projects", {
+      token: adminToken,
+      body: { title: "Papel institucional", stages: [{ areaId: area.id, title: "Impresión" }], ...body },
+    })).body.project;
   const invoice = async (projectId, amount = 100) =>
     (await server.post(`/api/finance/projects/${projectId}/invoices`, { token: workerToken, body: { amount } }))
       .body.invoice;

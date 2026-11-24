@@ -3,6 +3,7 @@
 // of the stage's area hands it out and signs it off. Load is a count of open stages, never of hours.
 import query from "../resources/query.js";
 import projects from "./projects.js";
+import { requireMember } from "./projectAccess.js";
 import events from "../../utils/events.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -46,7 +47,33 @@ class Tasks {
     const stage = await query.getProjectStage(id);
     if (!stage || stage.project_deleted_at !== null) throw ApiError.notFound("Stage not found.");
     await this.#requireLead(stage.area_id);
-    return projects.approve(stage.project_id, id, { decision, comment });
+    return projects.signOff(stage.project_id, id, { decision, comment });
+  }
+
+  /**
+   * Hands in a stage from «Mis tareas», which needs no `project.read` (RF-TSK-03). The same delivery
+   * as the project detail's, which decides who may give it.
+   *
+   * @throws {ApiError} as `projects.deliver()`.
+   */
+  async deliver(stageId, { note, fileId = null }) {
+    const id = requireId(stageId, "stageId");
+    const stage = await query.getProjectStage(id);
+    if (!stage || stage.project_deleted_at !== null) throw ApiError.notFound("Stage not found.");
+    return projects.deliver(stage.project_id, id, { note, fileId });
+  }
+
+  /**
+   * The folder a stage's delivery file goes in, its project's.
+   *
+   * @throws {ApiError} 403 to anyone but the person on the stage, its area's leaders and
+   *   coordination, 404.
+   */
+  async getFolder(stageId) {
+    const stage = await query.getProjectStage(requireId(stageId, "stageId"));
+    if (!stage || stage.project_deleted_at !== null) throw ApiError.notFound("Stage not found.");
+    if (String(stage.assigned_to) !== String(currentActor().id)) await this.#requireLead(stage.area_id);
+    return projects.getFolder(stage.project_id);
   }
 
   /**
@@ -66,7 +93,7 @@ class Tasks {
     }
     await this.#requireLead(stage.area_id);
     const assignee = optionalId(userId, "userId");
-    await this.#requireMember(assignee, stage.area_id);
+    await requireMember(assignee, stage.area_id);
 
     const row = await query.setStageAssignee(id, assignee);
     await events.emit({
@@ -185,13 +212,6 @@ class Tasks {
     if (actor.role === "admin") return;
     if (!(await query.isUserAreaLeader(actor.id, areaId))) {
       throw ApiError.forbidden("Only a leader of that area hands out its work.");
-    }
-  }
-
-  async #requireMember(userId, areaId) {
-    if (userId === null) return;
-    if (!(await query.isUserMemberOfArea(userId, areaId))) {
-      throw ApiError.badRequest("The assignee must be a member of the stage's area.");
     }
   }
 }

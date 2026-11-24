@@ -444,11 +444,22 @@ a `active` en la misma sentencia, y cada una se anuncia con `stage_activated`. U
 cancelada no retiene la fase; una pendiente sí, porque todavía no se hizo. Un rechazo nunca
 avanza.
 
-**Firmar solo pide `project.write`.** Se consideró exigir pertenencia al área de la etapa
-—`area_members` más `area_hierarchy`— y se descartó: `RF-FLW-03` pide que la decisión quede
-registrada con su autor, no un segundo modelo de autorización. `approvals.approver_user_id` es
+**Firmar desde el proyecto pide `project.write`, tomar parte en él y liderar el área de la etapa** o
+una superior (`RF-USR-06`, `RF-FLW-03`); es el criterio de «Mis tareas» (§2.18). Al principio
+bastaba `project.write`, y con eso cualquiera que lo tuviera editaba, firmaba y borraba proyectos de
+otra área. Toma parte quien creó el proyecto, quien tiene una etapa, quien está en un área con etapa
+en él y quien lidera un área superior a una de esas (`RF-USR-04`). La coordinación toma parte en
+todos. La misma regla (`projectAccess.js`) cubre editar, cambiar de estatus, cerrar, archivar,
+borrar, las etapas y los valores. `GET /api/projects/:id` la contesta como `editable`, y por etapa
+como `canDeliver` y `canSign`, para que la pantalla no ofrezca lo que el servidor rechaza.
+`approvals.approver_user_id` es
 NOT NULL y es el actor de la sesión; `evidence_file_id` es nulable y espera a que ARC tenga
 carga de archivos (§2.11).
+
+**Borrar un proyecto es lógico y arrastra lo suyo.** En la misma sentencia sus solicitudes vuelven a
+la bandeja sin proyecto (`RF-PRY-01`), sin el flujo, que ya era del proyecto. Sus etapas y órdenes de
+impresión abiertas se cancelan, y sus carpetas, archivos y registros de finanzas se marcan borrados,
+estos con su renglón de `logs` (`RF-USR-07`). Nada se borra de verdad.
 
 **Cerrar se niega con etapas abiertas.** Es la forma más barata de la pregunta de `RF-EST-05`
 —qué queda pendiente—; las mitades de facturas y evidencia de ese requerimiento esperan a FIN y
@@ -779,7 +790,10 @@ prioridad y la fecha del proyecto, nunca por llegada (`RF-FLW-08`, `RF-TSK-05`).
 
 Reparte quien tiene `task.write` y es líder del área de la etapa (la coordinación, todas), y
 solo a integrantes de esa área; escribe el mismo `project_stages.assigned_to` que la ficha del
-proyecto edita con `project.write`. Ver las etapas propias pide `task.read`.
+proyecto edita con `project.write`, que también exige que la persona sea del área. Ver las etapas
+propias pide `task.read`, y con eso basta para entregarlas
+(`PUT /api/tasks/stages/:stageId/delivery`): con `project.read` se verían además todos los proyectos
+y sus finanzas, que no es lo que necesita quien hace la etapa (`RF-TSK-03`).
 
 El visto bueno sigue el mismo criterio desde «Mis tareas»: el líder del área de la etapa (la
 coordinación, cualquiera) ve las etapas entregadas que esperan su firma y las aprueba o las
@@ -823,7 +837,9 @@ tocan por esa ruta.
 **Quién ve qué.** La coordinación ve todo. Cualquier otro con `calendar.read` ve los eventos
 globales, los suyos y los de las áreas a las que pertenece y lo que cuelga de ellas en
 `area_hierarchy`, incluidos los de sus compañeros. Las ausencias entran por
-`absence_availability` y nunca por `absences` (`RF-AUS-12`): el calendario dice quién falta,
+`absence_availability` y nunca por `absences` (`RF-AUS-12`). Por lo mismo, con solo `absence.read` las
+ausencias ajenas salen sin motivo, documento ni tipo, y solo las autorizadas o gozadas; las
+solicitudes ajenas las ve quien decide (`absence.approve`). El calendario dice quién falta,
 no por qué.
 
 **Las notas son post-its, y la personal es privada.** Una nota es un evento de tipo `nota`
@@ -926,10 +942,13 @@ aviso por persona y ventana de tres días: el trabajo corre a diario para poners
 servidor estuvo abajo, y la llave —el primer día de la ventana— impide repetirlo. Las banderas son las
 mismas de la lista: las dos leen `financeStanding` en `query.js`.
 
-**Quién escribe qué.** Las áreas suben y corrigen cotizaciones y facturas con `project.write`;
+**Quién escribe qué.** Las áreas suben y corrigen cotizaciones y facturas con `project.write`, en
+los proyectos en los que toman parte (§2.12);
 finanzas, con `finance.write`, lleva oficios, pagos y recibos, pide correcciones, marca proyectos
 completos y corrige el directorio de proveedores. Un área puede registrar un proveedor para no
-detener una carga. Una cotización a la que apunta una factura no se borra.
+detener una carga. Una cotización a la que apunta una factura no se borra. Finanzas no está en las
+áreas del proyecto, así que `finance.write` le deja además agregar archivos dentro de la carpeta de
+un proyecto (`RF-ARC-05`), sin renombrar ni borrar los ajenos.
 
 **La bitácora va en la misma sentencia** (§5.6). Cada escritura de finanzas es un CTE que inserta
 su renglón de `logs` junto con el cambio (`loggedChange` en `query.js`), sin pasar por el
@@ -1248,7 +1267,11 @@ qué registros**, y son dos preguntas separadas:
   (`absence.read_detail`, `RF-AUS-13`). `/api/areas` es el primero en aplicarlo
   (`area.manage` sobre sus escrituras).
 - `RF-USR-03` y `RF-USR-04` —sobre qué registros— las contesta `area_members`, cruzada con
-  `area_hierarchy` cuando hay que bajar por el organigrama (§5.5). Ahí sí sigue siendo
+  `area_hierarchy` cuando hay que bajar por el organigrama (§5.5). Así se acotan `project.write`
+  (§2.12) y `area.manage`, que alcanza las áreas que la persona lidera y las que dependen de ellas.
+  Quién lidera un área se decide desde arriba, nunca por su propio líder, y borrar o mover áreas es
+  de la coordinación. Borrar un área sin uso pero con historia la retira (`areas.is_active`): deja las
+  listas y el organigrama, un disparador le niega todo lo nuevo y se puede reactivar. Ahí sí sigue siendo
   cierto que alguien encabeza un área y es integrante de otra: eso vive en
   `area_members.is_area_leader`, que es donde `schema-proofing` lo puso.
 
@@ -1869,7 +1892,9 @@ en DBML: se lee en la migración.
 #### `leave_balances`
 
 Saldo por persona, tipo y ciclo. El ciclo es un par de fechas y no un año, porque el
-sindicalizado no corre por año calendario.
+sindicalizado no corre por año calendario. La fila se crea la primera vez que hace falta —al
+solicitar, al autorizar o al consultar— con el tope del esquema vigente en esa fecha y lo que ya
+consumieron las ausencias autorizadas del ciclo. Por ahora el ciclo es el año calendario.
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |
@@ -1879,7 +1904,7 @@ sindicalizado no corre por año calendario.
 | `cycle_start` | date | no | | Inicio del ciclo. Único junto con `user_id` y `absence_type_id` |
 | `cycle_end` | date | no | | Fin del ciclo |
 | `granted` | numeric(6,2) | no | | Otorgado. Nace como copia del tope del esquema y se sube individualmente para las excepciones de `RF-AUS-05`, como los días por antigüedad |
-| `used` | numeric(6,2) | no | `0` | Consumido. No puede exceder `granted` |
+| `used` | numeric(6,2) | no | `0` | Consumido. Puede exceder `granted`: pasarse se advierte y no se niega (`RF-AUS-07`) |
 | `note` | text | sí | | Por qué se otorgó algo distinto al tope |
 
 #### `absence_status_history`
@@ -2478,7 +2503,7 @@ nadie la llama en automático.
 | 2 | Se reparte a un área | `PATCH /api/requests/:id` | `request.write` | `record_updated` | **a mano** |
 | 3 | Se atiende: estatus, responsable, solicitante | `PUT /:id/status`, `PATCH /:id` | `request.write` | `status_changed`, `record_updated` | **a mano** |
 | 4 | Se convierte en proyecto | `POST /api/requests/:id/convert` | `request.write` **y** `project.write` | `request_converted` + `record_created` del proyecto | — |
-| 5 | El proyecto recibe etapas | `POST /api/projects/:id/stages` | `project.write` | `record_created`, `stage_activated` | **a mano** (E lo hará) |
+| 5 | El proyecto recibe etapas | `POST /api/projects/:id/stages` | `project.write` y tomar parte (§2.12) | `record_created`, `stage_activated` | **a mano** (E lo hará) |
 | 6 | La etapa arranca, se atora o se cancela | `PATCH /api/projects/:id/stages/:stageId` | `project.write` | `record_updated`, `stage_activated` | **a mano** |
 | 7 | La etapa se firma | `POST .../stages/:stageId/approvals` | `project.write` | `record_created` + `stage_completed` (+ `stage_activated` si se rechazó) | — |
 | 8 | Los valores cruzan de una etapa a otra | `PUT /api/projects/:id/field-values/:key` | `project.write` | `record_updated` | **a mano**, y exigido al firmar |
@@ -2508,7 +2533,7 @@ Lo que cada paso hace por dentro, en una línea:
 6. **La máquina.** `pending → active` arranca y sella `started_at`; `active ↔ waiting_external`
    la para sobre un tercero y exige el motivo que pide `RF-FLW-07`; `→ cancelled` la tira.
    **`done` no se puede poner a mano**: una etapa la cierra una firma.
-7. **La firma.** Cualquiera con `project.write` (§2.12). `approved` cierra la etapa, y antes
+7. **La firma.** Quien tiene `project.write`, toma parte en el proyecto y lidera el área (§2.12). `approved` cierra la etapa, y antes
    verifica que todo lo que declaró en `outputs` tenga valor —ahí es donde `RF-FLW-06` deja de ser
    una intención—; `rejected` la cierra igual y abre la misma etapa en `attempt + 1`, `active`, en
    la misma sentencia (§2.6). **Si con esa firma no queda nada abierto en la fase, la siguiente

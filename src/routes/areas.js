@@ -16,8 +16,8 @@ router.get("/orgchart", async (_req, res) => {
   res.json(await areas.getOrgChart());
 });
 
-router.get("/", async (_req, res) => {
-  res.json({ areas: await areas.get() });
+router.get("/", async (req, res) => {
+  res.json({ areas: await areas.get({ includeRetired: req.query.includeRetired === "true" }) });
 });
 
 router.get("/:id", async (req, res) => {

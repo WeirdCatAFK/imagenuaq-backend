@@ -625,6 +625,7 @@ export function buildOpenApiDocument() {
                 'Present on the create response only: the parent the area was written ' +
                 'under, or null for a root. The chart carries it on every node.',
             },
+            isActive: { type: 'boolean', readOnly: true, description: 'False once retired.' },
           },
           required: ['id', 'name', 'description'],
         },
@@ -1327,6 +1328,16 @@ export function buildOpenApiDocument() {
             startedAt: { type: ['string', 'null'], format: 'date-time' },
             endedAt: { type: ['string', 'null'], format: 'date-time' },
             createdAt: { type: 'string', format: 'date-time' },
+            canDeliver: {
+              type: 'boolean',
+              readOnly: true,
+              description: 'Only in GET /api/projects/{id}: whether the caller may deliver it.',
+            },
+            canSign: {
+              type: 'boolean',
+              readOnly: true,
+              description: "Only in GET /api/projects/{id}: whether the caller may sign it off, leading its area or one above.",
+            },
             deliveryNote: { type: ['string', 'null'], description: 'RF-FLW-03: the evidence of what this attempt delivered.' },
             deliveryFileId: { type: ['integer', 'null'], description: 'files.id of the optional file delivered.' },
             deliveryFileName: { type: ['string', 'null'], description: 'Only in GET /api/projects/{id}.' },
@@ -1436,6 +1447,11 @@ export function buildOpenApiDocument() {
                   description: 'The template version its flow came from; null when built by hand.',
                 },
                 statusIsTerminal: { type: 'boolean' },
+                editable: {
+                  type: 'boolean',
+                  readOnly: true,
+                  description: 'The caller holds project.write and takes part in the project (RF-USR-06).',
+                },
                 folderId: { type: ['integer', 'null'] },
                 eventCollectionId: { type: ['integer', 'null'] },
                 createdBy: { type: ['integer', 'null'] },
@@ -3317,6 +3333,9 @@ export function buildOpenApiDocument() {
             'Flat and alphabetical. The nesting is a separate read -- see ' +
             '`/api/areas/orgchart` -- because a picker wants the list and a chart wants the ' +
             'tree, and neither should pay for the other.',
+          parameters: [
+            { name: 'includeRetired', in: 'query', schema: { type: 'string', enum: ['true'] } },
+          ],
           responses: {
             200: wrapped('Every area, by name.', 'areas', 'Area', true),
             401: UNAUTHORIZED,
@@ -3399,21 +3418,19 @@ export function buildOpenApiDocument() {
           tags: ['areas'],
           summary: 'Delete an area',
           description:
-            'Needs area.manage, and a hard delete -- `areas` has no deleted_at. Child areas are ' +
-            'promoted to roots of the chart by the cascade on `area_hierarchy`; people are ' +
-            'not, so an area with members or with users whose primary area it is cannot be ' +
-            'deleted at all.',
+            'Coordination only. An area with people, sub-areas, open stages, requests without a project or ' +
+            'flow templates is refused. One that only has history is retired: `isActive` comes back false, ' +
+            'it leaves the lists and the chart, and PATCH with `isActive: true` brings it back.',
           parameters: [pathId('id', 'areas.id')],
           responses: {
-            200: wrapped('The deleted area.', 'area', 'Area'),
+            200: wrapped('The deleted or retired area.', 'area', 'Area'),
             400: errorResponse('The id is not a positive integer.', 'Invalid area id.'),
             401: UNAUTHORIZED,
             403: FORBIDDEN,
             404: errorResponse('No such area.', 'Area not found.'),
             409: errorResponse(
-              'Somebody is still assigned to it. The foreign key is the authority here: a ' +
-                'count taken first would race a concurrent assignment.',
-              'That area still has users or records assigned to it; reassign them first.',
+              'Something still uses it, named in the message.',
+              'That area is still in use: 3 people, 1 open stages.',
             ),
           },
         },
@@ -3512,7 +3529,8 @@ export function buildOpenApiDocument() {
           summary: 'Add a user to an area, or change whether they lead it',
           description:
             'Needs area.manage, and one route for both because they are one upsert -- the client ' +
-            'should not have to know which of the two it is doing. A user can be in several ' +
+            'should not have to know which of the two it is doing. Outside admin the caller leads ' +
+            'the area or one above it, and one above it to change who leads. A user can be in several ' +
             'areas and lead only some of them, which is why leadership lives here rather ' +
             'than on `areas`.',
           parameters: [pathId('id', 'areas.id'), pathId('userId', 'users.id')],
@@ -4574,6 +4592,9 @@ export function buildOpenApiDocument() {
         delete: {
           tags: ['projects'],
           summary: 'Soft-delete a project',
+          description:
+            'Its requests go back to the inbox, its open stages and print orders are cancelled, and its ' +
+            'folders, files and finance records are marked deleted with it.',
           parameters: [pathId('id', 'projects.id')],
           responses: {
             200: wrapped('The deleted project.', 'project', 'Project'),
@@ -6357,6 +6378,53 @@ export function buildOpenApiDocument() {
           },
         },
       },
+      '/api/tasks/stages/{stageId}/folder': {
+        get: {
+          tags: ['tasks'],
+          summary: "The folder a stage's delivery file goes in",
+          description:
+            "RF-TSK-03: the project's folder, for the stage's assignee, a leader of its area or coordination. Needs task.read.",
+          parameters: [pathId('stageId', 'project_stages.id')],
+          responses: {
+            200: { description: '`{ folder }`, as GET /api/documents/folders/{id}.' },
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+          },
+        },
+      },
+      '/api/tasks/stages/{stageId}/delivery': {
+        put: {
+          tags: ['tasks'],
+          summary: 'Deliver an open stage from «Mis tareas»',
+          description:
+            'RF-TSK-03: the same delivery as the project route, with task.read instead of project.read.',
+          parameters: [pathId('stageId', 'project_stages.id')],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    note: { type: 'string', maxLength: 4000 },
+                    fileId: { type: ['integer', 'null'], description: 'files.id' },
+                  },
+                  required: ['note'],
+                },
+              },
+            },
+          },
+          responses: {
+            200: wrapped('The stage.', 'stage', 'ProjectStage'),
+            400: errorResponse('No note, or a file the caller cannot read.', 'note is required.'),
+            401: UNAUTHORIZED,
+            403: FORBIDDEN,
+            404: errorResponse('No such stage.', 'Stage not found.'),
+            409: errorResponse('The stage is not open.', 'Only an open stage takes a delivery.'),
+          },
+        },
+      },
       '/api/projects/{id}/stages/{stageId}/delivery': {
         put: {
           tags: ['projects'],
@@ -6365,7 +6433,8 @@ export function buildOpenApiDocument() {
             'RF-FLW-03: the written evidence of what the stage delivered and, optionally, a file ' +
             "already uploaded (normally to the project's folder) that the caller can read. Needs " +
             "project.read plus being the stage's assignee, a leader of its area, or holding " +
-            'project.write. A second delivery replaces the first; a rerun starts blank.',
+            'project.write and taking part in the project. A second delivery replaces the first; a ' +
+            'rerun starts blank.',
           parameters: [pathId('id', 'projects.id'), pathId('stageId', 'project_stages.id')],
           requestBody: {
             required: true,
@@ -7221,7 +7290,6 @@ const EXTRA_SCHEMAS = {
       startsAt: { type: 'string', format: 'date-time' },
       endsAt: { type: 'string', format: 'date-time', description: 'Later than startsAt.' },
       reason: { type: 'string', maxLength: 4000 },
-      documentFileId: { type: 'integer', minimum: 1 },
     },
     required: ['userId', 'absenceTypeId', 'startsAt', 'endsAt', 'reason'],
   },
@@ -7233,7 +7301,11 @@ const EXTRA_SCHEMAS = {
     properties: {
       status: { type: 'string', enum: ABSENCE_STATUSES },
       note: { type: 'string', maxLength: 4000 },
-      documentFileId: { type: 'integer', minimum: 1 },
+      documentFileId: {
+        type: 'integer',
+        minimum: 1,
+        description: 'Only the file already uploaded for this absence; any other is refused.',
+      },
     },
     required: ['status'],
   },
@@ -7461,7 +7533,7 @@ const EXTRA_PATHS = {
       tags: ['absences'],
       summary: 'Who is away, day by day',
       description:
-        'Needs absence.read. It reads the absence_availability view, so it carries dates and ' +
+        'Needs availability.read or absence.read. It reads the absence_availability view, so it carries dates and ' +
         'people but never the reason (RF-AUS-12). Each row is one person away on one day.',
       parameters: [
         { name: 'from', in: 'query', required: true, schema: DATE },
@@ -7481,7 +7553,9 @@ const EXTRA_PATHS = {
     get: {
       tags: ['absences'],
       summary: "A person's balances, by query",
-      description: 'Needs absence.read. The same as /api/absences/balances/{id}, with the user in userId.',
+      description:
+        'Needs absence.read, and absence.read_detail for someone else (RF-AUS-13). The same as ' +
+        '/api/absences/balances/{id}, with the user in userId.',
       parameters: [{ name: 'userId', in: 'query', required: true, schema: { type: 'integer', minimum: 1 } }],
       responses: {
         200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
@@ -7495,7 +7569,9 @@ const EXTRA_PATHS = {
     get: {
       tags: ['absences'],
       summary: "A person's balances",
-      description: 'Needs absence.read. What each absence type grants the person per cycle, with use and remainder.',
+      description:
+        'Needs absence.read, and absence.read_detail for someone else (RF-AUS-13). What each absence type ' +
+        'grants the person per cycle, with use and remainder.',
       parameters: [pathId('id', 'users.id')],
       responses: {
         200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
@@ -7509,7 +7585,8 @@ const EXTRA_PATHS = {
       tags: ['absences'],
       summary: 'List absences',
       description:
-        'Needs absence.read. Everyone sees who is away. The reason and the document come back ' +
+        'Needs absence.read. Everyone sees who is away: the approved and taken ones, and their own. Whoever ' +
+        'holds absence.approve also sees the requests. The type, the reason and the document come back ' +
         'only to absence.read_detail or to the person the absence belongs to (RF-AUS-13).',
       parameters: [
         { name: 'userId', in: 'query', schema: { type: 'integer', minimum: 1 } },
@@ -7589,13 +7666,16 @@ const EXTRA_PATHS = {
     delete: {
       tags: ['absences'],
       summary: 'Withdraw a request',
-      description: 'Needs absence.write. Only while it is requested. After that, cancel it through /status.',
+      description:
+        'Needs absence.write. Only while it is requested: it stays, cancelled, with its history (RF-AUS-14). ' +
+        'After that, whoever approves cancels it through /status.',
       parameters: [absenceId],
       responses: {
         200: wrappedInline('Withdrawn.', 'deleted', { type: 'boolean', const: true }),
         401: UNAUTHORIZED,
         403: FORBIDDEN,
-        404: errorResponse('No such absence, or no longer requested.', 'Absence not found or not in requested status.'),
+        404: NO_ABSENCE,
+        409: errorResponse('No longer requested.', 'Only a requested absence can be withdrawn.'),
       },
     },
   },
@@ -7616,6 +7696,20 @@ const EXTRA_PATHS = {
     },
   },
   '/api/absences/{id}/document': {
+    get: {
+      tags: ['absences'],
+      summary: 'Download the oficio',
+      description:
+        'Needs absence.read. Only the person the absence belongs to and absence.read_detail (RF-AUS-13).',
+      parameters: [absenceId],
+      responses: {
+        200: { description: 'The file.' },
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse('None, or not visible to the caller.', 'That absence has no document.'),
+        503: errorResponse('The file store did not answer.', 'File storage is unavailable.'),
+      },
+    },
     post: {
       tags: ['absences'],
       summary: 'Attach the oficio',

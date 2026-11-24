@@ -449,6 +449,70 @@ describe("/api/projects", () => {
       assert.ok(logs.some((l) => l.action === "record_deleted"));
     });
 
+    test("deleting releases its requests and takes the rest with it, recoverably (RF-PRY-01)", async () => {
+      const schema = await createSchema("liberadas");
+      const [request] = await sql(
+        `insert into requests (schema_version_id, title, status_id) values ($1,'Vuelve',$2) returning id`,
+        [schema.schema_version_id, statusId],
+      );
+      const area = await createArea("Con etapas");
+      const made = await project({ requestIds: [request.id], stages: [{ areaId: area.id, title: "Etapa" }] });
+      const sub = await server.post("/api/documents/folders", { token: adminToken, body: { parentId: made.folderId, name: "sub" } });
+      const quote = await server.post(`/api/finance/projects/${made.id}/quotes`, { token: adminToken, body: { amount: 1 } });
+      assert.equal(quote.status, 201);
+
+      assert.equal((await server.delete(`/api/projects/${made.id}`, { token: adminToken })).status, 200);
+
+      const back = (await server.get(`/api/requests/${request.id}`, { token: adminToken })).body.request;
+      assert.equal(back.projectId, null);
+      const [stage] = await sql("select status from project_stages where id = $1", [made.stages[0].id]);
+      assert.equal(stage.status, "cancelled");
+      const folders = await sql("select deleted_at from folders where id = any($1)", [[made.folderId, sub.body.folder.id]]);
+      assert.ok(folders.length === 2 && folders.every((row) => row.deleted_at !== null));
+      const [gone] = await sql("select deleted_at from quotes where id = $1", [quote.body.quote.id]);
+      assert.ok(gone.deleted_at !== null);
+      assert.ok((await logsFor("quotes", quote.body.quote.id)).some((l) => l.action === "quote_deleted"));
+
+      const again = await create({ title: "Otra vez", requestIds: [request.id] });
+      assert.equal(again.status, 201);
+      assert.deepEqual(again.body.project.requests.map((row) => row.id), [request.id]);
+    });
+
+    test("creating over requests takes request.write, as converting them does", async () => {
+      const schema = await createSchema("ajenas");
+      const [request] = await sql(
+        `insert into requests (schema_version_id, title, status_id) values ($1,'Ajena',$2) returning id`,
+        [schema.schema_version_id, statusId],
+      );
+      await grantWorker(["project.read", "project.write"]);
+      try {
+        assert.equal((await create({ title: "X", requestIds: [request.id] }, workerToken)).status, 403);
+        assert.equal((await create({ title: "X", requestIds: [] }, workerToken)).status, 201);
+      } finally {
+        await grantWorker([]);
+      }
+      const [row] = await sql("select project_id from requests where id = $1", [request.id]);
+      assert.equal(row.project_id, null);
+    });
+
+    test("another project's calendar collection is refused", async () => {
+      const [collection] = await sql("insert into event_collections (key, name) values ('zz', 'zz') returning id");
+      const own = await create({ title: "Dueño", eventCollectionId: collection.id });
+      assert.equal(own.status, 201);
+      assert.equal((await create({ title: "Otro", eventCollectionId: collection.id })).status, 409);
+    });
+
+    test("dates, requester and description can be cleared, and what is not sent stays", async () => {
+      const made = await project({ requester: "Rectoría", startsOn: "2026-01-01", dueOn: "2026-02-01" });
+      const patch = async (body) => (await server.patch(`/api/projects/${made.id}`, { token: adminToken, body }));
+      const cleared = await patch({ requester: "", dueOn: null });
+      assert.equal(cleared.status, 200);
+      assert.equal(cleared.body.project.requester, null);
+      assert.equal(cleared.body.project.dueOn, null);
+      assert.equal(cleared.body.project.startsOn, "2026-01-01");
+      assert.equal((await patch({})).status, 400);
+    });
+
     test("POST /:id/requests links later and refuses a converted one", async () => {
       const made = await project();
       const schema = await createSchema("mas_solicitudes");

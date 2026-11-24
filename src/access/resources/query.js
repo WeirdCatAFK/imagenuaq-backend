@@ -583,7 +583,7 @@ class Query {
     return this.#findCatalog(
       `select id, name from areas
         where ($1::bigint is not null and id = $1::bigint)
-           or ($1::bigint is null and lower(name) = lower($2))
+           or ($1::bigint is null and lower(name) = lower($2) and is_active)
         order by id
         limit 1`,
       ref,
@@ -800,9 +800,11 @@ class Query {
     return row;
   }
 
-  async getAreas() {
+  /** The areas in use, or with `includeRetired` every one. */
+  async getAreas({ includeRetired = false } = {}) {
     const rows = await this.#rows(
-      "select id, name, description from areas order by name",
+      "select id, name, description, is_active from areas where is_active or $1::boolean order by name",
+      [includeRetired],
     );
     return rows;
   }
@@ -813,21 +815,67 @@ class Query {
         set name = $2,
             description = $3
         where id = $1
-        returning id, name, description`,
+        returning id, name, description, is_active`,
       [areaId, name, description],
     );
     return row ?? null;
   }
 
+  /** Retires an area, or with `isActive` brings it back. */
+  async setAreaActive(areaId, isActive) {
+    const [row] = await this.#rows(
+      `update areas set is_active = $2 where id = $1
+        returning id, name, description, is_active`,
+      [areaId, isActive],
+    );
+    return row ?? null;
+  }
+
+  /** What still uses an area, as counts: an area with none of it may be retired (RF-USR-09). */
+  async areaUsage(areaId) {
+    const [row] = await this.#rows(
+      `select
+        (select count(*) from users u
+          where u.deleted_at is null
+            and (u.primary_area_id = $1 or exists (
+              select 1 from area_members am where am.user_id = u.id and am.area_id = $1)))::int as people,
+        (select count(*) from area_hierarchy h
+           join areas c on c.id = h.child_area_id and c.is_active
+          where h.parent_area_id = $1)::int as sub_areas,
+        (select count(*) from project_stages ps
+           join flow_stages fs on fs.id = ps.flow_stage_id
+           join flow_phases fp on fp.id = fs.phase_id
+           join projects p on p.id = fp.project_id
+          where fs.area_id = $1 and p.deleted_at is null
+            and ps.status in ('pending', 'active', 'waiting_external'))::int as stages,
+        (select count(*) from requests r
+          where r.deleted_at is null and r.project_id is null
+            and (r.area_id = $1 or exists (
+              select 1 from flow_phases fp
+                join flow_stages fs on fs.phase_id = fp.id
+               where fp.request_id = r.id and fs.area_id = $1)))::int as requests,
+        (select count(*) from workflows w
+          where w.is_active and exists (
+            select 1 from flow_phases fp
+              join flow_stages fs on fs.phase_id = fp.id
+             where fs.area_id = $1
+               and fp.workflow_version_id = (
+                 select v.id from workflow_versions v
+                  where v.workflow_id = w.id order by v.version desc limit 1)))::int as templates`,
+      [areaId],
+    );
+    return row;
+  }
+
   /**
-   * Hard delete; `areas` has no `deleted_at`. The 23503 raised while people are still
-   * assigned is the refusal, which orchestration turns into a 409.
+   * Hard delete; `areas` has no `deleted_at`. The 23503 an area with history raises tells
+   * orchestration to retire it instead.
    */
   async deleteArea(areaId) {
     const [row] = await this.#rows(
       `delete from areas
         where id = $1
-        returning id, name, description`,
+        returning id, name, description, is_active`,
       [areaId],
     );
     return row ?? null;
@@ -835,7 +883,7 @@ class Query {
 
   async getAreaById(areaId) {
     const [row] = await this.#rows(
-      "select id, name, description from areas where id = $1",
+      "select id, name, description, is_active from areas where id = $1",
       [areaId],
     );
     return row ?? null;
@@ -927,6 +975,79 @@ class Query {
       [userId, areaId],
     );
     return row?.is_member === 1;
+  }
+
+  /** Whether `userId` leads `areaId` or any area above it (RF-USR-04). */
+  async leadsArea(userId, areaId) {
+    const [row] = await this.#rows(
+      `with recursive up as (
+           select $2::bigint as id
+         union all
+           select h.parent_area_id
+             from area_hierarchy h
+             join up on up.id = h.child_area_id
+       ) cycle id set is_cycle using path
+       select exists (
+         select 1
+           from up
+           join area_members am on am.area_id = up.id
+          where not up.is_cycle and am.user_id = $1::bigint and am.is_area_leader
+       ) as leads`,
+      [userId, areaId],
+    );
+    return row.leads;
+  }
+
+  /** The ids of the areas `userId` leads and of those below them (RF-USR-04). */
+  async areasUnder(userId) {
+    const rows = await this.#rows(
+      `with recursive down as (
+           select area_id as id from area_members where user_id = $1 and is_area_leader
+         union all
+           select h.child_area_id
+             from area_hierarchy h
+             join down on down.id = h.parent_area_id
+       ) cycle id set is_cycle using path
+       select distinct id from down where not is_cycle`,
+      [userId],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  /**
+   * Whether `userId` takes part in a project (RF-USR-06): created it, holds one of its stages, is in
+   * an area with a stage in it, or leads an area above one of those (RF-USR-04).
+   */
+  async takesPartInProject(userId, projectId) {
+    const [row] = await this.#rows(
+      `with recursive stage_areas as (
+           select distinct fs.area_id as id
+             from flow_phases fp
+             join flow_stages fs on fs.phase_id = fp.id
+            where fp.project_id = $2::bigint
+       ), up as (
+           select id from stage_areas
+         union all
+           select h.parent_area_id
+             from area_hierarchy h
+             join up on up.id = h.child_area_id
+       ) cycle id set is_cycle using path
+       select exists (select 1 from projects where id = $2::bigint and created_by = $1::bigint)
+           or exists (select 1
+                        from flow_phases fp
+                        join flow_stages fs on fs.phase_id = fp.id
+                        join project_stages ps on ps.flow_stage_id = fs.id
+                       where fp.project_id = $2::bigint and ps.assigned_to = $1::bigint)
+           or exists (select 1
+                        from area_members am
+                       where am.user_id = $1::bigint and am.area_id in (select id from stage_areas))
+           or exists (select 1
+                        from up
+                        join area_members am on am.area_id = up.id
+                       where not up.is_cycle and am.user_id = $1::bigint and am.is_area_leader) as part`,
+      [userId, projectId],
+    );
+    return row.part;
   }
 
   /** One area's members, leaders first then alphabetical. */
@@ -1033,11 +1154,12 @@ class Query {
                     when $1::bigint is null then h.child_area_id is null
                     else a.id = $1::bigint
                   end
+              and a.is_active
          union all
            select a.id, a.name, a.description, h.parent_area_id, t.depth + 1
              from tree t
              join area_hierarchy h on h.parent_area_id = t.id
-             join areas a on a.id = h.child_area_id
+             join areas a on a.id = h.child_area_id and a.is_active
        ) cycle id set is_cycle using path
        select id, name, description, parent_area_id, depth
          from tree
@@ -1822,26 +1944,30 @@ class Query {
     );
   }
 
-  /** Only the keys the caller sent; the row is merged in orchestration. */
+  /** Only the keys the caller sent. Those a project may be without are cleared by null and left by undefined. */
   async updateProject(projectId, {
-    title = null, description = null, requester = null, priority = null,
-    hasCost = null, carriedOver = null, startsOn = null, dueOn = null, key = null, noFinance = null,
+    title = null, description, requester, priority = null,
+    hasCost = null, carriedOver = null, startsOn, dueOn, key = null, noFinance = null,
   }) {
     const [row] = await this.#rows(
       `update projects set
         key          = coalesce($2, key),
         title        = coalesce($3, title),
-        description  = coalesce($4, description),
-        requester    = coalesce($5, requester),
+        description  = case when $12::boolean then $4::text else description end,
+        requester    = case when $13::boolean then $5::text else requester end,
         priority     = coalesce($6, priority),
         has_cost     = coalesce($7, has_cost),
         carried_over = coalesce($8, carried_over),
-        starts_on    = coalesce($9::date, starts_on),
-        due_on       = coalesce($10::date, due_on),
+        starts_on    = case when $14::boolean then $9::date else starts_on end,
+        due_on       = case when $15::boolean then $10::date else due_on end,
         no_finance   = coalesce($11::boolean, no_finance)
       where id = $1 and deleted_at is null
       returning *`,
-      [projectId, key, title, description, requester, priority, hasCost, carriedOver, startsOn, dueOn, noFinance],
+      [
+        projectId, key, title, description ?? null, requester ?? null, priority, hasCost, carriedOver,
+        startsOn ?? null, dueOn ?? null, noFinance,
+        description !== undefined, requester !== undefined, startsOn !== undefined, dueOn !== undefined,
+      ],
     );
     return row ?? null;
   }
@@ -1871,15 +1997,81 @@ class Query {
     return row ?? null;
   }
 
-  async deleteProject(projectId) {
+  /**
+   * Soft-deletes a project with what hangs from it, in one statement. Its requests go back to the
+   * inbox without a project. Its open stages and print orders are cancelled, and its folders, files
+   * and finance records are marked deleted, the last with their own log row (RF-USR-07).
+   *
+   * @returns {Promise<object|null>} The row plus `released`, the ids of the requests it let go.
+   */
+  async deleteProject(projectId, actorId = null) {
+    const records = Object.entries({
+      quotes: "quote_deleted", invoices: "invoice_deleted", oficios: "oficio_deleted",
+      payments: "payment_deleted", receipts: "receipt_deleted",
+    });
+    const finance = records.map(([table, action]) => `
+       gone_${table} as (
+         update ${table} set deleted_at = current_timestamp
+          where project_id in (select id from gone) and deleted_at is null
+         returning *
+       ),
+       ${loggedChange(action, table, "$2", beforeRow(table), { source: `gone_${table}`, name: `logged_${table}` })}`);
+
     const [row] = await this.#rows(
-      `update projects
-        set deleted_at = current_timestamp
-      where id = $1 and deleted_at is null
-      returning *`,
-      [projectId],
+      `with recursive gone as (
+         update projects set deleted_at = current_timestamp
+          where id = $1 and deleted_at is null
+         returning *
+       ),
+       released as (
+         update requests set project_id = null
+          where project_id in (select id from gone)
+         returning id
+       ),
+       cancelled_stages as (
+         update project_stages ps
+            set status = 'cancelled', blocked_reason = null,
+                ended_at = coalesce(ps.ended_at, current_timestamp)
+           from flow_stages fs, flow_phases fp
+          where fs.id = ps.flow_stage_id and fp.id = fs.phase_id
+            and fp.project_id in (select id from gone)
+            and ps.status in ('pending', 'active', 'waiting_external')
+         returning ps.id
+       ),
+       cancelled_prints as (
+         update print_orders set status = 'cancelled'
+          where project_id in (select id from gone) and status in ('pending', 'in_progress')
+         returning id
+       ),
+       subtree as (
+         select f.id from folders f
+          where f.id in (select folder_id from gone) and f.deleted_at is null
+         union all
+         select f.id from folders f join subtree s on f.parent_id = s.id where f.deleted_at is null
+       ),
+       gone_files as (
+         update files set deleted_at = current_timestamp
+          where folder_id in (select id from subtree) and deleted_at is null
+         returning id
+       ),
+       gone_folders as (
+         update folders set deleted_at = current_timestamp
+          where id in (select id from subtree)
+         returning id
+       ),${finance.join(",")}
+       select gone.*, coalesce((select array_agg(id) from released), '{}') as released from gone`,
+      [projectId, actorId],
     );
     return row ?? null;
+  }
+
+  /** Whether some project keeps its events in this calendar collection. */
+  async isProjectCollection(collectionId) {
+    const [row] = await this.#rows(
+      `select exists (select 1 from projects where event_collection_id = $1) as taken`,
+      [collectionId],
+    );
+    return row.taken;
   }
 
   /** Links unconverted requests to an existing project (RF-PRY-01). */
@@ -1982,7 +2174,7 @@ class Query {
    * @returns {Promise<{ stage: object, definition: object|null }|null>}
    */
   async updateProjectStage(stageId, {
-    title = null, status = null, blockedReason = null, assignedTo = null, clearBlocked = false,
+    title = null, status = null, blockedReason = null, assignedTo, clearBlocked = false,
     inputs = null, outputs = null,
     inputNote, outputNote, estimatedDays,
   }) {
@@ -2007,7 +2199,7 @@ class Query {
         update project_stages set
           status         = coalesce($3, status),
           blocked_reason = case when $6 then null else coalesce($4, blocked_reason) end,
-          assigned_to    = coalesce($5::bigint, assigned_to),
+          assigned_to    = case when $16::boolean then $5::bigint else assigned_to end,
           started_at     = case
                              when started_at is null and coalesce($3, status) = 'active'
                              then current_timestamp else started_at
@@ -2025,13 +2217,13 @@ class Query {
         (select to_json(definition.*) from definition) as definition
       from execution`,
       [
-        stageId, title, status, blockedReason, assignedTo, clearBlocked,
+        stageId, title, status, blockedReason, assignedTo ?? null, clearBlocked,
         inputs === null ? null : JSON.stringify(inputs),
         outputs === null ? null : JSON.stringify(outputs),
         inputNote !== undefined, inputNote ?? null,
         outputNote !== undefined, outputNote ?? null,
         estimatedDays !== undefined, estimatedDays ?? null,
-        definitionChanged,
+        definitionChanged, assignedTo !== undefined,
       ],
     );
     return row ?? null;
@@ -4124,9 +4316,10 @@ class Query {
   async areasHandedOutBy(userId) {
     return this.#rows(
       `select a.id, a.name from areas a
-        where $1::bigint is null
-           or exists (select 1 from area_members am
-                       where am.area_id = a.id and am.user_id = $1 and am.is_area_leader)
+        where a.is_active
+          and ($1::bigint is null
+               or exists (select 1 from area_members am
+                           where am.area_id = a.id and am.user_id = $1 and am.is_area_leader))
         order by a.name`,
       [userId],
     );
@@ -5372,6 +5565,33 @@ class Query {
     );
   }
 
+  /**
+   * Creates the balances a person is due in a cycle and has no row for: a copy of their contract
+   * type's cap valid on `on` (RF-AUS-04), with what the absences already authorised in that cycle
+   * consumed. With `absenceTypeId`, only that type's.
+   */
+  async ensureBalances(userId, { cycleStart, cycleEnd, on, absenceTypeId = null }) {
+    await this.#rows(
+      `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted, used)
+       select u.id, t.id, $2::date, $3::date, c.amount,
+              coalesce((
+                select sum(greatest(1, ceil(extract(epoch from (e.ends_at - e.starts_at)) / 86400)))
+                  from absences a
+                  join events e on e.id = a.event_id
+                  join event_participants ep on ep.event_id = e.id and ep.user_id = u.id
+                 where a.absence_type_id = t.id and a.status in ('approved', 'taken') and e.all_day
+                   and e.starts_at >= $2::date and e.starts_at < $3::date + 1), 0)
+         from users u
+         join contract_type_entitlements c on c.contract_type_id = u.contract_type_id
+         join absence_types t on t.id = c.absence_type_id and t.consumes_balance
+        where u.id = $1::bigint
+          and c.valid_from <= $4::date and (c.valid_to is null or c.valid_to >= $4::date)
+          and ($5::bigint is null or t.id = $5::bigint)
+       on conflict (user_id, absence_type_id, cycle_start) do nothing`,
+      [userId, cycleStart, cycleEnd, on, absenceTypeId],
+    );
+  }
+
   async upsertBalance(userId, absenceTypeId, cycleStart, cycleEnd, granted) {
     const [row] = await this.#rows(
       `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted)
@@ -5382,17 +5602,6 @@ class Query {
       [userId, absenceTypeId, cycleStart, cycleEnd, granted],
     );
     return row;
-  }
-
-  /** Adds `delta` to `used`; negative to restore on cancellation. */
-  async adjustBalanceUsed(userId, absenceTypeId, cycleStart, delta) {
-    const [row] = await this.#rows(
-      `update leave_balances set used = used + $4
-        where user_id = $1 and absence_type_id = $2 and cycle_start = $3::date
-       returning *`,
-      [userId, absenceTypeId, cycleStart, delta],
-    );
-    return row ?? null;
   }
 
   /**
@@ -5482,9 +5691,12 @@ class Query {
     return row ?? null;
   }
 
-  /** Absences filtered by user, area, status and type. */
+  /**
+   * Absences, newest first. With `viewerId`, only that person's own and everyone's `approved` and
+   * `taken` ones, which is what availability is (RF-AUS-12).
+   */
   async listAbsences({ userId = null, areaId = null, status = null, absenceTypeId = null,
-                        limit = 50, offset = 0 } = {}) {
+                        viewerId = null, limit = 50, offset = 0 } = {}) {
     return this.#rows(
       `select a.event_id, a.reason, a.status, a.absence_type_id, a.document_file_id,
               a.approved_by, a.approved_at, a.created_at,
@@ -5502,41 +5714,54 @@ class Query {
           and ($2::bigint is null or ep.area_id = $2::bigint)
           and ($3::text is null or a.status = $3::text)
           and ($4::bigint is null or a.absence_type_id = $4::bigint)
+          and ($7::bigint is null or ep.user_id = $7::bigint or a.status in ('approved', 'taken'))
         order by a.created_at desc, a.event_id desc
         limit $5 offset $6`,
-      [userId, areaId, status, absenceTypeId, limit, offset],
+      [userId, areaId, status, absenceTypeId, limit, offset, viewerId],
     );
   }
 
-  /** Transitions an absence's status and records the change in one statement. */
-  async updateAbsenceStatus(eventId, { status, changedBy, note, approvedBy, approvedAt, documentFileId }) {
+  /**
+   * Transitions an absence out of `from`, with its history row and its effect on the balance, in one
+   * statement. Null when it was no longer in `from`, so two decisions at once cannot both count.
+   */
+  async updateAbsenceStatus(eventId, {
+    from, status, changedBy, note = null, approvedBy = null, approvedAt = null,
+    balanceDelta = 0, cycleStart = null,
+  }) {
     const [row] = await this.#rows(
       `with changed as (
          update absences set status = $2,
            approved_by = coalesce($4::bigint, approved_by),
-           approved_at = coalesce($5::timestamptz, approved_at),
-           document_file_id = coalesce($7::bigint, document_file_id)
-         where event_id = $1
+           approved_at = coalesce($5::timestamptz, approved_at)
+         where event_id = $1 and status = $7
          returning *
        ),
        hist as (
          insert into absence_status_history (event_id, status, changed_by, note)
-         values ($1, $2, $3::bigint, $6)
+         select event_id, $2, $3::bigint, $6 from changed
+       ),
+       balance as (
+         update leave_balances lb set used = greatest(0, lb.used + $8::numeric)
+           from changed c
+           join event_participants p on p.event_id = c.event_id
+          where $8::numeric <> 0 and lb.user_id = p.user_id
+            and lb.absence_type_id = c.absence_type_id and lb.cycle_start = $9::date
        )
        select changed.*, e.starts_at, e.ends_at, e.all_day,
               ep.user_id, ep.area_id
          from changed
          join events e on e.id = changed.event_id
          join event_participants ep on ep.event_id = changed.event_id`,
-      [eventId, status, changedBy, approvedBy, approvedAt, note, documentFileId ?? null],
+      [eventId, status, changedBy, approvedBy, approvedAt, note, from, balanceDelta, cycleStart],
     );
     return row ?? null;
   }
 
-  /** Finds the system folder for absence documents by name. */
+  /** The system folder for absence documents, by its key. */
   async getAbsenceDocumentFolder() {
     const [row] = await this.#rows(
-      `select id from folders where name = 'Oficios de ausencia' and parent_id is null and deleted_at is null limit 1`,
+      `select id from folders where system_key = 'absence_documents' and deleted_at is null`,
       [],
     );
     return row ?? null;
@@ -5548,28 +5773,6 @@ class Query {
       `update absences set document_file_id = $2 where event_id = $1`,
       [eventId, fileId],
     );
-  }
-
-  /** Deletes a requested absence and its event. Null when missing or not in requested status. */
-  async deleteAbsence(eventId) {
-    const [row] = await this.#rows(
-      `with guard as (
-         select event_id from absences where event_id = $1 and status = 'requested'
-       ),
-       del_hist as (
-         delete from absence_status_history where event_id = (select event_id from guard)
-       ),
-       del_abs as (
-         delete from absences where event_id = (select event_id from guard)
-       ),
-       del_part as (
-         delete from event_participants where event_id = (select event_id from guard)
-       )
-       delete from events where id = (select event_id from guard)
-       returning id`,
-      [eventId],
-    );
-    return row ?? null;
   }
 
   async absenceStatusHistory(eventId) {

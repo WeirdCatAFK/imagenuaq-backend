@@ -2,6 +2,7 @@
 // each project is still missing (RF-FIN-01 to RF-FIN-18). No record has stages: it is uploaded, and
 // finance asks for a correction when it is wrong (DATAMODEL §2.20). Every write logs itself in the same statement.
 import query from "../resources/query.js";
+import { requirePart } from "./projectAccess.js";
 import notifications from "./notifications.js";
 import { currentActor } from "../../utils/context.js";
 import { ApiError } from "../../utils/ApiError.js";
@@ -178,6 +179,16 @@ function optionalChoice(value, field, allowed) {
   if (value === undefined || value === null || value === "") return null;
   if (!allowed.includes(value)) throw ApiError.badRequest(`${field} must be one of: ${allowed.join(", ")}.`);
   return value;
+}
+
+/**
+ * Quotes and invoices belong to whoever takes part in the project and to finance (RF-USR-06).
+ *
+ * @throws {ApiError} 403
+ */
+async function requireUpload(projectId) {
+  const codes = await query.getRolePermissionCodes(currentActor().roleId);
+  if (!codes.includes("finance.write")) await requirePart(projectId);
 }
 
 /** The actor's id; finance writes are always someone's. */
@@ -380,6 +391,7 @@ class Finance {
    */
   async createQuote(projectId, input) {
     const id = await this.#liveProject(projectId);
+    await requireUpload(id);
     const fields = readFields(input, QUOTE_FIELDS);
     await this.#checkReferences(id, fields);
     const row = await query.createQuote({ ...fields, project_id: id, created_by: actorId() }, actorId());
@@ -389,6 +401,7 @@ class Finance {
   /** Corrects a quote, answering any pending correction request. @throws {ApiError} 400, 404 */
   async updateQuote(quoteId, input) {
     const quote = await this.getQuote(quoteId);
+    await requireUpload(quote.projectId);
     const fields = readFields(input, QUOTE_FIELDS, { partial: true });
     await this.#checkReferences(quote.projectId, fields);
     const row = await query.updateQuote(quote.id, { ...fields, ...CORRECTION_CLEARED }, { actorId: actorId() });
@@ -399,6 +412,7 @@ class Finance {
   /** @throws {ApiError} 404, 409 while an invoice points at it. */
   async deleteQuote(quoteId) {
     const quote = await this.getQuote(quoteId);
+    await requireUpload(quote.projectId);
     const row = await query.updateQuote(quote.id, { deleted_at: new Date().toISOString() }, {
       action: "quote_deleted",
       actorId: actorId(),
@@ -433,6 +447,7 @@ class Finance {
    */
   async createInvoice(projectId, input) {
     const id = await this.#liveProject(projectId);
+    await requireUpload(id);
     const fields = readFields(input, INVOICE_FIELDS);
     await this.#checkReferences(id, fields);
     const row = await uniquely(
@@ -449,6 +464,7 @@ class Finance {
    */
   async updateInvoice(invoiceId, input) {
     const invoice = await this.getInvoice(invoiceId);
+    await requireUpload(invoice.projectId);
     const fields = readFields(input, INVOICE_FIELDS, { partial: true });
     await this.#checkReferences(invoice.projectId, fields);
     const row = await uniquely(
@@ -462,6 +478,7 @@ class Finance {
   /** @throws {ApiError} 404 */
   async deleteInvoice(invoiceId) {
     const invoice = await this.getInvoice(invoiceId);
+    await requireUpload(invoice.projectId);
     const row = await query.updateInvoice(invoice.id, { deleted_at: new Date().toISOString() }, {
       action: "invoice_deleted",
       actorId: actorId(),

@@ -83,6 +83,13 @@ describe("GET /api/requesters", () => {
     ]);
   });
 
+  test("whoever captures projects reads them without request.read", async () => {
+    assert.equal((await server.get("/api/requesters", { token: workerToken })).status, 403);
+    await grantWorker(["project.write"]);
+    assert.equal((await server.get("/api/requesters", { token: workerToken })).status, 200);
+    await grantWorker([]);
+  });
+
   test("matches by prefix, case-insensitively", async () => {
     await addRequest("Facultad de Química");
     await addRequest("Rectoría");
