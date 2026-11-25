@@ -282,19 +282,28 @@ class Absences {
   }
 
   /**
-   * Creates or updates an individual balance for RF-AUS-05 exceptions (e.g. seniority days).
+   * Sets what a person is granted of a type in the calendar year of `cycleStart`, for RF-AUS-05
+   * exceptions such as seniority days. What they used is kept, or counted when the balance is new.
    *
-   * @throws {ApiError} 400
+   * @throws {ApiError} 400, 404
    */
   async setBalance(userId, input) {
     const uid = requireId(userId, "userId");
     const atId = requireId(input?.absenceTypeId, "absenceTypeId");
-    const cycleStart = requireDate(input?.cycleStart, "cycleStart");
-    const cycleEnd = requireDate(input?.cycleEnd, "cycleEnd");
+    const year = requireDate(input?.cycleStart, "cycleStart").slice(0, 4);
     const granted = requireAmount(input?.granted, "granted");
-    if (cycleEnd < cycleStart) throw ApiError.badRequest("cycleEnd must not be before cycleStart.");
-    const row = await query.upsertBalance(uid, atId, cycleStart, cycleEnd, granted);
-    return shapeBalance(row);
+    const note = optionalText(input?.note, "note", TEXT_MAX);
+    const cycleStart = `${year}-01-01`;
+    const before = await query.getBalance(uid, atId, cycleStart);
+    const saved = await query.upsertBalance(uid, atId, { cycleStart, cycleEnd: `${year}-12-31`, granted, note });
+    if (!saved) throw ApiError.notFound("No such person, or that type does not draw on a balance.");
+    await events.emit({
+      action: "balance_adjusted",
+      target: { table: "leave_balances", id: saved.id },
+      before: before && { granted: Number(before.granted) },
+      after: { granted: Number(saved.granted) },
+    });
+    return shapeBalance(await query.getBalance(uid, atId, cycleStart));
   }
 
   /**

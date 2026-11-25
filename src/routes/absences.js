@@ -37,6 +37,10 @@ router.get("/balances/:id", requirePermission("absence.read"), async (req, res) 
   res.json({ balances: await absences.listBalances(idParam(req, "id", "user id")) });
 });
 
+router.put("/balances/:id", requirePermission("absence.manage", "absence.read_detail"), async (req, res) => {
+  res.json({ balance: await absences.setBalance(idParam(req, "id", "user id"), req.body ?? {}) });
+});
+
 router.get("/", requirePermission("absence.read"), async (req, res) => {
   res.json(await absences.list(req.query));
 });

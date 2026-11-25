@@ -217,6 +217,18 @@ const VEHICLE_BOOKING_COLUMNS = `vb.id, vb.vehicle_id, v.name as vehicle_name, v
   vb.destination, vb.project_id, bp.key as project_key, bp.title as project_title, vb.notes,
   vb.starts_at, vb.ends_at, vb.booked_by, bu.full_name as booked_by_name, vb.created_at`;
 
+/**
+ * The days of a type a person's authorised absences took in the cycle `$2` to `$3`. Expects aliases
+ * `u` (users) and `t` (absence_types).
+ */
+const CONSUMED_IN_CYCLE = `coalesce((
+  select sum(greatest(1, ceil(extract(epoch from (e.ends_at - e.starts_at)) / 86400)))
+    from absences a
+    join events e on e.id = a.event_id
+    join event_participants ep on ep.event_id = e.id and ep.user_id = u.id
+   where a.absence_type_id = t.id and a.status in ('approved', 'taken') and e.all_day
+     and e.starts_at >= $2::date and e.starts_at < $3::date + 1), 0)`;
+
 class Query {
   async #rows(sql, params) {
     const result = await getStore().query(sql, { params, objectRows: true });
@@ -5574,13 +5586,7 @@ class Query {
     await this.#rows(
       `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted, used)
        select u.id, t.id, $2::date, $3::date, c.amount,
-              coalesce((
-                select sum(greatest(1, ceil(extract(epoch from (e.ends_at - e.starts_at)) / 86400)))
-                  from absences a
-                  join events e on e.id = a.event_id
-                  join event_participants ep on ep.event_id = e.id and ep.user_id = u.id
-                 where a.absence_type_id = t.id and a.status in ('approved', 'taken') and e.all_day
-                   and e.starts_at >= $2::date and e.starts_at < $3::date + 1), 0)
+              ${CONSUMED_IN_CYCLE}
          from users u
          join contract_type_entitlements c on c.contract_type_id = u.contract_type_id
          join absence_types t on t.id = c.absence_type_id and t.consumes_balance
@@ -5592,16 +5598,19 @@ class Query {
     );
   }
 
-  async upsertBalance(userId, absenceTypeId, cycleStart, cycleEnd, granted) {
+  /** Grants a person their own amount (RF-AUS-05). Null when either id is unknown or the type has no balance. */
+  async upsertBalance(userId, absenceTypeId, { cycleStart, cycleEnd, granted, note }) {
     const [row] = await this.#rows(
-      `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted)
-       values ($1, $2, $3::date, $4::date, $5)
+      `insert into leave_balances (user_id, absence_type_id, cycle_start, cycle_end, granted, used, note)
+       select u.id, t.id, $2::date, $3::date, $4::numeric, ${CONSUMED_IN_CYCLE}, $5::text
+         from users u, absence_types t
+        where u.id = $1::bigint and t.id = $6::bigint and t.consumes_balance
        on conflict (user_id, absence_type_id, cycle_start)
-       do update set granted = excluded.granted
+       do update set granted = excluded.granted, note = excluded.note
        returning *`,
-      [userId, absenceTypeId, cycleStart, cycleEnd, granted],
+      [userId, cycleStart, cycleEnd, granted, note, absenceTypeId],
     );
-    return row;
+    return row ?? null;
   }
 
   /**

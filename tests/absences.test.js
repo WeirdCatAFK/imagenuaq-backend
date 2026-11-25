@@ -504,6 +504,35 @@ describe("/api/absences", () => {
       assert.equal((await move(absence.eventId, "approved")).status, 200);
     });
 
+    test("one person is granted their own amount, keeping what they used (RF-AUS-05)", async () => {
+      const adjust = (body, token = adminToken) =>
+        server.put(`/api/absences/balances/${workerUser.id}`, {
+          token, body: { absenceTypeId: type.id, cycleStart: `${year}-01-01`, granted: 8, ...body },
+        });
+      const { absence } = await request("06-01", "06-03");
+      await move(absence.eventId, "approved");
+      const changed = await adjust({ note: "Antigüedad" });
+      assert.equal(changed.status, 200);
+      const { granted, used, remaining, note } = changed.body.balance;
+      assert.deepEqual([granted, used, remaining, note], [8, 2, 6, "Antigüedad"]);
+
+      await sql("delete from leave_balances where user_id = $1", [workerUser.id]);
+      await sql("delete from contract_type_entitlements where absence_type_id = $1", [type.id]);
+      assert.equal((await adjust({ cycleStart: `${year}-05-20` })).body.balance.used, 2, "counted without a cap");
+      assert.equal((await mine()).cycleStart, `${year}-01-01`);
+
+      assert.equal((await adjust({}, workerToken)).status, 403);
+      assert.equal((await adjust({}, leadToken)).status, 403);
+      assert.equal((await adjust({ granted: -1 })).status, 400);
+      const { types } = (await server.get("/api/absences/types", { token: adminToken })).body;
+      const free = types.find((t) => t.code === "comision");
+      assert.equal((await adjust({ absenceTypeId: free.id })).status, 404);
+      const logged = await sql(
+        "select 1 from logs l join actions a on a.id = l.action_id where a.code = 'balance_adjusted'",
+      );
+      assert.ok(logged.length >= 2);
+    });
+
     test("two decisions at once count once", async () => {
       const { absence } = await request("06-01", "06-03");
       const both = await Promise.all([move(absence.eventId, "approved"), move(absence.eventId, "approved")]);

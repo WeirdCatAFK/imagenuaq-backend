@@ -7223,6 +7223,16 @@ const EXTRA_SCHEMAS = {
     },
     required: ['absenceTypeId', 'amount', 'validFrom'],
   },
+  SetBalanceRequest: {
+    type: 'object',
+    properties: {
+      absenceTypeId: { type: 'integer', minimum: 1 },
+      cycleStart: { ...DATE, description: 'Any date of the calendar year the balance belongs to.' },
+      granted: AMOUNT,
+      note: { type: ['string', 'null'], maxLength: 4000, description: 'Why it differs from the cap.' },
+    },
+    required: ['absenceTypeId', 'cycleStart', 'granted'],
+  },
   UpdateEntitlementRequest: {
     type: 'object',
     description: 'Only the keys sent change, and at least one is required.',
@@ -7577,6 +7587,25 @@ const EXTRA_PATHS = {
         200: wrapped('One row per absence type and cycle.', 'balances', 'Balance', true),
         401: UNAUTHORIZED,
         403: FORBIDDEN,
+      },
+    },
+    put: {
+      tags: ['absences'],
+      summary: 'Grant one person an amount of their own',
+      description:
+        'Needs absence.manage and absence.read_detail (RF-AUS-05). Creates the balance or changes what it ' +
+        'grants; what was used stays.',
+      parameters: [pathId('id', 'users.id')],
+      requestBody: jsonBody('SetBalanceRequest'),
+      responses: {
+        200: wrapped('The balance as it is now.', 'balance', 'Balance'),
+        400: errorResponse('A missing or malformed field.', 'granted must be a non-negative amount with at most two decimals.'),
+        401: UNAUTHORIZED,
+        403: FORBIDDEN,
+        404: errorResponse(
+          'No such person, or a type without balance.',
+          'No such person, or that type does not draw on a balance.',
+        ),
       },
     },
   },
