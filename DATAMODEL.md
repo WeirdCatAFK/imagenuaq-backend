@@ -1200,13 +1200,13 @@ que el rollback fuera granular:
 
 El diagnóstico se conserva abajo porque explica por qué el esquema quedó como quedó.
 
-### 5.1 Los saldos de días no tenían dimensión de tipo — cerrado
+### 5.1 Los días de ausencia no tenían dimensión de tipo — cerrado
 
 `contract_types.annual_offdays` era un entero y `days_off` una fila por usuario y año.
 Eso no alcanzaba para:
 
 - `RF-AUS-03` — catálogo de **tipos** de ausencia configurable desde la aplicación (nombre,
-  unidad de conteo, tope, vigencia, si descuenta saldo). No existe `absence_types`, así que
+  unidad de conteo, tope, vigencia, si descuenta días). No existe `absence_types`, así que
   `RF-AUS-09` (días institucionales que no descuentan) no se puede ni expresar.
 - `RF-AUS-04` — los topes pertenecen a (esquema de contratación × tipo × **vigencia**), y
   cambiarlos **no debe reescribir el histórico ya consumido**. Un entero mutable sobre
@@ -1216,7 +1216,7 @@ Eso no alcanzaba para:
 - `RF-AUS-14` — el permiso necesita estatus propio (solicitado, autorizado, rechazado,
   cancelado, gozado) con fecha y usuario en cada cambio. `absences` solo tiene
   `approved_by`/`approved_at`: rechazado y cancelado son irrepresentables, y `RF-AUS-06`
-  pide reponer el saldo al cancelar.
+  pide reponer los días al cancelar.
 
 **Cómo se cerró.** `absence_types` es el catálogo configurable de `RF-AUS-03`, con
 `consumes_balance` para los días institucionales de `RF-AUS-09`.
@@ -1338,7 +1338,7 @@ toda consulta sobre la bitácora recordara excluir `target_table = 'absences'` o
 **Lo que sigue pendiente:** `contract_type_entitlements` sigue vacía. Los topes por esquema
 son las cifras del contrato colectivo y no están en ningún documento del repositorio.
 Inventar un número plausible sería peor que dejarlo vacío: por `RF-AUS-04` cada fila afirma
-qué tope estuvo vigente en un periodo, y una equivocada explicaría en silencio saldos ya
+qué tope estuvo vigente en un periodo, y una equivocada explicaría en silencio días ya
 consumidos contra un tope que nunca existió. Es dato operativo que carga control de
 personal, no una migración.
 
@@ -1711,7 +1711,7 @@ un endpoint; lo configurable es `contract_type_entitlements`.
 | `id` | bigint | no | identidad | Llave primaria |
 | `name` | varchar(200) | no | | Único |
 
-### 7.2 CAL / AUS — calendario, ausencias y saldos
+### 7.2 CAL / AUS — calendario, ausencias y días de ausencia
 
 #### `events`
 
@@ -1866,7 +1866,7 @@ Catálogo de tipos de ausencia, configurable desde la aplicación (`RF-AUS-03`).
 | `code` | varchar(50) | no | | Único. `vacaciones`, `permiso_economico`, `incapacidad`, `dia_institucional` |
 | `label` | varchar(200) | no | | Nombre visible |
 | `unit` | varchar(10) | no | | Unidad de conteo: `day` u `hour` |
-| `consumes_balance` | boolean | no | `true` | `false` para días institucionales, que aplican sin descontar saldo (`RF-AUS-09`) |
+| `consumes_balance` | boolean | no | `true` | `false` para días institucionales, que aplican sin descontar días (`RF-AUS-09`) |
 | `requires_document` | boolean | no | `false` | Si exige respaldo documental |
 | `is_active` | boolean | no | `true` | Si se puede seguir solicitando |
 
@@ -1874,7 +1874,8 @@ Catálogo de tipos de ausencia, configurable desde la aplicación (`RF-AUS-03`).
 
 El tope de días por (esquema × tipo × periodo de vigencia). Cambiar un tope **cierra** la
 fila con `valid_to` e inserta otra; nunca se actualiza `amount`, para que lo ya consumido
-siga explicándose con el tope vigente entonces (`RF-AUS-04`).
+siga explicándose con el tope vigente entonces (`RF-AUS-04`). Se capturan en Tipos de contrato, para
+cualquier tipo que descuente días. Cambiar o terminar un tope no altera los días de ausencia ya otorgados.
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |
@@ -1891,10 +1892,13 @@ en DBML: se lee en la migración.
 
 #### `leave_balances`
 
-Saldo por persona, tipo y ciclo. El ciclo es un par de fechas y no un año, porque el
+Días de ausencia por persona, tipo y ciclo. El ciclo es un par de fechas y no un año, porque el
 sindicalizado no corre por año calendario. La fila se crea la primera vez que hace falta —al
 solicitar, al autorizar o al consultar— con el tope del esquema vigente en esa fecha y lo que ya
 consumieron las ausencias autorizadas del ciclo. Por ahora el ciclo es el año calendario.
+
+Ajustar lo otorgado a una persona (`RF-AUS-05`) pide `absence.manage` y `absence.read_detail`, porque
+los días de ausencia de otra persona nombran los tipos que consumió.
 
 | Columna | Tipo | Nulo | Predet. | Descripción |
 | --- | --- | --- | --- | --- |
