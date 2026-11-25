@@ -9,6 +9,9 @@
 # https://github.com/docker/awesome-compose
 services:
   server:
+    # Reinicia solo al encender el servidor o si el proceso se cae (main.js sale si la BD
+    # o el bucket aun no estan listos; el reinicio reintenta hasta que lo esten).
+    restart: unless-stopped
     build:
       context: .
       args:
