@@ -5776,6 +5776,28 @@ class Query {
     return row ?? null;
   }
 
+  /**
+   * Creates the system folder for absence documents, owned by the oldest admin account. A migration
+   * cannot: a folder needs an owner, and a new database has no users. Safe to run twice at once.
+   *
+   * @returns {Promise<{id: number}|null>} Null when there is no admin.
+   */
+  async createAbsenceDocumentFolder() {
+    const [row] = await this.#rows(
+      `insert into folders (parent_id, name, owner_id, system_key)
+       select null, 'Oficios de ausencia', u.id, 'absence_documents'
+         from users u
+         join roles r on r.id = u.role_id
+        where r.name = 'admin' and u.deleted_at is null
+        order by u.id
+        limit 1
+       on conflict (system_key) where system_key is not null do update set deleted_at = null
+       returning id`,
+      [],
+    );
+    return row ?? null;
+  }
+
   /** Links a file to an absence as its backing document. */
   async setAbsenceDocument(eventId, fileId) {
     await this.#rows(

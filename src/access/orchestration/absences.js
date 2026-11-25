@@ -586,7 +586,8 @@ class Absences {
   }
 
   /**
-   * Stores the backing document ("oficio") for an absence and links it.
+   * Stores the backing document ("oficio") for an absence and links it. The first upload creates
+   * the system folder.
    *
    * @throws {ApiError} 400, 404, 503
    */
@@ -597,7 +598,8 @@ class Absences {
     const row = await query.getAbsence(id);
     if (!row) throw ApiError.notFound("Absence not found.");
 
-    const folder = await query.getAbsenceDocumentFolder();
+    const folder =
+      (await query.getAbsenceDocumentFolder()) ?? (await query.createAbsenceDocumentFolder());
     if (!folder) throw ApiError.unavailable("Absence document folder not configured.");
 
     let stored;

@@ -542,11 +542,6 @@ describe("/api/absences", () => {
   });
 
   test("the person opens their own backing document, and a colleague does not (RF-AUS-13)", async () => {
-    await sql(
-      `insert into folders (parent_id, name, owner_id, system_key)
-       values (null, 'Oficios de ausencia', $1, 'absence_documents')`,
-      [adminUser.id],
-    );
     const { types } = (await server.get("/api/absences/types", { token: adminToken })).body;
     const { absence } = (await server.post("/api/absences", {
       token: workerToken,
@@ -561,6 +556,12 @@ describe("/api/absences", () => {
       token: leadToken, raw: Buffer.from("%PDF oficio"), headers: { "content-type": "application/pdf" },
     });
     assert.equal(up.status, 201);
+    const again = await server.post(`${path}?name=oficio-2.pdf`, {
+      token: leadToken, raw: Buffer.from("%PDF oficio 2"), headers: { "content-type": "application/pdf" },
+    });
+    assert.equal(again.status, 201);
+    const folders = await sql(`select owner_id from folders where system_key = 'absence_documents'`);
+    assert.deepEqual(folders.map((folder) => Number(folder.owner_id)), [Number(adminUser.id)], "made once, by the first upload");
 
     await createActive({ email: "colega.oficio@uaq.mx", area: area.name });
     const peer = await tokenFor(server, "colega.oficio@uaq.mx");
