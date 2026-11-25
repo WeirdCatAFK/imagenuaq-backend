@@ -198,17 +198,20 @@ class Absences {
 
   /**
    * Closes the current open entitlement and inserts a replacement: RF-AUS-04 says amount is
-   * never updated in place, so consumed history keeps the cap that was in force.
+   * never updated in place, so consumed history keeps the cap that was in force. A null amount
+   * only ends it, and returns null.
    *
-   * @throws {ApiError} 400, 409 on overlapping periods.
+   * @throws {ApiError} 400, 404 when there is no open cap to end, 409 on overlapping periods.
    */
   async setEntitlement(contractTypeId, input) {
     const ctId = requireId(contractTypeId, "contractTypeId");
     const atId = requireId(input?.absenceTypeId, "absenceTypeId");
-    const amount = requireAmount(input?.amount, "amount");
+    const ends = input?.amount === null;
+    const amount = ends ? null : requireAmount(input?.amount, "amount");
     const validFrom = requireDate(input?.validFrom, "validFrom");
     try {
       const current = await query.getEffectiveEntitlement(ctId, atId, validFrom);
+      if (ends && (!current || current.valid_to)) throw ApiError.notFound("No open cap on that date.");
       if (current && !current.valid_to) {
         const dayBefore = new Date(new Date(validFrom).getTime() - 86_400_000).toISOString().slice(0, 10);
         if (dayBefore >= current.valid_from.toISOString().slice(0, 10)) {
@@ -216,9 +219,20 @@ class Absences {
         } else {
           await query.deleteEntitlement(current.id);
         }
+        await events.emit({
+          action: "entitlement_closed",
+          target: { table: "contract_type_entitlements", id: current.id },
+          before: { amount: Number(current.amount), valid_from: asDate(current.valid_from) },
+        });
       }
+      if (ends) return null;
       const row = await query.createEntitlement({
         contract_type_id: ctId, absence_type_id: atId, amount, valid_from: validFrom, valid_to: null,
+      });
+      await events.emit({
+        action: "entitlement_created",
+        target: { table: "contract_type_entitlements", id: row.id },
+        after: { contract_type_id: ctId, absence_type_id: atId, amount: Number(amount), valid_from: validFrom },
       });
       return shapeEntitlement(row);
     } catch (err) {

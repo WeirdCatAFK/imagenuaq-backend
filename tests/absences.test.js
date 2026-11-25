@@ -138,6 +138,35 @@ describe("/api/absences", () => {
       assert.equal(list.status, 200);
       assert.ok(list.body.entitlements.length >= 1);
     });
+
+    test("a null amount ends the cap, keeping what it was (RF-AUS-04)", async () => {
+      const { contractTypes } = (await server.get("/api/contract-types", { token: adminToken })).body;
+      const { types } = (await server.get("/api/absences/types", { token: adminToken })).body;
+      const type = types.find((t) => t.code === "cumpleanos");
+      const path = `/api/contract-types/${contractTypes[0].id}/entitlements`;
+      const set = (amount, validFrom) =>
+        server.post(path, { token: adminToken, body: { absenceTypeId: type.id, amount, validFrom } });
+      const caps = async () =>
+        (await server.get(path, { token: adminToken })).body.entitlements.filter((e) => e.absenceTypeId === type.id);
+      await sql("delete from contract_type_entitlements where absence_type_id = $1", [type.id]);
+      try {
+        assert.equal((await set(undefined, "2026-01-01")).status, 400, "only an explicit null ends it");
+        assert.equal((await set(null, "2026-01-01")).status, 404);
+        assert.equal((await set(1, "2026-01-01")).status, 201);
+        const ended = await set(null, "2026-07-01");
+        assert.deepEqual([ended.status, ended.body.entitlement], [201, null]);
+        assert.deepEqual((await caps()).map((e) => [e.amount, e.validFrom, e.validTo]), [[1, "2026-01-01", "2026-06-30"]]);
+        assert.equal((await set(null, "2026-03-01")).status, 404, "it already has an end");
+        await set(2, "2026-07-01");
+        await set(null, "2026-07-01");
+        assert.equal((await caps()).length, 1, "ended the day it starts, it never was");
+        assert.equal((await server.post(path, {
+          token: workerToken, body: { absenceTypeId: type.id, amount: null, validFrom: "2026-07-01" },
+        })).status, 403);
+      } finally {
+        await sql("delete from contract_type_entitlements where absence_type_id = $1", [type.id]);
+      }
+    });
   });
 
   describe("absence lifecycle", () => {

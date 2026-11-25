@@ -7218,7 +7218,7 @@ const EXTRA_SCHEMAS = {
     type: 'object',
     properties: {
       absenceTypeId: { type: 'integer', minimum: 1 },
-      amount: AMOUNT,
+      amount: { ...AMOUNT, type: ['string', 'null'], description: 'Null ends the cap in force, without a new one.' },
       validFrom: DATE,
     },
     required: ['absenceTypeId', 'amount', 'validFrom'],
@@ -7775,7 +7775,8 @@ const EXTRA_PATHS = {
       summary: 'Set what a scheme grants',
       description:
         'Needs absence.manage. The amount never changes in place: the period in force closes the ' +
-        'day before validFrom and a new one opens, so consumed history keeps its cap (RF-AUS-04).',
+        'day before validFrom and a new one opens, so consumed history keeps its cap (RF-AUS-04). ' +
+        'A null amount only closes it, and the answer carries a null entitlement.',
       parameters: [pathId('id', 'contract_types.id')],
       requestBody: jsonBody('SetEntitlementRequest'),
       responses: {
@@ -7783,6 +7784,7 @@ const EXTRA_PATHS = {
         400: errorResponse('A missing or malformed field.', 'amount must be a non-negative amount with at most two decimals.'),
         401: UNAUTHORIZED,
         403: FORBIDDEN,
+        404: errorResponse('A null amount with nothing to end.', 'No open cap on that date.'),
         409: errorResponse('The period overlaps another.', 'Entitlement periods overlap.'),
       },
     },
