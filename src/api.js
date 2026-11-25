@@ -88,6 +88,12 @@ export const ROUTERS = {
 const RAW_BODY_ROUTES =
   /^\/api\/(documents\/(folders\/\d+\/files|uploads\/[\w-]+\/\d+)|requests\/\d+\/files|forms\/[\w-]+\/files|photos\/folios\/\d+\/files|photos\/uploads\/[\w-]+\/\d+)(\?|$)/;
 
+/**
+ * Proxies whose `X-Forwarded-For` gives `req.ip`: cloudflared on the host and Docker's gateway, both
+ * on private addresses. A public peer's header is ignored. Every per-address limit relies on this.
+ */
+const TRUSTED_PROXIES = ['loopback', 'uniquelocal'];
+
 export default class Api {
   /**
    * Options fall back to the environment, so main.js constructs this with nothing and a
@@ -108,6 +114,7 @@ export default class Api {
     audit.subscribe();
     notifications.subscribe();
 
+    this.app.set('trust proxy', TRUSTED_PROXIES);
     this.app.use(helmet());
     this.app.use(cors({ origin: this.corsOrigin }));
     this.app.use(morgan(this.logFormat));

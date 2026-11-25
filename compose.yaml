@@ -41,8 +41,10 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env (see .env.example)}
       MINIO_DOCUMENTS_BUCKET: ${MINIO_DOCUMENTS_BUCKET:?set MINIO_DOCUMENTS_BUCKET in .env (see .env.example)}
       MINIO_PHOTOS_BUCKET: ${MINIO_PHOTOS_BUCKET:?set MINIO_PHOTOS_BUCKET in .env (see .env.example)}
+    # Loopback only: cloudflared reaches it from the host. Published wider, a caller on the LAN could
+    # send its own X-Forwarded-For and dodge the per-address limits.
     ports:
-      - "${PORT:?set PORT in .env (see .env.example)}:${PORT:?set PORT in .env (see .env.example)}"
+      - "127.0.0.1:${PORT:?set PORT in .env (see .env.example)}:${PORT:?set PORT in .env (see .env.example)}"
     # Wait for the healthchecks, not just for the containers to exist: main.js opens the pool
     # and checks the bucket at once, and refuses to start if either is missing.
     depends_on:
